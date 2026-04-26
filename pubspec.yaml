@@ -1,0 +1,40 @@
+name: qrparty
+description: "A new Flutter project."
+publish_to: 'none'
+version: 1.0.3+4
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  qr_flutter: ^4.1.0
+  url_launcher: ^6.3.2
+  firebase_core: ^2.32.0
+  firebase_auth: ^4.20.0
+  cloud_firestore: ^4.17.5
+  firebase_storage: ^11.7.7
+  firebase_messaging: ^14.9.4
+  mobile_scanner: ^5.2.3
+  image_picker: ^1.1.2
+  flutter_stripe: ^11.4.0
+  cloud_functions: ^4.7.6
+  shared_preferences: ^2.3.2
+  app_links: ^6.0.0
+  receive_sharing_intent: ^1.8.1
+  in_app_purchase: ^3.2.0
+  http: ^1.2.2
+  google_maps_flutter: ^2.6.0
+  google_places_flutter: ^2.0.8
+  gal: ^2.3.0
+  share_plus: ^10.0.0
+  path_provider: ^2.1.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

@@ -1,0 +1,99 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ── EVENT PHOTOS ─────────────────────────────────────────────────────────
+    // Path: events/{eventId}/photos/{filename}
+    // Filenames are written by the app as "{uploaderUid}_{timestamp}.jpg".
+
+    match /events/{eventId}/photos/{filename} {
+
+      // Read is restricted to:
+      //   (a) the event host, or
+      //   (b) any authenticated user who has an RSVP document for this event.
+      allow read: if request.auth != null
+        && (
+          firestore.get(
+            /databases/(default)/documents/events/$(eventId)
+          ).data.hostId == request.auth.uid
+          ||
+          firestore.exists(
+            /databases/(default)/documents/events/$(eventId)/rsvps/$(request.auth.uid)
+          )
+        );
+
+      // Any authenticated user can upload their own photos.
+      // Constraints: image content type · max 10 MB · filename starts with own uid.
+      allow create: if request.auth != null
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size <= 25 * 1024 * 1024
+        && filename.matches(request.auth.uid + '_.*');
+
+      // Delete is allowed for:
+      //   (a) the original uploader (filename starts with their uid), or
+      //   (b) the event host (verified via Firestore).
+      allow delete: if request.auth != null
+        && (
+          filename.matches(request.auth.uid + '_.*')
+          ||
+          firestore.get(
+            /databases/(default)/documents/events/$(eventId)
+          ).data.hostId == request.auth.uid
+        );
+
+      // Updates to existing photo objects are not permitted from the client.
+      allow update: if false;
+    }
+
+    // ── ORGANIZATION LOGOS ───────────────────────────────────────────────────
+    // Path: organizations/{orgId}/logo.{ext}
+    // Logos are public-readable (org.html displays them to unauthed visitors)
+    // and writable only by the org owner, validated against Firestore.
+
+    match /organizations/{orgId}/{filename} {
+      allow read: if true;
+
+      allow write: if request.auth != null
+        && firestore.get(
+          /databases/(default)/documents/organizations/$(orgId)
+        ).data.ownerId == request.auth.uid
+        && (request.resource == null
+            || (request.resource.contentType.matches('image/.*')
+                && request.resource.size <= 5 * 1024 * 1024));
+    }
+
+    // ── MERCH ORDER ASSETS ───────────────────────────────────────────────────
+    // Path: orders/{orderId}/{filename}
+    // Two file types:
+    //   • custom-design.jpg — uploaded by the customer during the order flow
+    //     (before orderId exists in Firestore, so we can't gate on hostId).
+    //     Any signed-in user may upload an image to this path; the Cloud
+    //     Function records the URL on the order doc immediately afterwards.
+    //   • print-file.{svg,png,pdf} — written exclusively by the Cloud
+    //     Function (Admin SDK) via generatePrintFile.
+    // Reads: customer who placed the order, or any admin.
+
+    match /orders/{orderId}/{filename} {
+      allow read: if request.auth != null
+        && (
+          firestore.exists(/databases/(default)/documents/orders/$(orderId))
+            && firestore.get(/databases/(default)/documents/orders/$(orderId)).data.userId == request.auth.uid
+          ||
+          firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.isAdmin == true
+        );
+
+      allow create: if request.auth != null
+        && filename.matches('custom-design\\..*')
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size <= 10 * 1024 * 1024;
+
+      allow update, delete: if false;
+    }
+
+    // Deny everything else by default.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter pub *)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\Klaus\" -Filter \"flutter\" -Recurse -Depth 6 -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq \"flutter\" -or $_.Name -eq \"flutter.bat\" } | Select-Object -First 5 FullName)",
+      "PowerShell(flutter analyze 2>&1)",
+      "Read(//c/flutter/bin/**)",
+      "Read(//c/Users/klaus/flutter/bin/**)",
+      "Bash(find /c -name \"flutter.bat\")",
+      "Bash(export PATH=\"$HOME/flutter/bin:$PATH\")",
+      "Bash(grep -nE '^\\\\s+\\\\\\);$' /c/Users/Klaus/qrparty/lib/screens/business_home_feed_screen.dart)",
+      "Bash(awk -F: '$1 > 369 && $1 < 500 { print }')",
+      "Bash(gcloud --version)",
+      "Bash(gcloud auth *)",
+      "Bash(awk 'NR<=307 || NR>459' /c/Users/Klaus/qrparty/lib/main.dart)",
+      "Read(//tmp/**)",
+      "Bash(cp /tmp/main_trimmed.dart /c/Users/Klaus/qrparty/lib/main.dart)",
+      "Bash(node set-business-plus.js)",
+      "Bash(grep -n \"_AgeRange\\\\|_birthdayAgeRange\\\\|_stepAgeRange\\\\|_ageRangeTile\\\\|_StepKind\\\\.ageRange\\\\|StepKind\\\\\\\\.ageRange\\\\|AgeRangeMeta\" /c/Users/klaus/qrparty/lib/screens/order_merch_screen.dart)",
+      "Bash(adb devices *)",
+      "Bash(\"/c/Users/klaus/AppData/Local/Android/Sdk/platform-tools/adb.exe\" devices *)",
+      "Bash(node -c createMerchOrder.js)",
+      "PowerShell([System.Environment]::SetEnvironmentVariable\\(\"Path\", $env:Path + \";C:\\\\Users\\\\Klaus\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\platform-tools\", [System.EnvironmentVariableTarget]::User\\); Write-Output \"User PATH now ends with:\"; \\([System.Environment]::GetEnvironmentVariable\\(\"Path\", \"User\"\\) -split \";\"\\)[-3..-1])",
+      "Bash(grep -v \"^.*://.*//\")",
+      "Bash(grep -vE \"^.*\\(://|<!--|^[^:]+:[0-9]+:.*//.*$\\)\")"
+    ]
+  }
+}

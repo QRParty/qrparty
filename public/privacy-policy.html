@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — QR Party</title>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,700;0,9..40,900&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --green: #52796F; --green-light: #84A98C; --green-pale: #CAD2C5;
+      --purple: #9C7FD4;
+      --dark: #2D3047; --surface: #F8F7FC; --muted: #8892A4;
+    }
+    body { font-family: 'DM Sans', sans-serif; background: var(--surface); color: var(--dark); min-height: 100vh; }
+
+    /* ── NAV ── */
+    nav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 24px; background: white;
+      border-bottom: 1px solid rgba(0,0,0,.06);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .nav-logo { display: flex; align-items: baseline; gap: 2px; text-decoration: none; }
+    .nav-logo .qr    { font-family: 'Bebas Neue', sans-serif; font-size: 24px; color: var(--dark); letter-spacing: 1px; }
+    .nav-logo .party { font-size: 18px; font-weight: 300; color: var(--purple); }
+    .nav-hint { font-size: 13px; color: var(--muted); }
+
+    /* ── CONTENT ── */
+    .page-wrap {
+      max-width: 720px; margin: 0 auto; padding: 48px 24px 80px;
+    }
+
+    /* Header */
+    .page-header { margin-bottom: 40px; }
+    .page-header h1 {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(40px, 8vw, 60px);
+      letter-spacing: 1px; color: var(--dark);
+      line-height: 1; margin-bottom: 10px;
+    }
+    .page-header h1 span { color: var(--green); }
+    .last-updated {
+      display: inline-block; font-size: 13px; font-weight: 500;
+      color: var(--muted); background: white;
+      border: 1px solid rgba(0,0,0,.08); border-radius: 20px;
+      padding: 4px 14px; margin-top: 8px;
+    }
+
+    /* Sections */
+    .policy-section {
+      background: white; border-radius: 20px;
+      border: 1px solid rgba(0,0,0,.06);
+      padding: 28px 30px; margin-bottom: 16px;
+    }
+    .policy-section h2 {
+      font-size: 13px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 1.5px; color: var(--green);
+      margin-bottom: 16px;
+    }
+    .policy-section h3 {
+      font-size: 15px; font-weight: 700; color: var(--dark);
+      margin: 20px 0 8px;
+    }
+    .policy-section h3:first-of-type { margin-top: 0; }
+    .policy-section p {
+      font-size: 15px; color: #4A5568; line-height: 1.75;
+      margin-bottom: 12px;
+    }
+    .policy-section p:last-child { margin-bottom: 0; }
+    .policy-section ul {
+      list-style: none; margin: 0; padding: 0;
+    }
+    .policy-section ul li {
+      font-size: 15px; color: #4A5568; line-height: 1.75;
+      padding: 4px 0 4px 22px; position: relative;
+    }
+    .policy-section ul li::before {
+      content: ''; position: absolute; left: 0; top: 13px;
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green-pale);
+      border: 2px solid var(--green-light);
+    }
+
+    /* Contact card */
+    .contact-card {
+      background: linear-gradient(135deg, var(--dark) 0%, #3d4266 100%);
+      border-radius: 20px; padding: 28px 30px; margin-bottom: 16px;
+    }
+    .contact-card h2 {
+      font-size: 13px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 1.5px; color: rgba(255,255,255,.5);
+      margin-bottom: 16px;
+    }
+    .contact-card p { font-size: 15px; color: rgba(255,255,255,.75); line-height: 1.75; margin-bottom: 12px; }
+    .contact-card p:last-child { margin-bottom: 0; }
+    .contact-card a { color: var(--green-pale); font-weight: 600; text-decoration: none; }
+    .contact-card a:hover { text-decoration: underline; }
+
+    /* Footer */
+    footer {
+      text-align: center; padding: 32px 24px 24px;
+      font-size: 12px; color: var(--muted);
+      border-top: 1px solid rgba(0,0,0,.06);
+    }
+    footer a { color: var(--green); text-decoration: none; font-weight: 600; }
+  </style>
+</head>
+<body>
+
+<nav>
+  <a class="nav-logo" href="/"><span class="qr">QR</span><span class="party">Party</span></a>
+  <span class="nav-hint">Privacy Policy</span>
+</nav>
+
+<div class="page-wrap">
+
+  <div class="page-header">
+    <h1>Privacy <span>Policy</span></h1>
+    <div class="last-updated">Last updated: April 18, 2026</div>
+  </div>
+
+  <div class="policy-section">
+    <h2>Overview</h2>
+    <p>QR Party ("we," "our," or "us") is committed to protecting your privacy. This Privacy Policy explains how we collect, use, and safeguard your information when you use the QR Party mobile application and website at partywithqr.com.</p>
+  </div>
+
+  <div class="policy-section">
+    <h2>Information We Collect</h2>
+
+    <h3>Account Information</h3>
+    <p>When you create an account, we collect your name, email address, password, and zip code. Your zip code is used to show you local events in your area.</p>
+
+    <h3>Event Data</h3>
+    <p>When you create an event, we collect the event title, date, time, location, description, event type, and any wishlist or checklist items you add.</p>
+
+    <h3>RSVP Data</h3>
+    <p>When you RSVP to an event, we store your RSVP status, the number of guests you are bringing, and any checklist items you claim.</p>
+
+    <h3>Photos</h3>
+    <p>Photos you upload to the Picture Wall are stored securely and are only visible to guests of that specific event.</p>
+
+    <h3>Usage Data</h3>
+    <p>We collect basic usage information to improve the app, including device type and app version.</p>
+  </div>
+
+  <div class="policy-section">
+    <h2>How We Use Your Information</h2>
+    <p>We use your information to:</p>
+    <ul>
+      <li>Create and manage your account</li>
+      <li>Display your events and RSVPs</li>
+      <li>Show you local events near your zip code</li>
+      <li>Send host notifications to event guests</li>
+      <li>Improve the QR Party experience</li>
+    </ul>
+  </div>
+
+  <div class="policy-section">
+    <h2>How We Share Your Information</h2>
+    <p>We do not sell your personal information to third parties.</p>
+    <p>Your name and RSVP status are visible to the host of events you attend and to other guests of those events.</p>
+    <p>Event details marked as public are visible to other QR Party users in your area on the Explore tab.</p>
+    <p>We use Firebase (Google) to store your data securely. Google's privacy policy applies to data stored in Firebase.</p>
+  </div>
+
+  <div class="policy-section">
+    <h2>Data Security</h2>
+    <p>Your data is stored securely using Google Firebase. We use industry-standard security measures to protect your information.</p>
+  </div>
+
+  <div class="policy-section">
+    <h2>Your Rights</h2>
+    <p>You can:</p>
+    <ul>
+      <li>Update your profile information in the Settings screen</li>
+      <li>Delete your account by contacting us at privacy@partywithqr.com</li>
+      <li>Request a copy of your data by contacting us</li>
+    </ul>
+  </div>
+
+  <div class="policy-section">
+    <h2>Children's Privacy</h2>
+    <p>QR Party is not intended for children under 13. We do not knowingly collect information from children under 13.</p>
+  </div>
+
+  <div class="policy-section">
+    <h2>Changes to This Policy</h2>
+    <p>We may update this Privacy Policy from time to time. We will notify you of any significant changes through the app or by email.</p>
+  </div>
+
+  <div class="contact-card">
+    <h2>Contact Us</h2>
+    <p>If you have any questions about this Privacy Policy, please contact us at:</p>
+    <p>
+      <strong style="color:white">Email:</strong> <a href="mailto:privacy@partywithqr.com">privacy@partywithqr.com</a><br>
+      <strong style="color:white">Website:</strong> <a href="https://www.partywithqr.com">www.partywithqr.com</a>
+    </p>
+  </div>
+
+</div>
+
+<footer>
+  © 2026 QR Party LLC. All rights reserved. &nbsp;·&nbsp;
+  <a href="/">Home</a> &nbsp;·&nbsp;
+  <a href="/privacy-policy">Privacy Policy</a>
+</footer>
+
+</body>
+</html>

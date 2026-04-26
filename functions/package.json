@@ -1,0 +1,20 @@
+{
+  "name": "qrparty-functions",
+  "description": "QRParty Firebase Cloud Functions",
+  "scripts": {
+    "serve": "firebase emulators:start --only functions",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "engines": {
+    "node": "22"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "@google-analytics/data": "^4.10.0",
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^7.2.5",
+    "stripe": "^16.0.0"
+  },
+  "private": true
+}

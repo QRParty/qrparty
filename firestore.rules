@@ -1,0 +1,264 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── HELPERS ──────────────────────────────────────────────────────────────
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isUser(uid) {
+      return request.auth.uid == uid;
+    }
+
+    function eventData(eventId) {
+      return get(/databases/$(database)/documents/events/$(eventId)).data;
+    }
+
+    function isEventHost(eventId) {
+      return isSignedIn() && eventData(eventId).hostId == request.auth.uid;
+    }
+
+    function isCoHost(eventId) {
+      return isSignedIn() && request.auth.uid in eventData(eventId).coHosts;
+    }
+
+    function isHostOrCoHost(eventId) {
+      return isEventHost(eventId) || isCoHost(eventId);
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+    }
+
+    // ── USERS ─────────────────────────────────────────────────────────────────
+    // Users can read and write their own profile document.
+    // Admins can read any user document.
+
+    match /users/{uid} {
+      allow read: if isSignedIn() && (isUser(uid) || isAdmin());
+      allow write: if isSignedIn() && isUser(uid);
+    }
+
+    // ── EVENTS ────────────────────────────────────────────────────────────────
+    // Any authenticated user can read any event (required for the QR scan guest
+    // flow and the Explore tab).  Only the document owner (host) can mutate it,
+    // and they cannot reassign ownership by changing hostId.
+
+    match /events/{eventId} {
+      allow read: if eventId == 'demo-event' || eventId == 'pta-demo-event' || eventId == 'pgms-pta-demo' || isSignedIn();
+
+      allow create: if isSignedIn()
+        && request.resource.data.hostId == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0;
+
+      allow update: if isSignedIn()
+        && (
+          // Main host: full update, cannot transfer ownership
+          (resource.data.hostId == request.auth.uid
+            && request.resource.data.hostId == resource.data.hostId)
+          ||
+          // Co-host: can update but cannot change hostId or coHosts
+          (isCoHost(eventId)
+            && request.resource.data.hostId == resource.data.hostId
+            && request.resource.data.coHosts == resource.data.coHosts)
+        );
+
+      // Delete permissions:
+      //   • The event's host (matches existing single-account ownership)
+      //   • Admins (support / cleanup)
+      //   • The org owner of any org this event is linked to. This lets a
+      //     Headquarters account owner remove events that linked Business
+      //     accounts created under their org. Linked accounts that are not
+      //     the host cannot delete (they'd fail the hostId check and aren't
+      //     org owners themselves).
+      allow delete: if isSignedIn()
+        && (
+          resource.data.hostId == request.auth.uid
+          || isAdmin()
+          || (
+            resource.data.orgId is string
+            && get(/databases/$(database)/documents/organizations/$(resource.data.orgId)).data.ownerId == request.auth.uid
+          )
+        );
+
+      // ── RSVPs ───────────────────────────────────────────────────────────────
+      // Document ID is the guest's uid.
+      // Guests read/write their own RSVP; the host can read all RSVPs.
+
+      match /rsvps/{uid} {
+        allow read: if isSignedIn()
+          && (isUser(uid) || isHostOrCoHost(eventId) || isAdmin());
+
+        allow create, update: if isSignedIn()
+          && isUser(uid)
+          && request.resource.data.status in ['Yes', 'Maybe', 'No'];
+
+        allow delete: if isSignedIn()
+          && (isUser(uid) || isHostOrCoHost(eventId));
+      }
+
+      // ── PHOTOS ──────────────────────────────────────────────────────────────
+      // Any authenticated user can read photos and upload their own.
+      // Liking a photo (toggling uid in the likes array) is allowed for any
+      // signed-in user.  Full updates and deletes are restricted to the
+      // uploader or the event host.
+
+      match /photos/{photoId} {
+        allow read: if isSignedIn();
+
+        allow create: if isSignedIn()
+          && request.resource.data.uploaderUid == request.auth.uid
+          && request.resource.data.url is string
+          && request.resource.data.url.size() > 0;
+
+        // Any authenticated user may update only the likes array (like/unlike).
+        // The uploader, host, or co-host may update any field.
+        allow update: if isSignedIn() && (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes'])
+          || resource.data.uploaderUid == request.auth.uid
+          || isHostOrCoHost(eventId)
+        );
+
+        allow delete: if isSignedIn()
+          && (resource.data.uploaderUid == request.auth.uid || isHostOrCoHost(eventId));
+      }
+
+      // ── WISHLIST CONTRIBUTIONS ───────────────────────────────────────────────
+      match /wishlist_contributions/{uid} {
+        allow read: if isSignedIn() && (isUser(uid) || isEventHost(eventId) || isAdmin());
+        allow write: if isSignedIn() && isUser(uid);
+      }
+
+      // ── WISHLIST ITEMS (host-curated, shared from external apps) ────────────
+      // Subcollection populated when the host or a co-host shares a product
+      // URL into QR Party from another app. Item shape:
+      //   { name, url, imageUrl, price, notes, contributed,
+      //     addedBy, addedAt, claimed, claimedBy }
+      // Reads: any signed-in user (parent event is signed-in-readable).
+      // Creates: HOST or CO-HOST only — guests cannot add items. Adder must
+      //          stamp themselves as `addedBy`, start unclaimed, with zero
+      //          contributions.
+      // Updates: guests may flip claim state OR contribute money (which
+      //          touches `contributed`); the host/co-host can edit any
+      //          field except reassigning `addedBy`.
+      // Deletes: host/co-host only.
+
+      match /wishlist/{itemId} {
+        allow read: if isSignedIn();
+
+        allow create: if isHostOrCoHost(eventId)
+          && request.resource.data.addedBy == request.auth.uid
+          && request.resource.data.claimed == false
+          && request.resource.data.claimedBy == null
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          && request.resource.data.url is string;
+
+        allow update: if isSignedIn() && (
+          // Any guest may flip claim state and/or contribute money. We
+          // limit them to that exact set of fields so they can't rename
+          // the item or change the URL.
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['claimed', 'claimedBy', 'contributed'])
+          ||
+          // Host/co-host can edit any field except the adder identity.
+          (isHostOrCoHost(eventId)
+            && request.resource.data.addedBy == resource.data.addedBy)
+        );
+
+        allow delete: if isHostOrCoHost(eventId);
+      }
+    }
+
+    // ── ORGANIZATIONS ─────────────────────────────────────────────────────────
+    // Org pages are public-readable so org.html (and unauth scanners) can render
+    // them. Mutations are restricted to the owner; ownerId can never be reassigned.
+    // BusinessPlus gating is enforced client-side; the rules only ensure ownership.
+
+    match /organizations/{orgId} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0;
+
+      allow update: if isSignedIn()
+        && resource.data.ownerId == request.auth.uid
+        && request.resource.data.ownerId == resource.data.ownerId;
+
+      allow delete: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+
+      // Per-event link docs the org owner uses to pick what shows on the org page.
+      match /events/{eventId} {
+        allow read: if true;
+        allow write: if isSignedIn()
+          && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid;
+      }
+    }
+
+    // ── RECURRING EVENT SERIES ────────────────────────────────────────────────
+    // A series doc stores the rule + template used to auto-generate the next
+    // event. Read/write restricted to the series owner; Cloud Functions (Admin
+    // SDK) bypass these rules.
+
+    match /recurringEvents/{seriesId} {
+      allow read:   if isSignedIn() && resource.data.hostId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.hostId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.hostId == request.auth.uid
+                      && request.resource.data.hostId == resource.data.hostId;
+      allow delete: if isSignedIn() && resource.data.hostId == request.auth.uid;
+    }
+
+    // ── MERCH ORDERS ──────────────────────────────────────────────────────────
+    // Created exclusively by the createMerchOrder Cloud Function (Admin SDK
+    // bypasses rules). Customers can read their own; admins can read + update
+    // any (status changes, tracking, notes, cost). No client-side creates.
+
+    match /orders/{orderId} {
+      allow read:   if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow update: if isAdmin();
+      allow create, delete: if false;
+    }
+
+    // ── EMAIL OUTBOX ─────────────────────────────────────────────────────────
+    // Consumed by the Firebase Trigger Email extension. Only Cloud Functions
+    // (Admin SDK) write to this collection — no client paths.
+
+    match /mail/{docId} {
+      allow read, write: if false;
+    }
+
+    // ── ADMIN CONFIG ──────────────────────────────────────────────────────────
+    // Read and write restricted to admins only.
+
+    match /adminConfig/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    // ── NOTIFICATION QUEUE ────────────────────────────────────────────────────
+    // Written by Cloud Functions (Admin SDK bypasses these rules).
+    // The client app creates documents here to trigger push notifications.
+    // No client reads, updates, or deletes — Cloud Functions own the lifecycle.
+
+    match /notificationQueue/{docId} {
+      allow create: if isSignedIn();
+      allow read, update, delete: if false;
+    }
+
+    // ── NOTIFICATION TASKS ────────────────────────────────────────────────────
+    // The app writes tasks here (event_updated alerts, photo-expiry warnings).
+    // Cloud Functions process and clean up via Admin SDK.
+    // Use allow write (create + update) because the app uses .set() which may
+    // create or overwrite a document (e.g. the photo-expiry task per event).
+
+    match /notificationTasks/{docId} {
+      allow write: if isSignedIn();
+      allow read, delete: if false;
+    }
+  }
+}

@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QR Party Event</title>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:          #2D3047;
+      --bg-deep:     #22243A;
+      --card:        #383B56;
+      --card-raise:  #3E4163;
+      --border:      #4A4E6B;
+      --muted:       #A9A6B8;
+      --purple:      #9C7FD4;
+      --purple-deep: #6E4CAD;
+      --gold:        #C8922A;
+      --green:       #52796F;
+      --green-light: #84A98C;
+      --red:         #EF4444;
+    }
+    html { scroll-behavior: smooth; background: var(--bg); }
+    body {
+      font-family: 'Nunito', sans-serif;
+      background:
+        radial-gradient(circle at 10% -10%, rgba(156,127,212,.12) 0%, transparent 55%),
+        radial-gradient(circle at 90% 110%, rgba(110,76,173,.10) 0%, transparent 55%),
+        var(--bg);
+      background-attachment: fixed;
+      color: white;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── DEMO BANNER ── */
+    .demo-banner {
+      width: 100%;
+      background: var(--gold);
+      color: #1A1A1A;
+      text-align: center;
+      font: 700 13px 'Nunito', sans-serif;
+      padding: 10px 16px;
+      letter-spacing: .2px;
+      border-bottom: 1px solid rgba(0,0,0,.15);
+    }
+
+    /* ── NAV ── */
+    nav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 24px;
+      background: rgba(45,48,71,.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .nav-logo { display: flex; align-items: baseline; gap: 0; text-decoration: none; }
+    .nav-logo .qr    { font-family: 'Fredoka One', cursive; font-size: 26px; color: white; letter-spacing: 1px; line-height: 1; }
+    .nav-logo .party { font-family: 'Fredoka One', cursive; font-size: 26px; color: var(--purple); line-height: 1; }
+    .nav-hint { font-size: 13px; color: var(--muted); font-weight: 500; }
+
+    /* ── LOADING / ERROR ── */
+    .state-screen {
+      min-height: 70vh; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px;
+      text-align: center; padding: 40px 24px;
+    }
+    .spinner {
+      width: 44px; height: 44px; border-radius: 50%;
+      border: 3px solid var(--border);
+      border-top-color: var(--purple);
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .state-title { font-family: 'Fredoka One', cursive; font-size: 24px; color: white; }
+    .state-sub   { font-size: 15px; color: var(--muted); max-width: 320px; line-height: 1.6; }
+
+    /* ── EVENT PAGE ── */
+    #event-page { display: none; max-width: 620px; margin: 0 auto; padding: 20px 16px 56px; }
+
+    /* Hero — dark purple gradient with radial glow */
+    .event-hero {
+      position: relative; overflow: hidden;
+      border-radius: 22px;
+      padding: 34px 26px 28px;
+      margin-bottom: 14px;
+      background:
+        radial-gradient(circle at 85% 10%, rgba(156,127,212,.50) 0%, transparent 55%),
+        radial-gradient(circle at 10% 110%, rgba(110,76,173,.45) 0%, transparent 60%),
+        linear-gradient(145deg, #3B2F68 0%, #2B2A4E 50%, #252641 100%);
+      border: 1px solid rgba(156,127,212,.22);
+      box-shadow:
+        0 18px 48px rgba(110,76,173,.28),
+        inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .event-hero::before {
+      content: ''; position: absolute; inset: 0; pointer-events: none;
+      background: radial-gradient(circle at 50% -20%, rgba(200,146,42,.08) 0%, transparent 45%);
+    }
+    .event-emoji-wrap {
+      width: 64px; height: 64px; border-radius: 18px;
+      background: rgba(255,255,255,.12);
+      border: 1px solid rgba(255,255,255,.18);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 34px; margin-bottom: 18px; position: relative;
+      box-shadow: 0 6px 18px rgba(0,0,0,.25);
+    }
+    .event-title {
+      font-family: 'Fredoka One', cursive;
+      font-size: clamp(30px, 7.5vw, 46px); line-height: 1.05;
+      letter-spacing: .5px; color: white; margin-bottom: 8px;
+      position: relative;
+      text-shadow: 0 2px 12px rgba(0,0,0,.25);
+    }
+    .event-host {
+      font-size: 14px; font-weight: 600;
+      color: rgba(255,255,255,.62); position: relative;
+      letter-spacing: .2px;
+    }
+
+    /* Card shell (used by every non-hero card) */
+    .card {
+      background: linear-gradient(180deg, var(--card-raise) 0%, var(--card) 100%);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.04);
+      margin-bottom: 12px;
+    }
+
+    /* Detail card */
+    .detail-card { padding: 18px; }
+    .detail-row { display: flex; align-items: center; gap: 14px; }
+    .detail-row + .detail-row { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+    .detail-icon {
+      width: 42px; height: 42px; border-radius: 13px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center; font-size: 18px;
+      border: 1px solid rgba(255,255,255,.06);
+    }
+    .detail-icon.date-icon { background: rgba(156,127,212,.20); }
+    .detail-icon.loc-icon  { background: rgba(82,121,111,.22); }
+    .detail-label {
+      font-size: 11px; font-weight: 800; text-transform: uppercase;
+      letter-spacing: 1.2px; color: var(--muted); margin-bottom: 3px;
+    }
+    .detail-value { font-size: 15px; font-weight: 700; color: white; line-height: 1.4; }
+    .detail-text  { flex: 1; min-width: 0; }
+
+    .directions-btn {
+      flex-shrink: 0;
+      padding: 9px 13px;
+      background: rgba(82,121,111,.22);
+      border: 1px solid rgba(82,121,111,.45);
+      color: var(--green-light);
+      border-radius: 11px;
+      font: 800 12.5px 'Nunito', sans-serif;
+      text-decoration: none;
+      letter-spacing: .3px;
+      white-space: nowrap;
+      transition: transform .15s, background .15s, box-shadow .15s;
+    }
+    .directions-btn:hover {
+      transform: translateY(-1px);
+      background: rgba(82,121,111,.32);
+      box-shadow: 0 6px 16px rgba(82,121,111,.3);
+    }
+    .directions-btn:active { transform: translateY(0); }
+
+    /* Add to Calendar */
+    .calendar-btn {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      width: 100%; padding: 15px;
+      background: var(--gold); color: #1A1A1A;
+      border: none; border-radius: 16px;
+      font: 800 15px 'Nunito', sans-serif; letter-spacing: .3px;
+      cursor: pointer; text-decoration: none;
+      margin-bottom: 14px;
+      transition: transform .15s, box-shadow .15s;
+      box-shadow: 0 10px 24px rgba(200,146,42,.30), inset 0 1px 0 rgba(255,255,255,.25);
+    }
+    .calendar-btn:hover { transform: translateY(-2px); box-shadow: 0 14px 32px rgba(200,146,42,.45); }
+    .calendar-btn:active { transform: translateY(0); }
+
+    /* RSVP action card — top (under hero) */
+    .rsvp-actions-card { padding: 18px 18px 16px; }
+    .rsvp-actions-title {
+      font-family: 'Fredoka One', cursive;
+      font-size: 18px; color: white; text-align: center; margin-bottom: 12px;
+      letter-spacing: .3px;
+    }
+    .rsvp-actions-row { display: flex; gap: 10px; }
+    .rsvp-btn {
+      flex: 1; padding: 15px 8px; border-radius: 14px;
+      border: none; cursor: pointer; text-decoration: none;
+      font: 800 16px 'Nunito', sans-serif;
+      color: white; text-align: center;
+      transition: transform .15s, box-shadow .15s, filter .15s;
+      letter-spacing: .3px;
+    }
+    .rsvp-btn:hover  { transform: translateY(-2px); filter: brightness(1.1); }
+    .rsvp-btn:active { transform: translateY(0); }
+    .rsvp-btn.yes   { background: linear-gradient(180deg, #6A9689 0%, #52796F 100%); box-shadow: 0 8px 20px rgba(82,121,111,.40); }
+    .rsvp-btn.maybe { background: linear-gradient(180deg, #DFAA3F 0%, #C8922A 100%); color: #1A1A1A; box-shadow: 0 8px 20px rgba(200,146,42,.35); }
+    .rsvp-btn.no    { background: linear-gradient(180deg, #F46B6B 0%, #E04B4B 100%); box-shadow: 0 8px 20px rgba(239,68,68,.32); }
+    .rsvp-actions-sub {
+      text-align: center; font-size: 12.5px; color: var(--muted);
+      margin-top: 12px; font-weight: 600;
+    }
+    .rsvp-actions-sub a { color: var(--purple); text-decoration: none; font-weight: 800; }
+
+    /* RSVP "app required" modal — matches dark theme */
+    .rsvp-modal-backdrop {
+      position: fixed; inset: 0; z-index: 100;
+      background: rgba(0,0,0,.72);
+      display: none; align-items: center; justify-content: center;
+      padding: 24px;
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      animation: rsvpFade .18s ease-out;
+    }
+    .rsvp-modal-backdrop.open { display: flex; }
+    @keyframes rsvpFade { from { opacity: 0; } to { opacity: 1; } }
+    .rsvp-modal {
+      width: 100%; max-width: 420px;
+      background: linear-gradient(180deg, var(--card-raise) 0%, var(--card) 100%);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 28px 24px 22px;
+      box-shadow: 0 24px 60px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.05);
+      text-align: center;
+      animation: rsvpSlide .22s ease-out;
+    }
+    @keyframes rsvpSlide { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .rsvp-modal-icon {
+      width: 56px; height: 56px; margin: 0 auto 14px;
+      border-radius: 16px;
+      background: rgba(156,127,212,.18);
+      border: 1px solid rgba(156,127,212,.35);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px;
+    }
+    .rsvp-modal h3 {
+      font-family: 'Fredoka One', cursive;
+      font-size: 22px; color: white; margin-bottom: 10px; letter-spacing: .3px;
+    }
+    .rsvp-modal p {
+      font-size: 14.5px; color: var(--muted);
+      line-height: 1.6; margin-bottom: 22px;
+    }
+    .rsvp-modal-actions {
+      display: flex; gap: 10px;
+    }
+    .rsvp-modal-btn {
+      flex: 1; padding: 13px 10px; border-radius: 12px;
+      border: none; cursor: pointer; text-decoration: none;
+      font: 800 14px 'Nunito', sans-serif; letter-spacing: .3px;
+      transition: transform .15s, filter .15s;
+    }
+    .rsvp-modal-btn:hover  { transform: translateY(-1px); filter: brightness(1.1); }
+    .rsvp-modal-btn:active { transform: translateY(0); }
+    .rsvp-modal-btn.close {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .rsvp-modal-btn.learn {
+      background: var(--purple);
+      color: white;
+      box-shadow: 0 8px 20px rgba(156,127,212,.35);
+    }
+
+    /* Description */
+    .desc-card { padding: 18px 20px; }
+    .desc-card p { font-size: 15px; color: var(--muted); line-height: 1.7; font-weight: 500; }
+
+    /* RSVP stats card */
+    .rsvp-card { padding: 18px 20px; }
+    .card-title {
+      font-size: 11px; font-weight: 800; text-transform: uppercase;
+      letter-spacing: 1.6px; color: var(--muted); margin-bottom: 14px;
+    }
+    .rsvp-row { display: flex; gap: 10px; }
+    .rsvp-pill {
+      flex: 1; border-radius: 14px; padding: 18px 8px 14px; text-align: center;
+      display: flex; flex-direction: column; gap: 6px;
+      border: 1px solid transparent;
+      background: rgba(255,255,255,.02);
+    }
+    .rsvp-pill.yes   { background: rgba(82,121,111,.16);  border-color: rgba(82,121,111,.32); }
+    .rsvp-pill.maybe { background: rgba(200,146,42,.13);  border-color: rgba(200,146,42,.32); }
+    .rsvp-pill.no    { background: rgba(239,68,68,.10);   border-color: rgba(239,68,68,.26); }
+    .rsvp-num { font-family: 'Fredoka One', cursive; font-size: 44px; line-height: 1; letter-spacing: .5px; }
+    .rsvp-pill.yes   .rsvp-num { color: var(--green-light); }
+    .rsvp-pill.maybe .rsvp-num { color: var(--gold); }
+    .rsvp-pill.no    .rsvp-num { color: var(--red); }
+    .rsvp-lbl { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); }
+
+    /* List (Wishlist or Checklist) */
+    .list-card { padding: 20px; margin-bottom: 18px; }
+    .list-item { padding: 16px 0; }
+    .list-item + .list-item { border-top: 1px solid var(--border); }
+    .list-item-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .list-name  { font-size: 16px; font-weight: 800; color: white; }
+    .list-price { font-size: 15px; font-weight: 700; color: var(--purple); }
+    .list-price.bought { color: var(--muted); text-decoration: line-through; }
+    .progress-track { height: 6px; background: rgba(74,78,107,.6); border-radius: 10px; overflow: hidden; margin-top: 10px; }
+    .progress-fill  { height: 100%; background: linear-gradient(90deg, var(--purple-deep), var(--purple)); border-radius: 10px; transition: width .6s ease; }
+    .progress-fill.bought { background: var(--border); }
+    .list-meta { display: flex; justify-content: space-between; margin-top: 8px; }
+    .list-meta span { font-size: 12px; color: var(--muted); font-weight: 600; }
+    .bought-badge {
+      display: inline-block; font-size: 11px; font-weight: 800;
+      background: rgba(156,127,212,.18); color: var(--purple);
+      padding: 3px 10px; border-radius: 20px;
+      border: 1px solid rgba(156,127,212,.4);
+    }
+
+    /* Checklist item */
+    .checklist-info { flex: 1; min-width: 0; }
+    .checklist-qty {
+      font-size: 12.5px; color: var(--muted); font-weight: 600;
+      margin-top: 3px; letter-spacing: .2px;
+    }
+    .claim-btn {
+      background: linear-gradient(180deg, #B398E0 0%, var(--purple) 100%);
+      color: white; border: none;
+      padding: 10px 18px; border-radius: 12px;
+      font: 800 13px 'Nunito', sans-serif; cursor: pointer;
+      letter-spacing: .4px; text-decoration: none;
+      white-space: nowrap; flex-shrink: 0;
+      box-shadow: 0 6px 16px rgba(156,127,212,.35), inset 0 1px 0 rgba(255,255,255,.2);
+      transition: transform .15s, box-shadow .15s;
+    }
+    .claim-btn:hover  { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(156,127,212,.5); }
+    .claim-btn:active { transform: translateY(0); }
+    .claim-count {
+      font-size: 11px; color: var(--muted); font-weight: 700;
+      margin-top: 8px; letter-spacing: .3px; text-transform: uppercase;
+    }
+
+    /* Footer */
+    .page-footer {
+      text-align: center; padding: 28px 24px 20px;
+      font-size: 12px; color: var(--muted); font-weight: 500;
+      border-top: 1px solid var(--border);
+    }
+    .page-footer a { color: var(--purple); text-decoration: none; font-weight: 700; }
+  </style>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-2MJ1C69EPC"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-2MJ1C69EPC');
+  </script>
+  <script defer src="/js/analytics.js"></script>
+</head>
+<body>
+
+<div class="demo-banner">👀 This is a preview demo — download the app for the full experience!</div>
+
+<nav>
+  <a class="nav-logo" href="/"><span class="qr">QR</span><span class="party">Party</span></a>
+  <span class="nav-hint">Event invitation</span>
+</nav>
+
+<!-- Loading state -->
+<div id="loading-state" class="state-screen">
+  <div class="spinner"></div>
+  <div class="state-title">Loading event…</div>
+</div>
+
+<!-- Error state -->
+<div id="error-state" class="state-screen" style="display:none">
+  <div style="font-size:48px">🔍</div>
+  <div class="state-title">Event not found</div>
+  <div class="state-sub">This event link may be invalid or the event may have been removed.</div>
+  <a href="/" style="margin-top:8px;color:var(--purple);font-weight:700;font-size:14px;text-decoration:none">← Back to QR Party</a>
+</div>
+
+<!-- Event page -->
+<div id="event-page">
+
+  <div class="event-hero" id="event-hero">
+    <div class="event-emoji-wrap" id="event-emoji"></div>
+    <div class="event-title" id="event-title"></div>
+    <div class="event-host" id="event-host"></div>
+  </div>
+
+  <!-- RSVP actions — right below the hero -->
+  <div class="card rsvp-actions-card">
+    <div class="rsvp-actions-title">Will you be there?</div>
+    <div class="rsvp-actions-row">
+      <button type="button" class="rsvp-btn yes"   onclick="showRsvpModal()">Yes</button>
+      <button type="button" class="rsvp-btn maybe" onclick="showRsvpModal()">Maybe</button>
+      <button type="button" class="rsvp-btn no"    onclick="showRsvpModal()">No</button>
+    </div>
+    <div class="rsvp-actions-sub">
+      <a href="https://play.google.com/store/apps/details?id=com.partywithqr.app">Download QR Party to RSVP</a>
+    </div>
+  </div>
+
+  <div class="card detail-card">
+    <div class="detail-row">
+      <div class="detail-icon date-icon">📅</div>
+      <div>
+        <div class="detail-label">Date &amp; Time</div>
+        <div class="detail-value" id="event-date"></div>
+      </div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-icon loc-icon">📍</div>
+      <div class="detail-text">
+        <div class="detail-label">Location</div>
+        <div class="detail-value" id="event-location"></div>
+      </div>
+      <a id="directions-btn" href="#" target="_blank" rel="noopener" class="directions-btn">Get Directions 📍</a>
+    </div>
+  </div>
+
+  <button type="button" id="calendar-btn" class="calendar-btn">📆 Add to Calendar</button>
+
+  <div class="card desc-card" id="event-desc-card">
+    <p id="event-desc"></p>
+  </div>
+
+  <div class="card rsvp-card">
+    <div class="card-title">Who's coming</div>
+    <div class="rsvp-row">
+      <div class="rsvp-pill yes">
+        <div class="rsvp-num" id="rsvp-yes">0</div>
+        <div class="rsvp-lbl">Going</div>
+      </div>
+      <div class="rsvp-pill maybe">
+        <div class="rsvp-num" id="rsvp-maybe">0</div>
+        <div class="rsvp-lbl">Maybe</div>
+      </div>
+      <div class="rsvp-pill no">
+        <div class="rsvp-num" id="rsvp-no">0</div>
+        <div class="rsvp-lbl">Can't go</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card list-card" id="list-section" style="display:none">
+    <div class="card-title" id="list-title">Wishlist</div>
+    <div id="list-items"></div>
+  </div>
+
+</div>
+
+<!-- RSVP "app required" modal -->
+<div id="rsvp-modal" class="rsvp-modal-backdrop" onclick="if (event.target === this) closeRsvpModal()">
+  <div class="rsvp-modal" role="dialog" aria-modal="true" aria-labelledby="rsvp-modal-title">
+    <div class="rsvp-modal-icon">📲</div>
+    <h3 id="rsvp-modal-title">Get the QR Party App</h3>
+    <p>To RSVP for this event download the QR Party app. Coming soon to Google Play and the App Store. Visit partywithqr.com to learn more.</p>
+    <div class="rsvp-modal-actions">
+      <button type="button" class="rsvp-modal-btn close" onclick="closeRsvpModal()">Close</button>
+      <a class="rsvp-modal-btn learn" href="https://partywithqr.com" target="_blank" rel="noopener">Learn More</a>
+    </div>
+  </div>
+</div>
+
+<div class="page-footer">
+  Powered by <a href="/">QR Party</a> · www.partywithqr.com
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script>
+  console.log('[QRParty] script running');
+
+  // ── RSVP "app required" modal ─────────────────────────────────
+  function showRsvpModal() {
+    var el = document.getElementById('rsvp-modal');
+    if (el) el.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeRsvpModal() {
+    var el = document.getElementById('rsvp-modal');
+    if (el) el.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+  // Escape key dismisses the modal
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeRsvpModal();
+  });
+  window.showRsvpModal  = showRsvpModal;
+  window.closeRsvpModal = closeRsvpModal;
+
+  firebase.initializeApp({
+    apiKey:            'AIzaSyDI8j_7H9VoIFMCwGdJzEij406ap_tRlcA',
+    authDomain:        'qrparty-6e648.firebaseapp.com',
+    projectId:         'qrparty-6e648',
+    storageBucket:     'qrparty-6e648.firebasestorage.app',
+    messagingSenderId: '478022847809',
+    appId:             '1:478022847809:web:a75dfa45ddb28d043565c0',
+  });
+
+  var db = firebase.firestore();
+  console.log('[QRParty] Firestore ready');
+
+  function show(id) { document.getElementById(id).style.display = 'block'; }
+  function hide(id) { document.getElementById(id).style.display = 'none'; }
+  function setText(id, val) { document.getElementById(id).textContent = val; }
+
+  function formatDate(ts) {
+    if (!ts) return 'Date TBD';
+    var d = ts.toDate ? ts.toDate() : new Date(ts);
+    return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+      + ' · ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function toIcsDate(date) {
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+    return date.getUTCFullYear()
+      + pad(date.getUTCMonth() + 1)
+      + pad(date.getUTCDate()) + 'T'
+      + pad(date.getUTCHours())
+      + pad(date.getUTCMinutes())
+      + pad(date.getUTCSeconds()) + 'Z';
+  }
+  function icsEscape(s) {
+    return String(s || '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/,/g, '\\,').replace(/;/g, '\\;');
+  }
+  function downloadIcs(eventId, title, startDate, location, description) {
+    var start = startDate;
+    var end   = new Date(start.getTime() + 2 * 60 * 60 * 1000); // default 2h duration
+    var ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//QRParty//EN',
+      'CALSCALE:GREGORIAN',
+      'BEGIN:VEVENT',
+      'UID:' + eventId + '@partywithqr.com',
+      'DTSTAMP:' + toIcsDate(new Date()),
+      'DTSTART:' + toIcsDate(start),
+      'DTEND:'   + toIcsDate(end),
+      'SUMMARY:'     + icsEscape(title),
+      'LOCATION:'    + icsEscape(location),
+      'DESCRIPTION:' + icsEscape(description),
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    var blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = (title || 'event').replace(/[^a-z0-9]+/gi, '_').toLowerCase() + '.ics';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  var rawPath = window.location.pathname;
+  var eventId = rawPath.replace(/^\/event\//, '').replace(/\/$/, '');
+  console.log('[QRParty] eventId:', eventId);
+
+  // Resolve either a Firestore doc ID or a 6-char shortCode. We try the
+  // doc.get() first because it's the common case; on a miss we query the
+  // shortCode field (uppercased — codes are always written uppercase).
+  function resolveEvent(input) {
+    return db.collection('events').doc(input).get().then(function(snap) {
+      if (snap.exists) return snap;
+      return db.collection('events')
+        .where('shortCode', '==', input.toUpperCase())
+        .limit(1).get()
+        .then(function(qs) { return qs.empty ? null : qs.docs[0]; });
+    });
+  }
+
+  if (!eventId) {
+    hide('loading-state');
+    show('error-state');
+  } else {
+    resolveEvent(eventId)
+      .then(function(snap) {
+        console.log('[QRParty] resolved:', snap && snap.exists);
+        hide('loading-state');
+
+        if (!snap || !snap.exists) {
+          show('error-state');
+          return;
+        }
+
+        var d = snap.data();
+        console.log('[QRParty] title:', d.title);
+
+        // Hero
+        document.getElementById('event-emoji').textContent = d.eventEmoji || '🎉';
+        setText('event-title', d.title || 'Untitled Event');
+        setText('event-host',  'Hosted by ' + (d.hostName || 'QR Party'));
+
+        // Date & location
+        setText('event-date',     formatDate(d.date));
+        setText('event-location', d.location || 'Location TBD');
+
+        var directionsBtn = document.getElementById('directions-btn');
+        if (d.location) {
+          directionsBtn.href = 'https://maps.google.com/?q=' + encodeURIComponent(d.location);
+        } else {
+          directionsBtn.style.display = 'none';
+        }
+
+        // Add to Calendar — only enable if we actually have a date
+        var startDate = d.date ? (d.date.toDate ? d.date.toDate() : new Date(d.date)) : null;
+        var calBtn = document.getElementById('calendar-btn');
+        if (startDate) {
+          calBtn.addEventListener('click', function() {
+            downloadIcs(eventId, d.title || 'Event', startDate, d.location || '', d.description || '');
+          });
+        } else {
+          calBtn.disabled = true;
+          calBtn.style.opacity = '0.5';
+          calBtn.style.cursor  = 'not-allowed';
+          calBtn.textContent   = '📆 Date TBD';
+        }
+
+        // Description
+        if (d.description) {
+          setText('event-desc', d.description);
+        } else {
+          hide('event-desc-card');
+        }
+
+        // RSVP counts
+        setText('rsvp-yes',   d.yes   || 0);
+        setText('rsvp-maybe', d.maybe || 0);
+        setText('rsvp-no',    d.no    || 0);
+
+        // Wishlist / Checklist — field is always 'wishlist' but listType selects the render
+        var items    = d.wishlist || [];
+        var listType = d.listType || 'Wishlist';
+        if (items.length > 0 && listType !== 'No List') {
+          setText('list-title', listType === 'Checklist' ? 'Checklist' : 'Wishlist');
+          var container = document.getElementById('list-items');
+          items.forEach(function(item) {
+            var el = document.createElement('div');
+            el.className = 'list-item';
+            if (listType === 'Checklist') {
+              var name    = item.name || '';
+              var qty     = item.quantity || '';
+              var claimed = item.claimed || 0;
+              el.innerHTML =
+                '<div class="list-item-row">' +
+                  '<div class="checklist-info">' +
+                    '<div class="list-name">' + name + '</div>' +
+                    '<div class="checklist-qty">Needed: ' + qty + '</div>' +
+                  '</div>' +
+                  '<a href="https://play.google.com/store/apps/details?id=com.partywithqr.app" class="claim-btn">Claim</a>' +
+                '</div>' +
+                (claimed > 0 ? '<div class="claim-count">' + claimed + ' already claimed</div>' : '');
+            } else {
+              var price       = item.price       || 0;
+              var contributed = item.contributed || 0;
+              var bought      = item.bought      || false;
+              var progress    = price > 0 ? Math.min(contributed / price, 1) : 0;
+              el.innerHTML =
+                '<div class="list-item-row">' +
+                  '<span class="list-name">' + (item.name || '') + '</span>' +
+                  '<span class="list-price' + (bought ? ' bought' : '') + '">$' + price.toFixed(2) + '</span>' +
+                '</div>' +
+                '<div class="progress-track">' +
+                  '<div class="progress-fill' + (bought ? ' bought' : '') + '" style="width:' + (progress * 100).toFixed(1) + '%"></div>' +
+                '</div>' +
+                '<div class="list-meta">' +
+                  '<span>$' + contributed.toFixed(0) + ' of $' + price.toFixed(0) + ' contributed</span>' +
+                  (bought ? '<span class="bought-badge">Bought ✓</span>' : '') +
+                '</div>';
+            }
+            container.appendChild(el);
+          });
+          document.getElementById('list-section').style.display = 'block';
+        }
+
+        document.title = (d.title || 'Event') + ' — QR Party';
+        show('event-page');
+        console.log('[QRParty] render complete');
+      })
+      .catch(function(err) {
+        console.error('[QRParty] Firestore error:', err.code, err.message);
+        hide('loading-state');
+        show('error-state');
+      });
+  }
+</script>
+</body>
+</html>

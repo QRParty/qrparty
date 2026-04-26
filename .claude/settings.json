@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node seed-demo.js)",
+      "Bash(flutter analyze *)",
+      "Bash(cmd /c \"cd /c/Users/Klaus/qrparty && flutter analyze lib/\")",
+      "Bash(powershell.exe -Command \"Set-Location 'C:\\\\Users\\\\Klaus\\\\qrparty'; flutter analyze lib/ 2>&1\")",
+      "Bash(powershell.exe -Command 'Get-Command flutter -ErrorAction SilentlyContinue; $env:PATH')",
+      "Bash(powershell.exe -Command \"Get-ChildItem -Path C:\\\\Users\\\\klaus -Filter flutter.bat -Recurse -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 3 FullName\")",
+      "Bash(powershell.exe -Command \"Set-Location 'C:\\\\Users\\\\Klaus\\\\qrparty'; & 'C:\\\\Users\\\\Klaus\\\\flutter\\\\bin\\\\flutter.bat' analyze lib/ 2>&1\")",
+      "Bash(flutter.bat analyze *)"
+    ]
+  }
+}
