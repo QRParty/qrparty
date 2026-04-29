@@ -1,5 +1,5 @@
 # Uncomment this line to define a global platform for your project
-platform :ios, '13.0'
+platform :ios, '14.0'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -68,7 +68,7 @@ post_install do |installer|
       # build use 16.0 (which is also what kicks BoringSSL-GRPC into
       # the broken `-G` codepath). 13.0 matches Runner's
       # IPHONEOS_DEPLOYMENT_TARGET in project.pbxproj.
-      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
 
       # Belt-and-suspenders: strip any '-G*' flags that survived the
       # per-file pass above (e.g. flags injected via xcconfig rather
