@@ -45,6 +45,12 @@
         "headers": [
           { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
         ]
+      },
+      {
+        "source": "/biz.html",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+        ]
       }
     ],
     "rewrites": [
@@ -55,6 +61,10 @@
       {
         "source": "/org/**",
         "destination": "/org.html"
+      },
+      {
+        "source": "/biz/**",
+        "destination": "/biz.html"
       },
       {
         "source": "/business",

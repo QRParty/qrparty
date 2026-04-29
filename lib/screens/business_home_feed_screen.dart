@@ -3,11 +3,13 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../utils.dart';
+import '../widgets/rsvp_live_counts.dart';
 import 'create_event_screen.dart';
 import 'edit_event_screen.dart';
 import 'guest_event_screen.dart';
 import 'host_notifications_screen.dart';
 import 'generate_qr_screen.dart';
+import 'business_qr_screen.dart';
 import 'analytics_screen.dart';
 import 'settings_screen.dart';
 import 'create_template_screen.dart';
@@ -112,10 +114,13 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) { setState(() => _loading = false); return; }
 
+    // No .orderBy('date') — drafts created without a date field would be
+    // dropped from query results (Firestore excludes docs missing the
+    // ordered-by field). Client-side sort happens in _rebuild() below
+    // using a DateTime(2099) sentinel for null/missing dates.
     _hostEventsSub = FirebaseFirestore.instance
         .collection('events')
         .where('hostId', isEqualTo: user.uid)
-        .orderBy('date')
         .snapshots()
         .listen((snap) {
       _hostRaw = { for (final doc in snap.docs) doc.id: doc.data() };
@@ -132,25 +137,54 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     }, onError: (_) {});
   }
 
+  /// Combines the `date` Timestamp (midnight on the picked calendar
+  /// date) with the `time` string ("HH:MM") into a single DateTime
+  /// representing the actual event start. Used by the upcoming/past
+  /// classifier so an event scheduled for today doesn't get treated
+  /// as already-past at 00:00:01. Mirrors the helper in
+  /// home_feed_screen.dart.
+  DateTime _resolveEventStart(DateTime? calendarDate, String? timeStr) {
+    if (calendarDate == null) return DateTime(2099);
+    if (timeStr != null) {
+      final parts = timeStr.split(':');
+      if (parts.length == 2) {
+        final h = int.tryParse(parts[0]);
+        final m = int.tryParse(parts[1]);
+        if (h != null && m != null) {
+          return DateTime(calendarDate.year, calendarDate.month, calendarDate.day, h, m);
+        }
+      }
+    }
+    // No usable time — fall back to end-of-day so a same-day event
+    // without a specific start time still counts as upcoming until
+    // midnight rolls over.
+    return DateTime(calendarDate.year, calendarDate.month, calendarDate.day, 23, 59, 59);
+  }
+
   void _rebuild({ bool hostLoaded = false }) {
     if (!mounted) return;
     // coHostRaw entries not already owned by this user come first so hostRaw wins on overlap
     final merged = <String, Map<String, dynamic>>{..._coHostRaw, ..._hostRaw};
     final now = DateTime.now();
-    // Business feed only shows business / businessPlus events (not 'personal'
-    // or legacy untagged docs). Legacy events with no accountType field are
-    // treated as personal and filtered out here.
-    final businessOnly = Map<String, Map<String, dynamic>>.fromEntries(
-      merged.entries.where((e) {
-        final acctType = e.value['accountType'] as String?;
-        return acctType == 'business' || acctType == 'businessPlus';
-      }),
-    );
-    final events = businessOnly.entries.map((entry) {
+    // No accountType filter — the user's own events should always
+    // appear on the feed they're currently viewing. Filtering by
+    // accountType caused freshly-created events to disappear when the
+    // event's tag and the feed the user is on disagreed (e.g. legacy
+    // 'personal' events lingering on a business user's account, or
+    // 'business' events created during a window that routed the user
+    // to the personal feed).
+    final events = merged.entries.map((entry) {
       final docId = entry.key;
       final data = entry.value;
       final ts = data['date'] as Timestamp?;
-      final date = ts?.toDate() ?? DateTime(2099);
+      final calendarDate = ts?.toDate();
+      // Combine date + time into the actual event-start DateTime so
+      // an event picked for today doesn't get classified as past at
+      // 00:00:01. End-of-day fallback when no time is set.
+      final eventStart = _resolveEventStart(calendarDate, data['time'] as String?);
+      final sortDate = calendarDate ?? DateTime(2099);
+      final isDraft = (data['isDraft'] as bool?) ?? false;
+      final isPast = !isDraft && eventStart.isBefore(now);
       final typeName = (data['eventType'] as String?) ?? '';
       final matchedType = eventTypes.firstWhere((t) => t.name == typeName, orElse: () => eventTypes.last);
       final wishlist = (data['wishlist'] as List<dynamic>? ?? []);
@@ -160,16 +194,17 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
         'rawData': data,
         'id': docId,
         'title': (data['title'] as String?) ?? 'Untitled',
-        'date': date,
+        'date': sortDate,
+        'eventStart': eventStart,
         'location': (data['location'] as String?) ?? '',
         'emoji': (data['eventEmoji'] as String?) ?? '🎉',
         'color': matchedType.primary,
         'yes': (data['yes'] as num?)?.toInt() ?? 0,
         'maybe': (data['maybe'] as num?)?.toInt() ?? 0,
         'no': (data['no'] as num?)?.toInt() ?? 0,
-        'isPast': date.isBefore(now),
+        'isPast': isPast,
         'isArchived': (data['isArchived'] as bool?) ?? false,
-        'isDraft': (data['isDraft'] as bool?) ?? false,
+        'isDraft': isDraft,
         'wishlistTotal': wishlistTotal,
         'coHosts': (data['coHosts'] as List<dynamic>? ?? []).length,
         'isCoHosted': _coHostRaw.containsKey(docId) && !_hostRaw.containsKey(docId),
@@ -214,6 +249,14 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
   @override
   Widget build(BuildContext context) {
     final fg = _isDark ? Colors.white : AppColors.dark;
+    // Tier-aware AppBar wordmark: Headquarters accounts get the
+    // "QR Party" + HEADQUARTERS pill; Business accounts keep the
+    // "QR Party Business" + PRO pill they had before. Without this
+    // gate, Headquarters users were seeing "Business" + "PRO" side
+    // by side and reading it as "Business Pro" — wrong tier name.
+    final isHeadquarters = _accountType == 'businessPlus';
+    final wordmark = isHeadquarters ? 'QR Party' : 'QR Party Business';
+    final badgeText = isHeadquarters ? 'HEADQUARTERS' : 'PRO';
     return Scaffold(
       backgroundColor: _bg,
       appBar: AppBar(
@@ -221,12 +264,21 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         title: Row(children: [
-          Text('QR Party Business', style: TextStyle(fontFamily: 'FredokaOne', fontSize: 20, color: fg)),
+          Flexible(
+            child: Text(
+              wordmark,
+              style: TextStyle(fontFamily: 'FredokaOne', fontSize: 20, color: fg),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
           const SizedBox(width: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
             decoration: BoxDecoration(color: _gold, borderRadius: BorderRadius.circular(7)),
-            child: const Text('PRO', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white, letterSpacing: 0.5)),
+            child: Text(
+              badgeText,
+              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white, letterSpacing: 0.5),
+            ),
           ),
         ]),
         actions: [
@@ -333,6 +385,7 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
       children: [
         _buildOrgBanner(),
+        _buildBusinessQrCard(),
         if (drafts.isNotEmpty) ...[
           _draftsSectionHeader(drafts.length),
           ...drafts.map(_buildDraftCard),
@@ -476,6 +529,53 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
           ])),
           const SizedBox(width: 8),
           const Icon(Icons.qr_code_2, color: Colors.white, size: 22),
+        ]),
+      ),
+    );
+  }
+
+  /// Permanent business QR card — taps through to [BusinessQRScreen]
+  /// which provisions the slug on first visit. The slug + URL are then
+  /// cached on the user doc so subsequent visits open instantly.
+  /// Sits above the events list so a brand-new business account sees
+  /// "share your QR" before "create your first event" — the QR is the
+  /// thing that drives every later RSVP.
+  Widget _buildBusinessQrCard() {
+    return GestureDetector(
+      onTap: () => Navigator.push(context,
+          MaterialPageRoute(builder: (_) => const BusinessQRScreen())),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 14),
+        padding: const EdgeInsets.fromLTRB(14, 13, 14, 13),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [_purple.withValues(alpha: 0.16), _purple.withValues(alpha: 0.06)],
+            begin: Alignment.topLeft, end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: _purple.withValues(alpha: 0.45)),
+        ),
+        child: Row(children: [
+          Container(
+            width: 44, height: 44,
+            decoration: BoxDecoration(
+              color: _purple,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [BoxShadow(color: _purple.withValues(alpha: 0.35), blurRadius: 10, offset: const Offset(0, 4))],
+            ),
+            child: const Icon(Icons.qr_code_2, color: Colors.white, size: 26),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Business QR Code',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: _isDark ? Colors.white : AppColors.dark)),
+            const SizedBox(height: 2),
+            Text('One QR for every event you host — share once, scan forever.',
+                maxLines: 2, overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: _muted, height: 1.35)),
+          ])),
+          const SizedBox(width: 6),
+          Icon(Icons.chevron_right, color: _purple, size: 22),
         ]),
       ),
     );
@@ -632,7 +732,7 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
             draftData: Map<String, dynamic>.from(event['rawData'] as Map),
           ))),
           icon: const Icon(Icons.edit_outlined, size: 14),
-          label: const Text('Continue', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
+          label: const Text('Edit & Publish', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
           style: ElevatedButton.styleFrom(
             backgroundColor: _gold,
             foregroundColor: Colors.white,
@@ -650,14 +750,16 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
   }
 
   Widget _buildUpcomingCard(Map<String, dynamic> event) {
-    final yes = event['yes'] as int;
-    final maybe = event['maybe'] as int;
-    final no = event['no'] as int;
-    final total = yes + maybe + no;
+    // The cached event['yes']/['maybe']/['no'] counters are passed only
+    // as RsvpLiveCounts.initial (avoids a 0-flash before the snapshot
+    // resolves). The summary text + progress bar below are driven by
+    // the live subcollection sum so children + plus-ones are reflected.
+    final initialYes   = event['yes']   as int? ?? 0;
+    final initialMaybe = event['maybe'] as int? ?? 0;
+    final initialNo    = event['no']    as int? ?? 0;
     final date = event['date'] as DateTime;
     final months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     final dateStr = '${months[date.month - 1]} ${date.day}, ${date.year}';
-    final progress = total > 0 ? yes / total : 0.0;
     final location = event['location'] as String;
     final coHosts = event['coHosts'] as int;
     final fg = _isDark ? Colors.white : AppColors.dark;
@@ -714,18 +816,32 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
             ]),
           ],
           const SizedBox(height: 12),
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Text('$yes going · $maybe maybe · $no can\'t', style: TextStyle(fontSize: 11, color: _muted)),
-            Text('$total total', style: const TextStyle(fontSize: 11, color: _purple, fontWeight: FontWeight.w600)),
-          ]),
-          const SizedBox(height: 5),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: progress, minHeight: 5,
-              backgroundColor: _border,
-              valueColor: const AlwaysStoppedAnimation<Color>(_purple),
-            ),
+          // Live counts from the rsvps subcollection. Sums adults +
+          // children + plusOnes per RSVP doc so a family-of-4 RSVP
+          // contributes 4 here, not 1. Cached parent counters are used
+          // only to seed the initial render.
+          RsvpLiveCounts(
+            eventId: event['id'] as String,
+            initial: (yes: initialYes, maybe: initialMaybe, no: initialNo),
+            builder: (ctx, yes, maybe, no) {
+              final total = yes + maybe + no;
+              final progress = total > 0 ? yes / total : 0.0;
+              return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  Text('$yes going · $maybe maybe · $no can\'t', style: TextStyle(fontSize: 11, color: _muted)),
+                  Text('$total total', style: const TextStyle(fontSize: 11, color: _purple, fontWeight: FontWeight.w600)),
+                ]),
+                const SizedBox(height: 5),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: progress, minHeight: 5,
+                    backgroundColor: _border,
+                    valueColor: const AlwaysStoppedAnimation<Color>(_purple),
+                  ),
+                ),
+              ]);
+            },
           ),
           if (coHosts > 0) ...[
             const SizedBox(height: 8),
@@ -825,8 +941,12 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
   }
 
   Widget _buildPastCard(Map<String, dynamic> event) {
-    final yes = event['yes'] as int;
-    final total = (event['yes'] as int) + (event['maybe'] as int) + (event['no'] as int);
+    // Cached counters seed the initial render; the live RsvpLiveCounts
+    // listener below recomputes the totals from the rsvps subcollection
+    // (correctly summing adults + children + plus-ones).
+    final initialYes   = event['yes']   as int? ?? 0;
+    final initialMaybe = event['maybe'] as int? ?? 0;
+    final initialNo    = event['no']    as int? ?? 0;
     final date = event['date'] as DateTime;
     final months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     final dateStr = '${months[date.month - 1]} ${date.day}, ${date.year}';
@@ -860,15 +980,25 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
             ),
           ]),
           const SizedBox(height: 10),
-          Row(children: [
-            _miniStat('$total', 'Total RSVPs', _purple),
-            const SizedBox(width: 16),
-            _miniStat('$yes', 'Yes RSVPs', AppColors.green),
-            if (wishlistTotal > 0) ...[
-              const SizedBox(width: 16),
-              _miniStat('\$${wishlistTotal.toStringAsFixed(2)}', 'Wishlist', _gold),
-            ],
-          ]),
+          RsvpLiveCounts(
+            eventId: event['id'] as String,
+            initial: (yes: initialYes, maybe: initialMaybe, no: initialNo),
+            builder: (ctx, yes, maybe, no) {
+              final total = yes + maybe + no;
+              return Row(children: [
+                _miniStat('$total', 'Total RSVPs', _purple),
+                const SizedBox(width: 16),
+                _miniStat('$yes', 'Yes RSVPs', AppColors.green),
+                // Wishlist total stat hidden behind kWishlistEnabled.
+                // The cached value on the card stays correct for when
+                // the beta gate re-opens.
+                if (kWishlistEnabled && wishlistTotal > 0) ...[
+                  const SizedBox(width: 16),
+                  _miniStat('\$${wishlistTotal.toStringAsFixed(2)}', 'Wishlist', _gold),
+                ],
+              ]);
+            },
+          ),
         ]),
       ),
     ),

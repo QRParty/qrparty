@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -154,11 +155,12 @@ class _SignUpScreenState extends State<SignUpScreen> {
   final _lastNameController  = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
   final _zipController = TextEditingController();
   bool _isLoading = false;
   bool _obscurePassword = true;
+  bool _obscureConfirm = true;
   String? _error;
-  String? _accountType;
 
   // Theme-aware color getters — resolve light vs dark variant from the current Theme.
   bool  get _isDark => Theme.of(context).brightness == Brightness.dark;
@@ -173,8 +175,8 @@ class _SignUpScreenState extends State<SignUpScreen> {
       setState(() => _error = 'Please fill in all fields');
       return;
     }
-    if (_accountType == null) {
-      setState(() => _error = 'Please select how you\'ll use QR Party');
+    if (_passwordController.text != _confirmPasswordController.text) {
+      setState(() => _error = "Passwords don't match");
       return;
     }
     setState(() { _isLoading = true; _error = null; });
@@ -185,50 +187,40 @@ class _SignUpScreenState extends State<SignUpScreen> {
       );
       final newUser = cred.user;
       if (newUser == null) {
-        // Defensive — should never happen on a successful create, but means we
-        // can't write the profile if it does. Surface rather than silently fail.
         throw FirebaseAuthException(code: 'user-null', message: 'Could not create user. Please try again.');
       }
       final firstName = _firstNameController.text.trim();
       final lastName  = _lastNameController.text.trim();
       final fullName  = '$firstName $lastName';
       await newUser.updateDisplayName(fullName);
-      final profileData = <String, dynamic>{
+      // merge: true so re-running this code path can't wipe fields
+      // already on the doc — e.g. an admin manually promoted to
+      // accountType='businessPlus' / isAdmin=true. Without merge, a
+      // double-tap on Sign Up (or any path that re-enters this method
+      // for an existing uid) would silently nuke admin grants.
+      await FirebaseFirestore.instance.collection('users').doc(newUser.uid).set({
         'firstName':   firstName,
         'lastName':    lastName,
         'name':        fullName,
         'email':       _emailController.text.trim(),
         'zipCode':     _zipController.text.trim(),
-        'accountType': _accountType,
+        'accountType': 'personal',
         'createdAt':   FieldValue.serverTimestamp(),
-      };
-      if (_accountType == 'business') {
-        profileData['isTrialing']     = true;
-        profileData['trialStartDate'] = FieldValue.serverTimestamp();
+      }, SetOptions(merge: true));
+      try {
+        await newUser.sendEmailVerification();
+      } catch (e) {
+        debugPrint('[SignUp] sendEmailVerification failed: $e');
       }
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(newUser.uid)
-          .set(profileData);
-      // Wait for the auth-state stream to actually reflect the new signed-in
-      // user. Without this, there's a race where popping back to the navigator
-      // root can land on the still-WelcomeScreen home before the stream emits.
       await FirebaseAuth.instance.authStateChanges().firstWhere((u) => u != null);
-      // Push HomeRouter as a fresh root route — deterministic, doesn't rely on
-      // MaterialApp.home rebuilding at exactly the right moment. HomeRouter
-      // reads the user's profile and routes to HomeFeedScreen or
-      // BusinessHomeFeedScreen, then overlays the first-login welcome card.
       if (!mounted) return;
       Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const HomeRouter()),
+        MaterialPageRoute(builder: (_) => const EmailVerificationScreen()),
         (_) => false,
       );
     } on FirebaseAuthException catch (e) {
       setState(() => _error = e.message ?? 'Could not create account.');
     } catch (e) {
-      // Catch-all for Firestore errors, network errors, type errors etc.
-      // Without this, every non-Firebase exception was silently swallowed,
-      // leaving the user staring at a frozen screen with no feedback.
       setState(() => _error = 'Something went wrong: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -278,25 +270,27 @@ class _SignUpScreenState extends State<SignUpScreen> {
               _inputField(_emailController, 'you@example.com', Icons.email_outlined, keyboardType: TextInputType.emailAddress, textInputAction: TextInputAction.next, onEditingComplete: () => FocusScope.of(context).nextFocus()),
               const SizedBox(height: 20),
               _fieldLabel('Password'),
-              _passwordField(),
+              _passwordField(_passwordController, _obscurePassword, 'Min. 6 characters',
+                  () => setState(() => _obscurePassword = !_obscurePassword),
+                  textInputAction: TextInputAction.next,
+                  onSubmitted: () => FocusScope.of(context).nextFocus()),
+              const SizedBox(height: 20),
+              _fieldLabel('Confirm Password'),
+              _passwordField(_confirmPasswordController, _obscureConfirm, 'Re-enter your password',
+                  () => setState(() => _obscureConfirm = !_obscureConfirm),
+                  textInputAction: TextInputAction.next,
+                  onSubmitted: () => FocusScope.of(context).nextFocus()),
               const SizedBox(height: 20),
               _fieldLabel('Zip Code'),
               _inputField(_zipController, 'e.g. 93955', Icons.location_on_outlined, keyboardType: TextInputType.number, textInputAction: TextInputAction.done, onEditingComplete: _signUp),
               const SizedBox(height: 8),
               Text('Used to show you local events nearby', style: TextStyle(fontSize: 12, color: _muted)),
-              const SizedBox(height: 28),
-              _fieldLabel('How will you use QR Party?'),
-              Row(children: [
-                Expanded(child: _accountTypeCard('personal', '🎉', 'Personal', 'Hosting parties and\nevents for fun')),
-                const SizedBox(width: 12),
-                Expanded(child: _accountTypeCard('business', '💼', 'Business', 'Professional event\nplanning')),
-              ]),
               const SizedBox(height: 36),
               SizedBox(
                 width: double.infinity,
                 height: 56,
                 child: ElevatedButton(
-                  onPressed: (_isLoading || _accountType == null) ? null : _signUp,
+                  onPressed: _isLoading ? null : _signUp,
                   style: ElevatedButton.styleFrom(backgroundColor: AppColors.green, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
                   child: _isLoading
                       ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
@@ -318,35 +312,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _accountTypeCard(String type, String emoji, String title, String description) {
-    final selected = _accountType == type;
-    return GestureDetector(
-      onTap: () => setState(() => _accountType = type),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: selected ? AppColors.green.withValues(alpha: 0.08) : _card,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: selected ? AppColors.green : _border,
-            width: selected ? 2 : 1,
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(emoji, style: const TextStyle(fontSize: 28)),
-            const SizedBox(height: 8),
-            Text(title, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: selected ? AppColors.green : _fg)),
-            const SizedBox(height: 4),
-            Text(description, style: TextStyle(fontSize: 12, color: _muted, height: 1.4)),
-          ],
         ),
       ),
     );
@@ -378,20 +343,27 @@ class _SignUpScreenState extends State<SignUpScreen> {
         ),
       );
 
-  Widget _passwordField() => TextField(
-        controller: _passwordController,
-        obscureText: _obscurePassword,
-        textInputAction: TextInputAction.next,
-        onSubmitted: (_) => FocusScope.of(context).nextFocus(),
+  Widget _passwordField(
+    TextEditingController controller,
+    bool obscured,
+    String hint,
+    VoidCallback toggleObscure, {
+    TextInputAction? textInputAction,
+    VoidCallback? onSubmitted,
+  }) => TextField(
+        controller: controller,
+        obscureText: obscured,
+        textInputAction: textInputAction,
+        onSubmitted: onSubmitted == null ? null : (_) => onSubmitted(),
         style: TextStyle(color: _fg, fontSize: 15),
         cursorColor: AppColors.green,
         decoration: InputDecoration(
-          hintText: 'Min. 6 characters',
+          hintText: hint,
           hintStyle: TextStyle(color: _muted),
           prefixIcon: Icon(Icons.lock_outline, color: _muted, size: 20),
           suffixIcon: IconButton(
-            icon: Icon(_obscurePassword ? Icons.visibility_outlined : Icons.visibility_off_outlined, color: _muted, size: 20),
-            onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+            icon: Icon(obscured ? Icons.visibility_outlined : Icons.visibility_off_outlined, color: _muted, size: 20),
+            onPressed: toggleObscure,
           ),
           filled: true,
           fillColor: _card,
@@ -401,6 +373,215 @@ class _SignUpScreenState extends State<SignUpScreen> {
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         ),
       );
+}
+
+// ─── EMAIL VERIFICATION SCREEN ────────────────────────────────
+class EmailVerificationScreen extends StatefulWidget {
+  const EmailVerificationScreen({super.key});
+  @override
+  State<EmailVerificationScreen> createState() => _EmailVerificationScreenState();
+}
+
+class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
+  static const _resendCooldownSeconds = 60;
+  Timer? _pollTimer;
+  Timer? _cooldownTimer;
+  int _cooldown = _resendCooldownSeconds;
+  bool _checking = false;
+  bool _resending = false;
+  String? _error;
+
+  bool  get _isDark => Theme.of(context).brightness == Brightness.dark;
+  Color get _bg     => _isDark ? _bgDark     : _bgLight;
+  Color get _border => _isDark ? _borderDark : _borderLight;
+  Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
+  Color get _fg     => _isDark ? Colors.white : AppColors.dark;
+
+  @override
+  void initState() {
+    super.initState();
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _checkVerified(silent: true));
+    _startCooldown();
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    _cooldownTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startCooldown() {
+    _cooldownTimer?.cancel();
+    setState(() => _cooldown = _resendCooldownSeconds);
+    _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return t.cancel();
+      if (_cooldown <= 1) { t.cancel(); setState(() => _cooldown = 0); }
+      else { setState(() => _cooldown -= 1); }
+    });
+  }
+
+  Future<void> _checkVerified({bool silent = false}) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    if (!silent) setState(() { _checking = true; _error = null; });
+    try {
+      await user.reload();
+      final refreshed = FirebaseAuth.instance.currentUser;
+      if (refreshed != null && refreshed.emailVerified) {
+        _pollTimer?.cancel();
+        if (!mounted) return;
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const HomeRouter()),
+          (_) => false,
+        );
+        return;
+      }
+      if (!silent && mounted) {
+        setState(() => _error = "We haven't received your verification yet. Check your inbox and tap the link.");
+      }
+    } catch (e) {
+      if (!silent && mounted) setState(() => _error = 'Could not check verification: $e');
+    } finally {
+      if (!silent && mounted) setState(() => _checking = false);
+    }
+  }
+
+  Future<void> _resend() async {
+    if (_cooldown > 0 || _resending) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    setState(() { _resending = true; _error = null; });
+    try {
+      await user.sendEmailVerification();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Verification email sent'),
+        backgroundColor: AppColors.green,
+      ));
+      _startCooldown();
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Could not resend: $e');
+    } finally {
+      if (mounted) setState(() => _resending = false);
+    }
+  }
+
+  Future<void> _signOutAndBack() async {
+    await FirebaseAuth.instance.signOut();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      (_) => false,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final email = FirebaseAuth.instance.currentUser?.email ?? 'your inbox';
+    return Scaffold(
+      backgroundColor: _bg,
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                width: 72, height: 72,
+                decoration: BoxDecoration(
+                  color: AppColors.green.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Center(child: Text('📧', style: TextStyle(fontSize: 34))),
+              ),
+              const SizedBox(height: 24),
+              Text('Check your\nemail',
+                  style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: _fg, height: 1.1, letterSpacing: -1)),
+              const SizedBox(height: 12),
+              RichText(
+                text: TextSpan(
+                  style: TextStyle(fontSize: 16, color: _muted, height: 1.5),
+                  children: [
+                    const TextSpan(text: 'We sent a verification link to '),
+                    TextSpan(text: email, style: TextStyle(color: _fg, fontWeight: FontWeight.w700)),
+                    const TextSpan(text: '. Tap the link there, then come back here.'),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 28),
+              if (_error != null) ...[
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(color: Colors.redAccent.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(12)),
+                  child: Row(children: [
+                    const Icon(Icons.info_outline, color: Colors.redAccent, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13))),
+                  ]),
+                ),
+                const SizedBox(height: 16),
+              ],
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: _checking ? null : () => _checkVerified(silent: false),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.green, foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  ),
+                  child: _checking
+                      ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                      : const Text("I've verified", style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: OutlinedButton(
+                  onPressed: (_cooldown > 0 || _resending) ? null : _resend,
+                  style: OutlinedButton.styleFrom(
+                    side: BorderSide(color: _cooldown > 0 ? _border : AppColors.green, width: 1.5),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  ),
+                  child: _resending
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: AppColors.green, strokeWidth: 2))
+                      : Text(
+                          _cooldown > 0 ? 'Resend email in ${_cooldown}s' : 'Resend email',
+                          style: TextStyle(
+                            fontSize: 15,
+                            color: _cooldown > 0 ? _muted : AppColors.green,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Center(
+                child: Text(
+                  'Auto-checking every 5 seconds',
+                  style: TextStyle(fontSize: 12, color: _muted),
+                ),
+              ),
+              const SizedBox(height: 28),
+              Center(
+                child: GestureDetector(
+                  onTap: _signOutAndBack,
+                  child: Text(
+                    'Use a different email',
+                    style: TextStyle(color: _muted, fontSize: 14, decoration: TextDecoration.underline, decorationColor: _muted),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ─── LOGIN SCREEN ─────────────────────────────────────────────
@@ -424,6 +605,76 @@ class _LoginScreenState extends State<LoginScreen> {
   Color get _border => _isDark ? _borderDark : _borderLight;
   Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
   Color get _fg     => _isDark ? Colors.white : AppColors.dark;
+
+  /// Sends a password-reset email to whatever address is currently in
+  /// the email field. Uses the same email controller as the sign-in
+  /// flow so the user doesn't have to retype it.
+  ///
+  /// Firebase's modern default behavior is to NOT throw `user-not-found`
+  /// for unknown emails — it silently swallows them to prevent email
+  /// enumeration attacks. We mirror that intentionally: the green
+  /// confirmation snackbar shows whether the email exists or not, so
+  /// nobody can probe the account database via the reset form. The
+  /// only paths that surface an error are:
+  ///   • blank / malformed input  → red banner asking for a real email
+  ///   • invalid-email from server → red banner (server-side validation)
+  ///   • network-request-failed   → "Network issue — please try again"
+  ///   • everything else (including user-not-found, if Firebase happens
+  ///     to throw it on this project) → still treated as success; the
+  ///     real reason is logged so the dev console keeps the truth.
+  Future<void> _sendPasswordReset() async {
+    final email = _emailController.text.trim();
+    if (email.isEmpty) {
+      setState(() => _error = 'Type your email above first, then tap "Forgot password?"');
+      return;
+    }
+    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(email)) {
+      setState(() => _error = 'That email address looks invalid.');
+      return;
+    }
+    setState(() { _isLoading = true; _error = null; });
+
+    void showSuccess() {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Check your inbox at $email for a reset link.'),
+        backgroundColor: AppColors.green,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+      ));
+    }
+
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      debugPrint('[Login] password reset call succeeded for $email');
+      showSuccess();
+    } on FirebaseAuthException catch (e) {
+      debugPrint('[Login] sendPasswordResetEmail code=${e.code} message=${e.message}');
+      if (!mounted) return;
+      switch (e.code) {
+        case 'invalid-email':
+          setState(() => _error = 'That email address looks invalid.');
+        case 'network-request-failed':
+          setState(() => _error = 'Network issue — please try again.');
+        case 'user-not-found':
+        case 'too-many-requests':
+        default:
+          // Treat as success in the UI (don't leak whether the account
+          // exists, don't punish the user for a backend rate limit).
+          // Real cause already logged above for debugging.
+          showSuccess();
+      }
+    } catch (e) {
+      // Anything not a FirebaseAuthException is almost certainly a
+      // transport layer problem (DNS, no network, etc.) — show success
+      // optimistically anyway, since the email may still go through
+      // once connectivity returns. Log the cause for engineers.
+      debugPrint('[Login] sendPasswordResetEmail unexpected: $e');
+      showSuccess();
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
 
   Future<void> _login() async {
     if (_emailController.text.isEmpty || _passwordController.text.isEmpty) {
@@ -530,7 +781,7 @@ class _LoginScreenState extends State<LoginScreen> {
               Align(
                 alignment: Alignment.centerRight,
                 child: GestureDetector(
-                  onTap: () => showComingSoon(context, 'Password reset'),
+                  onTap: _isLoading ? null : _sendPasswordReset,
                   child: const Text('Forgot password?', style: TextStyle(color: AppColors.green, fontWeight: FontWeight.w600, fontSize: 14)),
                 ),
               ),

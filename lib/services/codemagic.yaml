@@ -1,0 +1,24 @@
+workflows:
+  ios-workflow:
+    name: QR Party iOS
+    max_build_duration: 120
+    environment:
+      flutter: 3.41.7
+      xcode: 16.3
+      cocoapods: default
+    scripts:
+      - name: Get Flutter packages
+        script: flutter pub get
+      - name: Install pods
+        script: |
+          cd ios
+          rm -rf Pods Podfile.lock
+          pod install
+      - name: Fix BoringSSL flag
+        script: |
+          sed -i '' 's/-GCC_WARN_INHIBIT_ALL_WARNINGS//g' ios/Pods/Pods.xcodeproj/project.pbxproj
+      - name: Build iOS
+        script: |
+          flutter build ios --release --no-codesign
+    artifacts:
+      - build/ios/iphoneos/Runner.app

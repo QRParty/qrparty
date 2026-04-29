@@ -1,0 +1,88 @@
+# Uncomment this line to define a global platform for your project
+platform :ios, '13.0'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+
+    # ── BoringSSL-GRPC -G flag fix ─────────────────────────────────────
+    # Newer Xcode toolchains (15+) reject the `-G` flag that
+    # BoringSSL-GRPC's podspec injects, surfacing as:
+    #   "unsupported option '-G' for target 'arm64-apple-iosX.0'"
+    # when building for a physical iPhone/iPad. The fix is to strip
+    # `-G*` flags from every per-source COMPILER_FLAGS entry on that
+    # specific target. We also remove `-G*` from any target's
+    # OTHER_CFLAGS / OTHER_CPLUSPLUSFLAGS so a transitively-injected
+    # flag from another pod can't reintroduce the same crash.
+    #
+    # References:
+    #   https://github.com/firebase/firebase-ios-sdk/issues/11991
+    #   https://github.com/grpc/grpc/issues/34272
+    if target.name == 'BoringSSL-GRPC'
+      target.source_build_phase.files.each do |file|
+        next unless file.settings && file.settings['COMPILER_FLAGS']
+        flags = file.settings['COMPILER_FLAGS'].split
+        flags.reject! { |flag| flag == '-G' || flag.start_with?('-G') }
+        file.settings['COMPILER_FLAGS'] = flags.join(' ')
+      end
+    end
+
+    target.build_configurations.each do |config|
+      # Pin the per-pod deployment target up to the project's so a
+      # single dependency dragging in iOS 16.0 doesn't make the whole
+      # build use 16.0 (which is also what kicks BoringSSL-GRPC into
+      # the broken `-G` codepath). 13.0 matches Runner's
+      # IPHONEOS_DEPLOYMENT_TARGET in project.pbxproj.
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
+
+      # Belt-and-suspenders: strip any '-G*' flags that survived the
+      # per-file pass above (e.g. flags injected via xcconfig rather
+      # than the source-file COMPILER_FLAGS).
+      ['OTHER_CFLAGS', 'OTHER_CPLUSPLUSFLAGS'].each do |key|
+        flags = config.build_settings[key]
+        case flags
+        when Array
+          config.build_settings[key] = flags.reject { |f| f == '-G' || f.start_with?('-G') }
+        when String
+          stripped = flags.gsub(/(^|\s)-G\S*/, '\1').gsub(/\s+/, ' ').strip
+          config.build_settings[key] = stripped
+        end
+      end
+    end
+  end
+end

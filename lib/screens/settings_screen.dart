@@ -253,13 +253,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _card([
               ValueListenableBuilder<ThemeMode>(
                 valueListenable: ThemeNotifier.instance,
-                builder: (context, mode, _) => _toggleTile(
-                  mode == ThemeMode.dark ? Icons.dark_mode_outlined : Icons.light_mode_outlined,
-                  'Dark Mode',
-                  mode == ThemeMode.dark ? 'Using dark theme' : 'Using light theme',
-                  mode == ThemeMode.dark,
-                  (_) => ThemeNotifier.instance.toggle(),
-                ),
+                builder: (context, mode, _) {
+                  // For mode==system, fall back to the device brightness
+                  // so the toggle reflects what the user actually sees.
+                  // Without this, a fresh install on a dark-themed phone
+                  // would show "Using light theme" even though the app
+                  // is rendering dark.
+                  final effectiveDark = mode == ThemeMode.dark
+                      || (mode == ThemeMode.system
+                          && MediaQuery.platformBrightnessOf(context) == Brightness.dark);
+                  return _toggleTile(
+                    effectiveDark ? Icons.dark_mode_outlined : Icons.light_mode_outlined,
+                    'Dark Mode',
+                    mode == ThemeMode.system
+                        ? (effectiveDark ? 'Following system (dark)' : 'Following system (light)')
+                        : (effectiveDark ? 'Using dark theme' : 'Using light theme'),
+                    effectiveDark,
+                    (_) { ThemeNotifier.instance.toggle(currentlyDark: effectiveDark); },
+                  );
+                },
               ),
             ]),
 
@@ -319,9 +331,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   title: const Text('Log Out', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w600, fontSize: 15)),
                   onTap: () async {
                     await FirebaseAuth.instance.signOut();
-                    // Don't carry the previous session's dark toggle into
-                    // the next user's first launch.
-                    ThemeNotifier.instance.resetToLight();
+                    // Theme preference is per-device, not per-account, so
+                    // we leave the dark/light state alone on logout. Next
+                    // sign-in inherits whatever the previous user picked.
                     if (context.mounted) {
                       Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const WelcomeScreen()), (_) => false);
                     }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../utils.dart';
 
 // ── Theme palette ──────────────────────────────────────────────
@@ -35,6 +36,17 @@ class _EditEventScreenState extends State<EditEventScreen> {
   bool _isBusiness = false;
   bool _capacityEnabled = false;
   final TextEditingController _capacityController = TextEditingController();
+
+  /// Single source of truth for the capacity that lands on Firestore.
+  /// Returns null whenever the toggle is off or the parsed value isn't
+  /// a positive integer — closes the `capacity: 0 → "Event is full"
+  /// forever` bug at the data-layer entry point. Mirrors the same
+  /// helper in create_event_screen.dart.
+  int? get _persistedCapacity {
+    if (!_capacityEnabled) return null;
+    final n = int.tryParse(_capacityController.text.trim());
+    return (n != null && n > 0) ? n : null;
+  }
   bool _allowPlusOnes = false;
   int? _maxPlusOnes = 1;
   bool _allowWaitlist = true;
@@ -42,6 +54,33 @@ class _EditEventScreenState extends State<EditEventScreen> {
   bool _lookingUpCoHost = false;
   String? _coHostError;
   final List<Map<String, dynamic>> _coHosts = [];
+
+  // ── Wishlist state ────────────────────────────────────────────
+  // Host-side wishlist editor: list of items + retailer shop chips +
+  // inline Add Item form. Items here mirror the array stamped on the
+  // event doc at creation time; the existing _save() flushes any
+  // edits back to Firestore alongside the rest of the form.
+  String _listType = 'Wishlist';
+  final List<Map<String, dynamic>> _wishlistItems = [];
+  final TextEditingController _newItemNameCtrl  = TextEditingController();
+  final TextEditingController _newItemPriceCtrl = TextEditingController();
+  final TextEditingController _newItemQtyCtrl   = TextEditingController();
+
+  /// Retailer chip catalog — uses the retailer's canonical https URL
+  /// rather than a custom URI scheme. Most modern retailer apps register
+  /// these as Android App Links / iOS Universal Links, so launching the
+  /// https URL with `LaunchMode.externalApplication` lets the OS pick
+  /// the registered app when installed and falls back to the browser
+  /// otherwise. The custom-scheme `<intent>` queries in AndroidManifest
+  /// stay too, since some apps still respond to those, but we don't
+  /// need to fire them client-side anymore.
+  static const _shopChips = <({String label, String emoji, String url})>[
+    (label: 'Amazon',   emoji: '📦', url: 'https://www.amazon.com'),
+    (label: 'Target',   emoji: '🎯', url: 'https://www.target.com'),
+    (label: 'Etsy',     emoji: '🧶', url: 'https://www.etsy.com'),
+    (label: 'Walmart',  emoji: '🛒', url: 'https://www.walmart.com'),
+    (label: 'Best Buy', emoji: '🔌', url: 'https://www.bestbuy.com'),
+  ];
 
   // Theme-aware color getters — resolve light vs dark variant from the current Theme.
   bool  get _isDark => Theme.of(context).brightness == Brightness.dark;
@@ -75,17 +114,81 @@ class _EditEventScreenState extends State<EditEventScreen> {
     _allowPlusOnes = (d['allowPlusOnes'] as bool?) ?? false;
     _maxPlusOnes   = (d['maxPlusOnes']   as num?)?.toInt();
     _allowWaitlist = (d['allowWaitlist'] as bool?) ?? true;
+
+    // Hydrate the wishlist editor from whatever's on the event doc.
+    // Preserves all existing fields (price/contributed/bought/quantity/
+    // claimed) so saving doesn't clobber guest progress that's already
+    // accumulated on the items.
+    _listType = (d['listType'] as String?) ?? 'Wishlist';
+    final raw = d['wishlist'] as List<dynamic>? ?? [];
+    _wishlistItems
+      ..clear()
+      ..addAll(raw.map((e) => Map<String, dynamic>.from(e as Map)));
+
     _checkBusinessAccount();
   }
 
   @override
   void dispose() {
+    _capacityController.dispose();
+    _coHostEmailController.dispose();
     _titleController.dispose();
     _locationController.dispose();
     _descController.dispose();
-    _coHostEmailController.dispose();
-    _capacityController.dispose();
+    _newItemNameCtrl.dispose();
+    _newItemPriceCtrl.dispose();
+    _newItemQtyCtrl.dispose();
     super.dispose();
+  }
+
+  // ── Retailer chip handler ──────────────────────────────────────
+  /// Open the retailer's https URL with externalApplication mode so
+  /// Android can hand off to the registered App Link handler (the
+  /// retailer's app, when installed) instead of routing to the browser.
+  /// Falls back to a Chrome Custom Tab if external launch fails (no
+  /// browser, app missing, etc.). Custom URI schemes are no longer
+  /// fired client-side — modern retailer apps respond to App Links.
+  Future<void> _openShop(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (ok) return;
+    } catch (_) {/* fall through to in-app browser */}
+    try {
+      await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
+    } catch (_) {/* swallow — chip just becomes a no-op */}
+  }
+
+  // ── Wishlist add/remove ────────────────────────────────────────
+  void _addWishlistItem() {
+    final name = _newItemNameCtrl.text.trim();
+    if (name.isEmpty) return;
+    setState(() {
+      if (_listType == 'Checklist') {
+        _wishlistItems.add({
+          'name': name,
+          'quantity': _newItemQtyCtrl.text.trim(),
+          'claimed': 0,
+          'claims': <Map<String, dynamic>>[],
+        });
+      } else {
+        final price = double.tryParse(_newItemPriceCtrl.text.trim()) ?? 0.0;
+        _wishlistItems.add({
+          'name': name,
+          'price': price,
+          'contributed': 0.0,
+          'bought': false,
+        });
+      }
+      _newItemNameCtrl.clear();
+      _newItemPriceCtrl.clear();
+      _newItemQtyCtrl.clear();
+    });
+  }
+
+  void _removeWishlistItem(int index) {
+    setState(() => _wishlistItems.removeAt(index));
   }
 
   Future<void> _checkBusinessAccount() async {
@@ -221,10 +324,19 @@ class _EditEventScreenState extends State<EditEventScreen> {
         'isPublic': _isPublic,
         'rsvpDeadline': _rsvpDeadline != null ? Timestamp.fromDate(_rsvpDeadline!) : null,
         'coHosts': _coHosts.map((c) => c['uid'] as String).toList(),
-        'capacity': _capacityEnabled ? int.tryParse(_capacityController.text.trim()) : null,
+        // Capacity + waitlist are gated by _persistedCapacity so a 0 /
+        // empty / non-numeric capacity field can't sneak into Firestore
+        // — and waitlist stays off when there's no real cap (waitlist
+        // without a cap has no trigger to fire on).
+        'capacity': _persistedCapacity,
         'allowPlusOnes': _allowPlusOnes,
         'maxPlusOnes': _allowPlusOnes ? _maxPlusOnes : null,
-        'allowWaitlist': _capacityEnabled ? _allowWaitlist : false,
+        'allowWaitlist': _persistedCapacity != null && _allowWaitlist,
+        // Persist any wishlist add/remove edits made via the host-side
+        // editor below. We write the full list back wholesale so removals
+        // take effect; existing item fields (price/contributed/bought/
+        // claimed) are preserved when the host doesn't touch them.
+        'wishlist': _wishlistItems,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
@@ -576,6 +688,18 @@ class _EditEventScreenState extends State<EditEventScreen> {
             _buildCoHostSection(),
             const SizedBox(height: 14),
           ],
+          // Wishlist / Checklist editor — only relevant when the event
+          // has a list. Hidden entirely for `'No List'` events, and
+          // also hidden for `'Wishlist'` events while the Wishlist beta
+          // gate is closed (`kWishlistEnabled = false`) so the host
+          // can't add wishlist items via this screen during beta. The
+          // existing wishlist array on the event doc is preserved
+          // either way; the editor section just doesn't render.
+          if (_listType == 'Checklist' ||
+              (_listType == 'Wishlist' && kWishlistEnabled)) ...[
+            _buildWishlistSection(),
+            const SizedBox(height: 14),
+          ],
           _buildCapacitySection(),
           const SizedBox(height: 14),
           _sectionCard(
@@ -643,4 +767,200 @@ class _EditEventScreenState extends State<EditEventScreen> {
     decoration: BoxDecoration(color: _card, borderRadius: BorderRadius.circular(14), border: Border.all(color: _border)),
     child: child,
   );
+
+  // ── Wishlist section ──────────────────────────────────────────
+  // Three blocks stacked: retailer chips at the top, the existing item
+  // list with per-row remove buttons in the middle, and an inline Add
+  // Item form at the bottom. Edits are kept in memory until the host
+  // hits Save in the AppBar — the existing _save() flushes _wishlistItems
+  // back to the events doc as the canonical wishlist array.
+  Widget _buildWishlistSection() {
+    final fg = _isDark ? Colors.white : AppColors.dark;
+    final isChecklist = _listType == 'Checklist';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          isChecklist ? 'CHECKLIST' : 'WISHLIST',
+          style: TextStyle(
+            fontFamily: 'Nunito', fontSize: 11, fontWeight: FontWeight.w800,
+            letterSpacing: 1.4, color: _muted,
+          ),
+        ),
+        const SizedBox(height: 8),
+        // Retailer chips — tap opens the store's app or web fallback so
+        // the host can browse, then come back and add an item below
+        // (or use the system share sheet → "Add to QR Party" to push a
+        // shared product into the event's wishlist subcollection).
+        if (!isChecklist) ...[
+          _sectionCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Browse stores',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: fg),
+                ),
+                const SizedBox(height: 8),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(children: [
+                    for (final s in _shopChips) ...[
+                      _shopChip(s),
+                      const SizedBox(width: 8),
+                    ],
+                  ]),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Tap a store, find an item, then use the share menu → "Add to QR Party" — or add manually below.',
+                  style: TextStyle(fontSize: 11, color: _muted, height: 1.4),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+        // Existing items + per-row remove. Empty state shows a quiet
+        // hint so the host knows where to add.
+        if (_wishlistItems.isEmpty)
+          _sectionCard(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Text(
+                isChecklist
+                    ? 'No checklist items yet — add one below.'
+                    : 'No wishlist items yet — browse a store above or add manually.',
+                style: TextStyle(fontSize: 12.5, color: _muted),
+              ),
+            ),
+          )
+        else
+          Column(children: [
+            for (int i = 0; i < _wishlistItems.length; i++) ...[
+              _sectionCard(
+                child: Row(children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          (_wishlistItems[i]['name'] as String?) ?? '',
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: fg),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          isChecklist
+                              ? ((_wishlistItems[i]['quantity'] as String?)?.isNotEmpty == true
+                                  ? 'Qty: ${_wishlistItems[i]['quantity']}'
+                                  : 'No quantity set')
+                              : '\$${(((_wishlistItems[i]['price'] as num?) ?? 0).toDouble()).toStringAsFixed(2)}',
+                          style: TextStyle(fontSize: 12, color: _muted),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
+                    tooltip: 'Remove',
+                    onPressed: () => _removeWishlistItem(i),
+                  ),
+                ]),
+              ),
+              if (i < _wishlistItems.length - 1) const SizedBox(height: 8),
+            ],
+          ]),
+        const SizedBox(height: 10),
+        // Inline add form — name + (price OR quantity depending on
+        // listType) + green plus button.
+        _sectionCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Add ${isChecklist ? 'a checklist item' : 'a wishlist item'}',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: fg),
+              ),
+              const SizedBox(height: 8),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: _newItemNameCtrl,
+                    style: TextStyle(color: fg),
+                    onSubmitted: (_) => _addWishlistItem(),
+                    decoration: InputDecoration(
+                      hintText: isChecklist ? 'Item to bring' : 'Item name',
+                      hintStyle: TextStyle(color: _muted, fontSize: 13),
+                      isDense: true,
+                      filled: true,
+                      fillColor: _bg,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: _border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: _border)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.green, width: 1.5)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 92,
+                  child: TextField(
+                    controller: isChecklist ? _newItemQtyCtrl : _newItemPriceCtrl,
+                    keyboardType: isChecklist
+                        ? TextInputType.text
+                        : const TextInputType.numberWithOptions(decimal: true),
+                    style: TextStyle(color: fg),
+                    onSubmitted: (_) => _addWishlistItem(),
+                    decoration: InputDecoration(
+                      hintText: isChecklist ? '2 bags' : r'$ 0.00',
+                      hintStyle: TextStyle(color: _muted, fontSize: 13),
+                      isDense: true,
+                      filled: true,
+                      fillColor: _bg,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: _border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: _border)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.green, width: 1.5)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  icon: const Icon(Icons.add_circle, color: AppColors.green, size: 28),
+                  tooltip: 'Add item',
+                  onPressed: _addWishlistItem,
+                ),
+              ]),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _shopChip(({String label, String emoji, String url}) s) {
+    return InkWell(
+      onTap: () => _openShop(s.url),
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: _bg,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: _border),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text(s.emoji, style: const TextStyle(fontSize: 16)),
+          const SizedBox(width: 8),
+          Text(
+            s.label,
+            style: TextStyle(
+              fontFamily: 'Nunito', fontSize: 13, fontWeight: FontWeight.w800,
+              color: _isDark ? Colors.white : AppColors.dark,
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
 }

@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../utils.dart';
 import 'home_feed_screen.dart';
 import 'business_home_feed_screen.dart';
+import 'headquarters_home_feed_screen.dart';
 
 /// Routes a signed-in user to the right home feed based on their Firestore
 /// profile (personal vs business vs business-plus, with promo-account expiry
@@ -53,17 +55,34 @@ class HomeRouter extends StatelessWidget {
               'businessExpiry': FieldValue.delete(),
             });
           });
-          return const _WelcomeGate(child: HomeFeedScreen());
+          return _WelcomeGate(child: HomeFeedScreen(key: ValueKey('home-${user.uid}')));
         }
 
         final isBusinessLike = (accountType == 'business' || accountType == 'businessPlus') && !isTrialing;
+        final isHeadquarters = accountType == 'businessPlus' && !isTrialing;
         // Business users can opt into the personal view via Settings → Switch Account.
         // Pref is stored locally via ViewPreferenceNotifier (SharedPreferences key 'preferBusinessView').
         return ValueListenableBuilder<bool>(
           valueListenable: ViewPreferenceNotifier.instance,
           builder: (context, preferBusiness, _) {
             final showBusiness = isBusinessLike && preferBusiness;
-            final home = showBusiness ? const BusinessHomeFeedScreen() : const HomeFeedScreen();
+            // Key every home variant by uid so a sign-out → sign-in to a
+            // different account forces a fresh State (and a fresh
+            // _eventsSub scoped to the new user). Without this, Flutter's
+            // element-tree reconciliation matches the same widget type +
+            // null key in the same slot and REUSES the previous user's
+            // _HomeFeedScreenState — leaking the prior user's drafts +
+            // events into the new user's feed because initState (and
+            // therefore _subscribeToEvents) never runs again.
+            final homeKey = ValueKey('home-${user.uid}');
+            final Widget home;
+            if (showBusiness && isHeadquarters) {
+              home = HeadquartersHomeFeedScreen(key: homeKey);
+            } else if (showBusiness) {
+              home = BusinessHomeFeedScreen(key: homeKey);
+            } else {
+              home = HomeFeedScreen(key: homeKey);
+            }
             return _WelcomeGate(child: home);
           },
         );
@@ -127,50 +146,100 @@ class _WelcomeGateState extends State<_WelcomeGate> {
         widget.child,
         Positioned.fill(
           child: ColoredBox(
-            color: Colors.black.withValues(alpha: 0.7),
+            color: Colors.black.withValues(alpha: 0.55),
             child: Center(
               child: Container(
                 margin: const EdgeInsets.symmetric(horizontal: 28),
-                padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
+                padding: const EdgeInsets.fromLTRB(28, 32, 28, 24),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF383B56),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: const Color(0xFF4A4E6B)),
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.green.withValues(alpha: 0.18),
+                      blurRadius: 40,
+                      offset: const Offset(0, 16),
+                    ),
+                  ],
                 ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // Brand mark — wordmark + scannable QR. Mirrors the
+                    // welcome_screen.dart logo card so the popup feels like
+                    // a continuation of the sign-in experience.
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('QR',    style: TextStyle(fontSize: 36, fontWeight: FontWeight.w900, color: AppColors.dark, height: 1)),
+                            Text('Party', style: TextStyle(fontSize: 28, fontWeight: FontWeight.w300, color: AppColors.purple, height: 1)),
+                          ],
+                        ),
+                        const SizedBox(width: 10),
+                        Container(
+                          width: 56, height: 56,
+                          padding: const EdgeInsets.all(3),
+                          decoration: BoxDecoration(color: AppColors.dark, borderRadius: BorderRadius.circular(7)),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: QrImageView(
+                              data: 'https://partywithqr.com',
+                              version: QrVersions.auto,
+                              backgroundColor: Colors.white,
+                              padding: const EdgeInsets.all(2),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 28),
                     const Text(
-                      'Welcome to QR Party! 🎉',
+                      'One QR code.\nEvery RSVP handled.',
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        fontFamily: 'Fredoka One',
-                        fontSize: 24,
-                        color: Color(0xFFC8922A),
+                        // DM Sans gives the headline a slightly geometric,
+                        // editorial feel that pairs with the brand QR mark.
+                        fontFamily: 'DM Sans',
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.dark,
+                        height: 1.25,
+                        letterSpacing: -0.4,
                       ),
                     ),
-                    const SizedBox(height: 22),
-                    _welcomeRow('Tap + to create your first event'),
                     const SizedBox(height: 12),
-                    _welcomeRow('Tap the QR code icon to share it'),
-                    const SizedBox(height: 12),
-                    _welcomeRow('Guests scan and RSVP instantly'),
-                    const SizedBox(height: 12),
-                    _welcomeRow('Watch it all happen in real time'),
-                    const SizedBox(height: 24),
+                    Text(
+                      'Create an event, share the code, watch RSVPs roll in.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        // Inter for body — most readable modern UI sans, sets
+                        // the baseline tone for the rest of the popup.
+                        fontFamily: 'Inter',
+                        fontSize: 14,
+                        color: AppColors.muted,
+                        height: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: 28),
                     SizedBox(
                       width: double.infinity,
+                      height: 52,
                       child: ElevatedButton(
                         onPressed: _dismiss,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF9C7FD4),
+                          backgroundColor: AppColors.green,
                           foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          elevation: 0,
+                          textStyle: const TextStyle(fontFamily: 'Inter'),
                         ),
                         child: const Text(
-                          "Got it! Let's Party 🎉",
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                          'Get Started',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, letterSpacing: 0.2),
                         ),
                       ),
                     ),
@@ -183,14 +252,4 @@ class _WelcomeGateState extends State<_WelcomeGate> {
       ],
     );
   }
-
-  Widget _welcomeRow(String label) => Row(
-        children: [
-          const Text('✦', style: TextStyle(fontSize: 18, color: Color(0xFFC8922A))),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 15)),
-          ),
-        ],
-      );
 }

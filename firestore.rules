@@ -65,6 +65,29 @@ service cloud.firestore {
           (isCoHost(eventId)
             && request.resource.data.hostId == resource.data.hostId
             && request.resource.data.coHosts == resource.data.coHosts)
+          ||
+          // RSVP counter increments — any signed-in user (including
+          // anonymous web visitors on event.html) may update ONLY the
+          // yes/maybe/no fields, no others. The hasOnly() guard makes
+          // this path useless for anything except keeping the cached
+          // counters on the event doc in sync with the rsvps
+          // subcollection. Hosts already cover this in their full
+          // update branch above; this is purely the web-RSVP path.
+          (request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['yes', 'maybe', 'no']))
+          ||
+          // Wishlist / checklist claim from the web RSVP page. The web
+          // page rewrites the entire wishlist array (read-modify-write
+          // pattern — Firestore can't increment one element of an
+          // array). hasOnly(['wishlist']) confines the blast radius to
+          // exactly this field so a misbehaving client can't, say,
+          // delete the event by zeroing other fields. The downside is a
+          // determined attacker could clobber the wishlist; that's
+          // acceptable for an invited-only RSVP page where every guest
+          // already had the link, and recoverable from the host side
+          // (it's just an array on the event doc).
+          (request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['wishlist']))
         );
 
       // Delete permissions:
@@ -86,19 +109,41 @@ service cloud.firestore {
         );
 
       // ── RSVPs ───────────────────────────────────────────────────────────────
-      // Document ID is the guest's uid.
-      // Guests read/write their own RSVP; the host can read all RSVPs.
+      // Two write paths share this collection:
+      //   • App RSVP — doc id is the guest's auth uid; only that user can
+      //     read/update it. Standard per-account flow.
+      //   • Web RSVP — doc id is the guest's email, written by an
+      //     anonymously-authed visitor on event.html. Identified by
+      //     source=='web'. Create-only (no update) to prevent a returning
+      //     anon visitor from rewriting a stranger's RSVP.
+      //
+      // Read access is intentionally open to any signed-in user so guests
+      // can see the live headcount + guest list for events they've been
+      // invited to. The privacy trade-off (guest names/emails are visible
+      // to other invited guests) is acceptable for an invited-only party
+      // app. Hosts who don't want this should keep their event link
+      // private — the rsvps subcollection is only enumerable by callers
+      // who already have the eventId.
 
-      match /rsvps/{uid} {
-        allow read: if isSignedIn()
-          && (isUser(uid) || isHostOrCoHost(eventId) || isAdmin());
+      match /rsvps/{rsvpId} {
+        allow read: if isSignedIn();
 
         allow create, update: if isSignedIn()
-          && isUser(uid)
+          && isUser(rsvpId)
           && request.resource.data.status in ['Yes', 'Maybe', 'No'];
 
+        // Web RSVP create — anonymous auth is fine; doc id must equal
+        // the email field, source must be 'web', status must be valid.
+        allow create: if isSignedIn()
+          && request.resource.data.source == 'web'
+          && request.resource.data.email is string
+          && request.resource.data.email == rsvpId
+          && request.resource.data.status in ['Yes', 'Maybe', 'No']
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0;
+
         allow delete: if isSignedIn()
-          && (isUser(uid) || isHostOrCoHost(eventId));
+          && (isUser(rsvpId) || isHostOrCoHost(eventId));
       }
 
       // ── PHOTOS ──────────────────────────────────────────────────────────────
@@ -201,6 +246,37 @@ service cloud.firestore {
       }
     }
 
+    // ── BUSINESSES (per-account public QR landing page) ──────────────────────
+    // Each Business / Headquarters account that generates a permanent business
+    // QR code provisions a doc here keyed by `slug`. The public web page at
+    // partywithqr.com/biz/{slug} resolves the slug to ownerId, then lists the
+    // owner's upcoming public events. Mirrors the organizations/{orgId} pattern
+    // used by /org/{orgId}: world-readable so anonymous scanners can render the
+    // page, owner-only writes, ownerId can never be reassigned.
+    //
+    // Slug uniqueness is enforced by using the slug AS the document id —
+    // create writes that target an existing slug fail at the create rule
+    // because `resource` is non-null on a doc that already exists, and the
+    // `&& resource == null` guard rejects clobbering. (Firestore semantics:
+    // for create rules, an existing doc makes `resource` non-null and the
+    // rule's create branch never fires; the update branch then runs and
+    // requires the caller to be the existing owner.)
+
+    match /businesses/{slug} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0;
+
+      allow update: if isSignedIn()
+        && resource.data.ownerId == request.auth.uid
+        && request.resource.data.ownerId == resource.data.ownerId;
+
+      allow delete: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+    }
+
     // ── RECURRING EVENT SERIES ────────────────────────────────────────────────
     // A series doc stores the rule + template used to auto-generate the next
     // event. Read/write restricted to the series owner; Cloud Functions (Admin
@@ -226,11 +302,27 @@ service cloud.firestore {
     }
 
     // ── EMAIL OUTBOX ─────────────────────────────────────────────────────────
-    // Consumed by the Firebase Trigger Email extension. Only Cloud Functions
-    // (Admin SDK) write to this collection — no client paths.
+    // Consumed by the Firebase Trigger Email extension. The host
+    // notification flow writes to this collection directly to email
+    // RSVP'd guests who lack an FCM token (typically web RSVPs that
+    // never auth'd through the app). Authorization is anchored to the
+    // event the message is about: only the host or a co-host of that
+    // event may create a mail doc, and the doc must include `eventId`
+    // so the rule can perform the host check. Reads/updates/deletes
+    // remain locked — clients should never enumerate or mutate the
+    // mail queue.
+    //
+    // Required client-written shape:
+    //   { to: list<string>, message: { subject: string, ... },
+    //     eventId: string, ... }
 
     match /mail/{docId} {
-      allow read, write: if false;
+      allow read, update, delete: if false;
+      allow create: if isSignedIn()
+        && request.resource.data.eventId is string
+        && isHostOrCoHost(request.resource.data.eventId)
+        && request.resource.data.to is list
+        && request.resource.data.message is map;
     }
 
     // ── ADMIN CONFIG ──────────────────────────────────────────────────────────
@@ -241,12 +333,24 @@ service cloud.firestore {
     }
 
     // ── NOTIFICATION QUEUE ────────────────────────────────────────────────────
-    // Written by Cloud Functions (Admin SDK bypasses these rules).
-    // The client app creates documents here to trigger push notifications.
-    // No client reads, updates, or deletes — Cloud Functions own the lifecycle.
+    // Written by clients to trigger a multicast push (e.g. host blasts a
+    // message to every guest). A Cloud Function then drains the queue via
+    // the Admin SDK (which bypasses these rules entirely).
+    //
+    // create — gated to the event's host / co-host (or admin). The doc
+    //   MUST include an eventId field so the rule can verify ownership;
+    //   any client write missing it falls through and is rejected.
+    // read / update / delete — Cloud Function only, never the client.
+    //
+    // Note: in a create rule, the doc being written lives at
+    // `request.resource.data` (the existing `resource` is null since the
+    // doc doesn't exist yet) — checking `resource.data.eventId` would
+    // always be null and reject every write.
 
     match /notificationQueue/{docId} {
-      allow create: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.eventId is string
+        && (isHostOrCoHost(request.resource.data.eventId) || isAdmin());
       allow read, update, delete: if false;
     }
 
@@ -259,6 +363,30 @@ service cloud.firestore {
     match /notificationTasks/{docId} {
       allow write: if isSignedIn();
       allow read, delete: if false;
+    }
+
+    // ── REPORTS ──────────────────────────────────────────────────────────────
+    // User-submitted moderation flags. Any signed-in user can create a
+    // report on a photo they're viewing in the picture wall; only admins
+    // (via the Admin SDK) read/triage them. The create rule pins
+    // `reportedBy` to the caller's uid so a malicious client can't forge
+    // reports under another user's name.
+    //
+    // Required shape:
+    //   { photoUrl: string, eventId: string, reportedBy: string,
+    //     reason: string, timestamp: Timestamp }
+    // Optional: photoId, details (free-text for the "Other" reason).
+
+    match /reports/{reportId} {
+      allow create: if isSignedIn()
+        && request.resource.data.reportedBy == request.auth.uid
+        && request.resource.data.photoUrl is string
+        && request.resource.data.eventId is string
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() > 0;
+      // Triage happens out-of-band (Admin SDK / dashboard); clients
+      // never read or mutate reports they've already filed.
+      allow read, update, delete: if false;
     }
   }
 }

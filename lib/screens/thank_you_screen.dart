@@ -31,6 +31,7 @@ class ThankYouScreen extends StatefulWidget {
 class _ThankYouScreenState extends State<ThankYouScreen> {
   bool _loading = true;
   bool _isBusiness = false;
+  bool _isHeadquarters = false;
   List<Map<String, dynamic>> _guests = [];
   final Set<String> _sent = {};
 
@@ -65,7 +66,14 @@ class _ThankYouScreenState extends State<ThankYouScreen> {
       if (fUser != null) {
         final userSnap = await fUser;
         final d = userSnap.data() ?? {};
-        _isBusiness = d['accountType'] == 'business' && d['isTrialing'] != true;
+        // _isBusiness gates business-only thank-you affordances — both
+        // tiers (Business + Headquarters) qualify. _isHeadquarters
+        // separately differentiates the top tier so the AppBar badge
+        // can read "HEADQUARTERS" instead of "PRO".
+        final acct = d['accountType'];
+        final activated = d['isTrialing'] != true;
+        _isHeadquarters = acct == 'businessPlus' && activated;
+        _isBusiness = activated && (acct == 'business' || acct == 'businessPlus');
       }
 
       // uid → checklist items claimed
@@ -191,7 +199,10 @@ class _ThankYouScreenState extends State<ThankYouScreen> {
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(color: _gold.withValues(alpha: 0.4)),
                         ),
-                        child: const Text('PRO', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _gold, letterSpacing: 0.5)),
+                        child: Text(
+                          _isHeadquarters ? 'HEADQUARTERS' : 'PRO',
+                          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _gold, letterSpacing: 0.5),
+                        ),
                       ),
                   ]),
                 ),

@@ -8,12 +8,19 @@ import '../services/merch_order_service.dart';
 import '../widgets/theme_card.dart';
 import '../widgets/invitation_preview.dart';
 
-const _bgDark   = Color(0xFF2D3047);
-const _cardDark = Color(0xFF383B56);
-const _border   = Color(0xFF4A4E6B);
-const _muted    = Color(0xFFA9A6B8);
-const _purple   = Color(0xFF9C7FD4);
-const _gold     = Color(0xFFC8922A);
+// Theme-aware palette. The State class reads these via getters that pick
+// dark / light based on Theme.of(context). `_purple` and `_gold` look
+// fine on either background so they stay tier-neutral.
+const _bgDark      = Color(0xFF2D3047);
+const _bgLight     = Color(0xFFF8F7FC);
+const _cardDark    = Color(0xFF383B56);
+const _cardLight   = Colors.white;
+const _borderDark  = Color(0xFF4A4E6B);
+const _borderLight = Color(0xFFE0E8E0);
+const _mutedDark   = Color(0xFFA9A6B8);
+const _mutedLight  = Color(0xFF8892A4);
+const _purple      = Color(0xFF9C7FD4);
+const _gold        = Color(0xFFC8922A);
 
 /// Theme catalog keys allowed when the birthday sub-category is Kids.
 /// Mirrors the Phase 1 themed designs in invitation_preview.dart — keep
@@ -78,8 +85,20 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
   final _line1 = TextEditingController();
   final _line2 = TextEditingController();
   final _city  = TextEditingController();
-  final _state = TextEditingController();
+  String? _stateAbbr;
   final _zip   = TextEditingController();
+
+  // 50 US states + DC. The shipping form is US-only today (see _stepAddress
+  // copy), so this is the canonical pick list. Two-letter abbreviations are
+  // what gets stored on the order doc + sent to the print fulfillment vendor.
+  static const _usStates = <String>[
+    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA',
+    'HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
+    'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+    'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+    'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY',
+    'DC',
+  ];
 
   MerchShipping _shipping = MerchShipping.standard;
 
@@ -87,21 +106,57 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
   String? _orderId;
   DateTime? _estDelivery;
 
+  // Theme-aware palette getters. Resolve dark vs light variant from
+  // Theme.of(context). Mirrors the pattern used in business_home_feed_screen
+  // / generate_qr_screen — the order flow used to be hardcoded dark only,
+  // which made it stand out as a black surface inside a light-themed app.
+  bool  get _isDark => Theme.of(context).brightness == Brightness.dark;
+  Color get _bg     => _isDark ? _bgDark     : _bgLight;
+  Color get _card   => _isDark ? _cardDark   : _cardLight;
+  Color get _border => _isDark ? _borderDark : _borderLight;
+  Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
+  Color get _fg     => _isDark ? Colors.white : AppColors.dark;
+
   String _accountTier = 'personal';
   // Cached for the invitation preview when the user is on Business Plus.
   // Falls back to the QR Party wordmark inside InvitationPreviewSheet if null.
   String? _orgLogoUrl;
 
+  // Resolved short code for the invitation preview's typeable URL line.
+  // Seeded from widget.shortCode if the caller passed one (the
+  // generate_qr_screen path does); otherwise fetched from the event doc
+  // in [_resolveShortCode] so the popup-from-create-event path lands on
+  // an identical preview. Without this, the popup-launched preview was
+  // missing the partywithqr.com/event/XXXXXX line that the QR-page-launched
+  // preview always shows — same screen, two different visuals.
+  String? _shortCode;
+
   @override
   void initState() {
     super.initState();
+    _shortCode = widget.shortCode;
     _loadAccountTierAndPrefill();
+    if (_shortCode == null || _shortCode!.isEmpty) {
+      _resolveShortCode();
+    }
+  }
+
+  Future<void> _resolveShortCode() async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('events').doc(widget.eventId).get();
+      if (!mounted) return;
+      final code = snap.data()?['shortCode'] as String?;
+      if (code != null && code.isNotEmpty) {
+        setState(() => _shortCode = code);
+      }
+    } catch (_) {/* preview falls back to no typeable URL — non-fatal */}
   }
 
   @override
   void dispose() {
     _name.dispose(); _line1.dispose(); _line2.dispose();
-    _city.dispose(); _state.dispose(); _zip.dispose();
+    _city.dispose(); _zip.dispose();
     super.dispose();
   }
 
@@ -120,7 +175,8 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
       _line1.text = (addr['line1'] as String?) ?? '';
       _line2.text = (addr['line2'] as String?) ?? '';
       _city.text  = (addr['city']  as String?) ?? '';
-      _state.text = (addr['state'] as String?) ?? '';
+      final addrState = (addr['state'] as String?)?.toUpperCase();
+      _stateAbbr = (addrState != null && _usStates.contains(addrState)) ? addrState : null;
       _zip.text   = (addr['zip']   as String?) ?? '';
     }
 
@@ -146,7 +202,7 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
     line1: _line1.text.trim(),
     line2: _line2.text.trim(),
     city:  _city.text.trim(),
-    state: _state.text.trim().toUpperCase(),
+    state: _stateAbbr ?? '',
     zip:   _zip.text.trim(),
   );
 
@@ -170,9 +226,12 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
 
   /// Steps that are part of the interactive flow (excludes confirmation).
   /// Birthday events get an extra age-range step before theme selection.
+  /// Stickers skip the theme + birthdaySubCategory steps entirely — those
+  /// only drive the invitation art catalog, and stickers ship with the QR
+  /// over a fixed brand mark regardless of theme.
   List<_StepKind> get _steps => [
-    if (_isBirthday) _StepKind.birthdaySubCategory,
-    _StepKind.theme,
+    if (_isBirthday && _product == MerchProduct.invitation) _StepKind.birthdaySubCategory,
+    if (_product == MerchProduct.invitation) _StepKind.theme,
     _StepKind.pack,
     _StepKind.address,
     _StepKind.shipping,
@@ -258,17 +317,17 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: _bgDark,
+      backgroundColor: _bg,
       appBar: AppBar(
-        backgroundColor: _bgDark,
+        backgroundColor: _bg,
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         leading: IconButton(
-          icon: const Icon(Icons.close, color: Colors.white),
+          icon: Icon(Icons.close, color: _fg),
           onPressed: () => Navigator.of(context).pop(_orderId),
         ),
         title: Text('Order $_productLabel',
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 17)),
+            style: TextStyle(color: _fg, fontWeight: FontWeight.w700, fontSize: 17)),
       ),
       body: SafeArea(
         child: Column(children: [
@@ -306,13 +365,13 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
     final isFinal = _currentStep == _StepKind.summary;
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
-      decoration: const BoxDecoration(border: Border(top: BorderSide(color: _border))),
+      decoration: BoxDecoration(border: Border(top: BorderSide(color: _border))),
       child: Row(children: [
         if (_step > 0)
           OutlinedButton(
             onPressed: _placing ? null : _back,
             style: OutlinedButton.styleFrom(
-              foregroundColor: _muted, side: const BorderSide(color: _border),
+              foregroundColor: _muted, side: BorderSide(color: _border),
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             ),
@@ -386,7 +445,7 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
         margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: _cardDark, borderRadius: BorderRadius.circular(16),
+          color: _card, borderRadius: BorderRadius.circular(16),
           border: Border.all(color: selected ? _purple : _border, width: selected ? 1.6 : 1),
         ),
         child: Row(children: [
@@ -405,9 +464,9 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
           Expanded(
             child: Text(
               c.label,
-              style: const TextStyle(
+              style: TextStyle(
                 fontFamily: 'FredokaOne',
-                color: Colors.white, fontSize: 17, height: 1.1,
+                color: _fg, fontSize: 17, height: 1.1,
               ),
             ),
           ),
@@ -435,8 +494,10 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
         GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
+          // 0.7 ≈ 4/6 invitation aspect — gives each tile enough vertical
+          // room to render the full mini design instead of cropping it.
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 2, mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: 1.05,
+            crossAxisCount: 2, mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: 0.7,
           ),
           itemCount: themes.length,
           itemBuilder: (_, i) {
@@ -445,6 +506,7 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
               theme: t,
               variantIndex: t.key == _themeKey ? _themeVariant : 0,
               selected: t.key == _themeKey,
+              isKidsBirthday: showKidsOnly,
               onTap: () => setState(() {
                 _themeKey = t.key;
                 _themeVariant = 0;
@@ -463,8 +525,8 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
     final theme = themeByKey(_themeKey);
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 10, 20, 10),
-      decoration: const BoxDecoration(
-        color: _bgDark,
+      decoration: BoxDecoration(
+        color: _bg,
         border: Border(top: BorderSide(color: _border)),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -504,6 +566,7 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
   // ── Step 1: pack ──────────────────────────────────────────────
   Widget _stepPack() {
     final sizes = MerchPricing.packsFor(_product);
+    final isKidsBirthday = _isBirthday && _kidsThemesFor(_birthdaySubCategory);
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
       children: [
@@ -512,6 +575,35 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
         _desc(_product == MerchProduct.invitation
             ? 'Invitations ship as 4×6 cards with envelopes.'
             : 'Stickers ship pre-printed on a single sheet, ready to peel.'),
+        // Show a blank preview of the chosen theme above the pack tiles so
+        // the user sees what their invitation looks like before committing
+        // to a pack size. Stickers skip this — their preview is trivial.
+        if (_product == MerchProduct.invitation) ...[
+          const SizedBox(height: 16),
+          Center(
+            child: SizedBox(
+              width: 220,
+              child: AspectRatio(
+                aspectRatio: 4 / 6,
+                child: ThemeMiniPreview(
+                  theme: themeByKey(_themeKey),
+                  variantIndex: _themeVariant,
+                  isKidsBirthday: isKidsBirthday,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Center(
+            child: Text(
+              'Preview · ${themeByKey(_themeKey).name}',
+              style: TextStyle(
+                fontFamily: 'Nunito', fontSize: 11, fontWeight: FontWeight.w700,
+                color: _muted, letterSpacing: 1.2,
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 16),
         for (final s in sizes) _packTile(s),
       ],
@@ -534,7 +626,7 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
         margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: _cardDark, borderRadius: BorderRadius.circular(16),
+          color: _card, borderRadius: BorderRadius.circular(16),
           border: Border.all(color: selected ? _purple : _border, width: selected ? 1.6 : 1),
         ),
         child: Row(children: [
@@ -549,7 +641,7 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
           ),
           const SizedBox(width: 14),
           Expanded(child: Text('$size pack',
-              style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w800))),
+              style: TextStyle(color: _fg, fontSize: 16, fontWeight: FontWeight.w800))),
           Text(cents == null ? '—' : MerchPricing.format(cents),
               style: const TextStyle(color: _gold, fontSize: 16, fontWeight: FontWeight.w800)),
         ]),
@@ -565,7 +657,7 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
     InvitationPreviewSheet.show(
       context,
       eventId: widget.eventId,
-      shortCode: widget.shortCode,
+      shortCode: _shortCode,
       theme: themeByKey(_themeKey),
       themeVariant: _themeVariant,
       eventName: widget.eventTitle,
@@ -595,7 +687,7 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
         Row(children: [
           Expanded(flex: 3, child: _input(_city, 'City')),
           const SizedBox(width: 10),
-          Expanded(flex: 1, child: _input(_state, 'State', maxLength: 2)),
+          Expanded(flex: 1, child: _stateDropdown()),
         ]),
         _input(_zip, 'ZIP', keyboard: TextInputType.number),
       ],
@@ -607,15 +699,45 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
       padding: const EdgeInsets.only(bottom: 12),
       child: TextField(
         controller: c, keyboardType: keyboard, maxLength: maxLength,
-        style: const TextStyle(color: Colors.white),
+        style: TextStyle(color: _fg),
         onChanged: (_) => setState(() {}),
         decoration: InputDecoration(
           labelText: label, counterText: '',
-          labelStyle: const TextStyle(color: _muted),
-          filled: true, fillColor: _cardDark,
+          labelStyle: TextStyle(color: _muted),
+          filled: true, fillColor: _card,
           contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _border)),
-          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _border)),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _purple, width: 1.5)),
+        ),
+      ),
+    );
+  }
+
+  Widget _stateDropdown() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: DropdownButtonFormField<String>(
+        initialValue: _stateAbbr,
+        isExpanded: true,
+        dropdownColor: _card,
+        iconEnabledColor: _muted,
+        style: TextStyle(color: _fg, fontSize: 15),
+        items: [
+          for (final s in _usStates)
+            DropdownMenuItem<String>(
+              value: s,
+              child: Text(s, style: TextStyle(color: _fg)),
+            ),
+        ],
+        onChanged: (v) => setState(() => _stateAbbr = v),
+        decoration: InputDecoration(
+          labelText: 'State',
+          labelStyle: TextStyle(color: _muted),
+          filled: true, fillColor: _card,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
           focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _purple, width: 1.5)),
         ),
       ),
@@ -644,7 +766,7 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
         margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: _cardDark, borderRadius: BorderRadius.circular(16),
+          color: _card, borderRadius: BorderRadius.circular(16),
           border: Border.all(color: selected ? _purple : _border, width: selected ? 1.6 : 1),
         ),
         child: Row(children: [
@@ -659,9 +781,9 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
           ),
           const SizedBox(width: 14),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(name, style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w800)),
+            Text(name, style: TextStyle(color: _fg, fontSize: 15, fontWeight: FontWeight.w800)),
             const SizedBox(height: 2),
-            Text(eta, style: const TextStyle(color: _muted, fontSize: 12)),
+            Text(eta, style: TextStyle(color: _muted, fontSize: 12)),
           ])),
           Text(cents == 0 ? 'Free' : '+${MerchPricing.format(cents)}',
               style: TextStyle(
@@ -684,28 +806,28 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
         _eyebrow(_stepEyebrowText()),
         _title('Review and pay'),
         const SizedBox(height: 14),
-        _card(children: [
+        _cardBox(children: [
           _row(Icons.palette_outlined, theme.name,
               '${theme.variants[_themeVariant].name} variant · ${_accountTier == 'businessPlus' ? 'White-label' : _accountTier == 'business' ? 'Color + event details' : 'B&W brand mark'}'),
-          const Divider(color: _border, height: 22),
+          Divider(color: _border, height: 22),
           _row(_product == MerchProduct.invitation ? Icons.mail_outline : Icons.style_outlined,
               '$_packSize pack · $_productLabel',
               MerchPricing.format(_subtotalCents)),
           // Standard shipping is built into pack prices — only show a line
           // item when the customer opted into the expedited upgrade.
           if (isExpedited) ...[
-            const Divider(color: _border, height: 22),
+            Divider(color: _border, height: 22),
             _row(Icons.local_shipping_outlined, 'Expedited shipping',
                 MerchPricing.format(_shippingCents)),
           ],
-          const Divider(color: _border, height: 22),
+          Divider(color: _border, height: 22),
           _row(Icons.attach_money, 'Total', MerchPricing.format(_totalCents), bold: true),
         ]),
         const SizedBox(height: 12),
-        _card(children: [
-          const Text('SHIP TO', style: TextStyle(color: _muted, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.4)),
+        _cardBox(children: [
+          Text('SHIP TO', style: TextStyle(color: _muted, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.4)),
           const SizedBox(height: 6),
-          Text(addr.formatted, style: const TextStyle(color: Colors.white, fontSize: 13.5, height: 1.45)),
+          Text(addr.formatted, style: TextStyle(color: _fg, fontSize: 13.5, height: 1.45)),
         ]),
         if (kTestingMode) ...[
           const SizedBox(height: 14),
@@ -730,10 +852,10 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
     );
   }
 
-  Widget _card({required List<Widget> children}) => Container(
+  Widget _cardBox({required List<Widget> children}) => Container(
     padding: const EdgeInsets.all(16),
     decoration: BoxDecoration(
-      color: _cardDark, borderRadius: BorderRadius.circular(14),
+      color: _card, borderRadius: BorderRadius.circular(14),
       border: Border.all(color: _border),
     ),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
@@ -744,9 +866,9 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
       Icon(icon, size: 18, color: _muted),
       const SizedBox(width: 10),
       Expanded(child: Text(label,
-          style: TextStyle(color: Colors.white, fontSize: bold ? 16 : 14, fontWeight: bold ? FontWeight.w800 : FontWeight.w600))),
+          style: TextStyle(color: _fg, fontSize: bold ? 16 : 14, fontWeight: bold ? FontWeight.w800 : FontWeight.w600))),
       Text(trailing, style: TextStyle(
-        color: bold ? _gold : Colors.white,
+        color: bold ? _gold : _fg,
         fontSize: bold ? 18 : 14, fontWeight: FontWeight.w800,
       )),
     ]);
@@ -769,16 +891,16 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
             child: const Icon(Icons.check_rounded, color: AppColors.green, size: 56),
           ),
           const SizedBox(height: 20),
-          const Text('Your order is being prepared!',
+          Text('Your order is being prepared!',
               textAlign: TextAlign.center,
-              style: TextStyle(fontFamily: 'FredokaOne', fontSize: 26, color: Colors.white)),
+              style: TextStyle(fontFamily: 'FredokaOne', fontSize: 26, color: _fg)),
           const SizedBox(height: 8),
           Text(
             kTestingMode
                 ? 'Test order recorded. Visible in the admin fulfillment queue.'
                 : 'We\'ll email you tracking info as soon as it ships.\nEstimated delivery $deliveryStr.',
             textAlign: TextAlign.center,
-            style: const TextStyle(color: _muted, fontSize: 14, height: 1.55),
+            style: TextStyle(color: _muted, fontSize: 14, height: 1.55),
           ),
           if (_orderId != null) ...[
             const SizedBox(height: 14),
@@ -819,17 +941,17 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
   // ── Helpers ───────────────────────────────────────────────────
   Widget _eyebrow(String s) => Padding(
     padding: const EdgeInsets.only(top: 4, bottom: 6),
-    child: Text(s, style: const TextStyle(
+    child: Text(s, style: TextStyle(
       color: _muted, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.4,
     )),
   );
   Widget _title(String s) => Padding(
     padding: const EdgeInsets.only(bottom: 6),
-    child: Text(s, style: const TextStyle(
-      fontFamily: 'FredokaOne', fontSize: 26, color: Colors.white,
+    child: Text(s, style: TextStyle(
+      fontFamily: 'FredokaOne', fontSize: 26, color: _fg,
     )),
   );
-  Widget _desc(String s) => Text(s, style: const TextStyle(color: _muted, fontSize: 13.5, height: 1.5));
+  Widget _desc(String s) => Text(s, style: TextStyle(color: _muted, fontSize: 13.5, height: 1.5));
 }
 
 // ── Step kinds ──────────────────────────────────────────────────

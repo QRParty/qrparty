@@ -194,6 +194,45 @@ class InvitationPreviewSheet extends StatelessWidget {
   }
 }
 
+/// Theme-picker thumbnail. Renders the same Flutter-rendered card design
+/// that ships in the order, but with no event info so it reads as
+/// pure design preview. Use this inside the theme picker grid so each
+/// tile fills with a true scaled-down invitation.
+class ThemeMiniPreview extends StatelessWidget {
+  final MerchTheme theme;
+  final int variantIndex;
+  final bool isKidsBirthday;
+
+  const ThemeMiniPreview({
+    super.key,
+    required this.theme,
+    this.variantIndex = 0,
+    this.isKidsBirthday = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final variant = theme.variants[variantIndex.clamp(0, theme.variants.length - 1)];
+    final kidsTheme = isKidsBirthday ? _kidsThemeFromKey(theme.key) : null;
+    if (kidsTheme != null) {
+      return KidsBirthdayInvitationCard(
+        theme: kidsTheme,
+        qrData: 'https://partywithqr.com',
+        eventName: '',
+        accountTier: 'personal',
+        hostName: '',
+      );
+    }
+    return _Card4x6(
+      variant: variant,
+      qrData: 'https://partywithqr.com',
+      eventName: '',
+      accountTier: 'personal',
+      hostName: '',
+    );
+  }
+}
+
 // ── PALETTE ────────────────────────────────────────────────────
 // Internal helper bundling the colors each Kids theme uses. Kept private
 // so the public API is just (theme + content props).
@@ -394,8 +433,11 @@ class _KidsContentOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       // Extra top/bottom padding leaves room for themed borders to sit
-      // outside the content column without crowding the text.
-      padding: const EdgeInsets.fromLTRB(20, 64, 20, 56),
+      // outside the content column without crowding the text. Bottom
+      // padding trimmed by 4px to clear the residual ~3px overflow at
+      // common phone widths — themed border art still sits comfortably
+      // below the brand strip at this height.
+      padding: const EdgeInsets.fromLTRB(20, 64, 20, 52),
       child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
         Text(
           "YOU'RE INVITED",
@@ -1995,9 +2037,13 @@ class _Card4x6 extends StatelessWidget {
               ),
             ],
           ),
-          padding: const EdgeInsets.all(20),
+          // Vertical padding kept tight at the bottom so the brand
+          // strip clears the card edge without the 3px overflow we
+          // saw at common phone widths. The Expanded eventName slot
+          // absorbs any remaining slack so longer names still center
+          // cleanly without forcing the QR off the bottom.
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
           child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
-            const SizedBox(height: 6),
             Text(
               "YOU'RE INVITED",
               style: TextStyle(

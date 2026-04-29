@@ -71,5 +71,48 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- Wishlist shop chips: each retailer is declared two ways under
+             Android 11+ package visibility. The <package> entry lets
+             canLaunchUrl() / queryIntentActivities resolve the app even
+             when the visit is via an https:// App Link rather than a
+             custom scheme. The <intent> + scheme entry covers cases where
+             the native app registers a custom URI handler. Both are
+             required for canLaunchUrl() to return true reliably across
+             retailer apps and Android versions. -->
+
+        <!-- Amazon -->
+        <package android:name="com.amazon.mShop.android.shopping" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="amzn" />
+        </intent>
+
+        <!-- Target -->
+        <package android:name="com.target.ui" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="target" />
+        </intent>
+
+        <!-- Etsy -->
+        <package android:name="com.etsy.android" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="etsy" />
+        </intent>
+
+        <!-- Walmart -->
+        <package android:name="com.walmart.android" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="walmart" />
+        </intent>
+
+        <!-- Best Buy -->
+        <package android:name="com.bestbuy.android" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="bestbuy" />
+        </intent>
     </queries>
 </manifest>

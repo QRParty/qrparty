@@ -3,37 +3,60 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ─── THEME ───────────────────────────────────────────────────
-// Light mode is the default for every app launch. Dark mode is a
-// session-only preference — toggling it does not write to disk, and
-// signing out resets the notifier so the next user lands in light.
-// (Any legacy 'theme_mode' key from older builds is wiped on init so
-// we don't honour stale persisted state.)
+// Dark mode is a per-device preference. On a true fresh install (no key
+// written yet) we follow the OS theme via [ThemeMode.system] — most apps
+// behave this way, and it sidesteps the bug where a tester whose phone is
+// in dark mode saw the app launch in light and assumed it was broken.
+// The first explicit toggle in Settings writes a hard preference; from
+// that point on, the saved value wins forever (system theme is no longer
+// consulted until the user resets via the toggle).
+//
+// Storage key 'darkMode' (bool). Absence = system; true = dark; false =
+// light. Earlier installs wrote nothing and used a legacy `theme_mode`
+// string key — `init()` wipes that key on first run for cleanliness.
 class ThemeNotifier extends ValueNotifier<ThemeMode> {
-  ThemeNotifier._() : super(ThemeMode.light);
+  ThemeNotifier._() : super(ThemeMode.system);
 
   static final ThemeNotifier instance = ThemeNotifier._();
 
+  static const _prefKey = 'darkMode';
   static const _legacyPrefKey = 'theme_mode';
 
   static Future<void> init() async {
-    // Always start light; clean up any persisted preference from older builds.
-    instance.value = ThemeMode.light;
     try {
       final prefs = await SharedPreferences.getInstance();
+      // One-time cleanup of the old string-typed key from the
+      // session-only era. Safe no-op if it's not present.
       if (prefs.containsKey(_legacyPrefKey)) {
         await prefs.remove(_legacyPrefKey);
       }
-    } catch (_) {/* prefs unavailable — ignore */}
+      // No saved value → follow the OS. Saved value → hard light/dark.
+      // Distinguishes the "user hasn't picked yet" state from "user
+      // explicitly chose light" so we don't override the OS preference
+      // on a fresh install just because false is the default.
+      if (!prefs.containsKey(_prefKey)) {
+        instance.value = ThemeMode.system;
+        return;
+      }
+      final isDark = prefs.getBool(_prefKey) ?? false;
+      instance.value = isDark ? ThemeMode.dark : ThemeMode.light;
+    } catch (_) {
+      // prefs unavailable (e.g. test harness, first-run quirk) — fall
+      // back to system so we still match the device. Don't crash.
+      instance.value = ThemeMode.system;
+    }
   }
 
-  void toggle() {
-    value = value == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
-  }
-
-  /// Force the app back to light mode — called on logout so the next
-  /// user doesn't inherit the previous session's dark toggle.
-  void resetToLight() {
-    value = ThemeMode.light;
+  /// Toggle dark/light and write the new value to disk so it survives
+  /// app restart and logout. When the current mode is system, [currentlyDark]
+  /// resolves the effective appearance from the OS so the toggle flips to
+  /// the opposite of what the user is actually seeing.
+  Future<void> toggle({required bool currentlyDark}) async {
+    value = currentlyDark ? ThemeMode.light : ThemeMode.dark;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_prefKey, value == ThemeMode.dark);
+    } catch (_) {/* prefs unavailable — in-memory toggle still works */}
   }
 
   bool get isDark => value == ThemeMode.dark;
@@ -74,23 +97,54 @@ class AppColors {
   static const muted = Color(0xFF8892A4);
 }
 
+// ─── FEATURE FLAGS ───────────────────────────────────────────
+// Compile-time toggles for partially-built or beta-gated features.
+// Flip these and recompile to (un)expose the feature; the underlying
+// data and code paths stay intact so events with old data still work.
+
+/// Hides every user-visible Wishlist entry point in the app — the
+/// list-type chooser on event creation, the Wishlist tab on guest
+/// view, the wishlist editor on the edit screen, and the wishlist
+/// total on past event cards. Checklist remains fully visible and
+/// functional. Set to true to expose Wishlist again. No data is
+/// destroyed when this is false: events whose `listType` is already
+/// `'Wishlist'` simply render as if it were `'No List'` until the
+/// host edits them or the flag flips back on.
+const bool kWishlistEnabled = false;
+
+/// Hides every user-visible entry point to ordering printed stickers
+/// or invitations during beta. Set to true to re-expose the merch
+/// flow. The OrderMerchScreen, MerchOrderService, MerchPricing, and
+/// admin order tooling all remain intact — only the user-facing CTAs
+/// are gated. Existing orders placed before the flag flipped continue
+/// to surface in the user's order history; this flag only blocks
+/// NEW order creation paths.
+const bool kMerchOrderingEnabled = false;
+
 class AppNotifications {
   static final List<Map<String, dynamic>> sentNotifications = [];
 }
 
 class NotificationService {
+  /// Enqueues a push-notification job for a Cloud Function to fan out.
+  ///
+  /// `eventId` is required: the firestore.rules rule on
+  /// `notificationQueue/{id}` validates that the caller is host/co-host
+  /// of the named event, so a missing eventId silently gets rejected
+  /// with permission-denied. Callers with a nullable eventId must guard
+  /// before calling.
   static Future<void> sendNotification(
     List<String> tokens,
     String title,
     String body, {
-    String? eventId,
+    required String eventId,
   }) async {
     if (tokens.isEmpty) return;
     await FirebaseFirestore.instance.collection('notificationQueue').add({
       'tokens': tokens,
       'title': title,
       'body': body,
-      if (eventId != null) 'eventId': eventId,
+      'eventId': eventId,
       'timestamp': FieldValue.serverTimestamp(),
       'status': 'pending',
     });

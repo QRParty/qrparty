@@ -1,7 +1,7 @@
 name: qrparty
 description: "A new Flutter project."
 publish_to: 'none'
-version: 1.0.3+4
+version: 1.0.6+7
 
 environment:
   sdk: ^3.11.4
@@ -16,6 +16,7 @@ dependencies:
   cloud_firestore: ^4.17.5
   firebase_storage: ^11.7.7
   firebase_messaging: ^14.9.4
+  firebase_app_check: ^0.2.2
   mobile_scanner: ^5.2.3
   image_picker: ^1.1.2
   flutter_stripe: ^11.4.0
@@ -35,6 +36,15 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1
 
 flutter:
   uses-material-design: true
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon.png"
+  adaptive_icon_background: "#2D3047"
+  adaptive_icon_foreground: "assets/icon/app_icon.png"
+  adaptive_icon_margin: 15

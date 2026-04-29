@@ -5,10 +5,15 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:google_places_flutter/google_places_flutter.dart';
+import 'package:google_places_flutter/model/prediction.dart';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 import '../utils.dart';
+import '../models/merch_order.dart';
 import 'generate_qr_screen.dart';
 import 'home_feed_screen.dart';
+import 'order_merch_screen.dart';
 
 // ── Theme palette ──────────────────────────────────────────────
 // Light + dark variants for the four surface colors; accents stay the same.
@@ -25,6 +30,40 @@ const _mutedLight  = Color(0xFF8892A4);
 const _purple      = Color(0xFF9C7FD4);
 const _gold        = Color(0xFFC8922A);
 
+// Google Places API key. Used by the GooglePlaceAutoCompleteTextField
+// widget for address autocomplete and by [_fetchZipFromPlaceId] for the
+// follow-up Place Details request that pulls `postal_code` out of the
+// address components.
+//
+// IMPORTANT — common failure modes when autocomplete returns nothing:
+//
+//   1. Places API not enabled on the GCP project. Console →
+//      "APIs & Services" → "Library" → enable both:
+//        • Places API (legacy)  — required by the maps.googleapis.com/
+//          maps/api/place/autocomplete + place/details endpoints used
+//          by `google_places_flutter`.
+//        • Maps SDK for Android — required by the Maps view used in
+//          create_event_screen's location picker.
+//
+//   2. Application restrictions limit the key to "Android apps" with
+//      a SHA-1 + package allow-list. THAT BLOCKS this code path
+//      because google_places_flutter calls the Places HTTP API
+//      directly (not via the Android SDK), so requests don't carry
+//      the Android signing certificate. Fix: switch the key to "None"
+//      restriction OR create a separate "HTTP referrers" key with
+//      `*.googleapis.com` and use that here.
+//
+//   3. Billing not enabled on the GCP project. Places API requires
+//      billing even for the free tier ($200/mo credit). Enable it
+//      under Billing → Link a billing account.
+//
+// Authorized Android signing SHA-256 fingerprints (mirror these in
+// the GCP key restriction if you opt for Android-restricted access
+// — only works for the SDK call paths, not the HTTP path above):
+//   25:74:13:2F:C9:02:D8:E1:4B:1A:69:12:62:F3:56:2C:3B:44:07:B0:AD:2E:05:F4:DE:34:02:33:84:1B:D8:14
+//   6A:7A:31:13:37:73:9F:7E:4C:B8:D5:C4:37:DC:2F:5C:07:6A:6F:9F:83:A2:68:0A:91:0A:97:01:48:C1:08:F6
+// (Source: public/.well-known/assetlinks.json — same key Google Play
+// signs the prod APK with.)
 const _placesApiKey = 'AIzaSyAHONfmej_Ifpv8ui9nbCnCnQcweDzpqIc';
 
 class CreateEventScreen extends StatefulWidget {
@@ -82,7 +121,55 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   final newItemNameController = TextEditingController();
   final newItemPriceController = TextEditingController();
   final newItemQtyController = TextEditingController();
-  String listType = 'Wishlist';
+  // Default list type for a brand-new event. Falls through to Checklist
+  // when Wishlist is disabled so the form doesn't start in a state whose
+  // chip isn't even rendered. Existing drafts/templates hydrate their
+  // own listType from Firestore below — this default only applies when
+  // there's nothing to hydrate from.
+  // listType holds one of: 'No List', 'Wishlist', 'Checklist', 'Both'.
+  // 'Both' was added when hosts asked to run a potluck (checklist) and a
+  // gift list (wishlist) on the same event. The two booleans below are
+  // the user-facing source of truth in the editor; listType is derived
+  // from them on save (and when reading a draft/template back, the
+  // booleans are derived in reverse).
+  String listType = kWishlistEnabled ? 'Wishlist' : 'Checklist';
+  bool get _hasWishlist => listType == 'Wishlist' || listType == 'Both';
+  bool get _hasChecklist => listType == 'Checklist' || listType == 'Both';
+  /// Recompute listType from the two booleans. Called by the editor
+  /// toggles. Keeps the single string field that the rest of the app
+  /// (templates, analytics, business feed) still reads.
+  void _setHasWishlist(bool v) {
+    setState(() {
+      final c = _hasChecklist;
+      listType = v
+          ? (c ? 'Both' : 'Wishlist')
+          : (c ? 'Checklist' : 'No List');
+      // Drop wishlist-kind items when wishlist is turned off.
+      if (!v) wishlistItems.removeWhere((i) => _itemKind(i) == 'wishlist');
+    });
+    _scheduleDraftSave();
+  }
+  void _setHasChecklist(bool v) {
+    setState(() {
+      final w = _hasWishlist;
+      listType = v
+          ? (w ? 'Both' : 'Checklist')
+          : (w ? 'Wishlist' : 'No List');
+      if (!v) wishlistItems.removeWhere((i) => _itemKind(i) == 'checklist');
+    });
+    _scheduleDraftSave();
+  }
+  /// Returns the per-item kind. Items written under the new model have
+  /// a `kind` field. Legacy items (no `kind`) infer from listType: a
+  /// 'Wishlist' event's items are wishlist; a 'Checklist' event's items
+  /// are checklist; a 'Both' event REQUIRES kind, defaulting to
+  /// 'wishlist' for malformed items so they're at least visible.
+  String _itemKind(Map<String, dynamic> item) {
+    final stored = item['kind'] as String?;
+    if (stored == 'wishlist' || stored == 'checklist') return stored!;
+    if (listType == 'Checklist') return 'checklist';
+    return 'wishlist';
+  }
   bool _isPublic = false;
   DateTime? _rsvpDeadline;
   bool _isBusiness = false;
@@ -109,17 +196,33 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   bool _templatesLoading = false;
 
   String _zipCode = '';
-  List<Map<String, dynamic>> _suggestions = [];
-  bool _fetchingSuggestions = false;
-  Timer? _suggestionsDebounce;
   final _locationFocusNode = FocusNode();
 
   bool _isRecurring = false;
   String _recurrenceFrequency = 'weekly';
   DateTime? _recurrenceEndDate;
 
+  /// Plus-ones is only relevant for Corporate and Wedding events. For
+  /// every other type the toggle is hidden entirely and `_allowPlusOnes`
+  /// stays false on the saved doc.
+  bool get _supportsPlusOnes =>
+      selectedEventType?.name == 'Corporate' || selectedEventType?.name == 'Wedding';
+
   // Capacity + waitlist state. _maxPlusOnes: 1, 2, or null = unlimited.
   bool _capacityEnabled = false;
+
+  /// Single source of truth for the capacity field that lands on
+  /// Firestore. Returns null whenever the toggle is off OR the parsed
+  /// value isn't a positive integer — which closes the
+  /// `capacity: 0 → "Event is full" forever` bug at the point where
+  /// it would otherwise enter the data layer. Empty fields, "0",
+  /// negatives, and anything int.tryParse can't read all collapse
+  /// to null instead of being persisted.
+  int? get _persistedCapacity {
+    if (!_capacityEnabled) return null;
+    final n = int.tryParse(_capacityController.text.trim());
+    return (n != null && n > 0) ? n : null;
+  }
   final TextEditingController _capacityController = TextEditingController();
   bool _allowPlusOnes = false;
   int? _maxPlusOnes = 1;
@@ -131,6 +234,12 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   Color get _card   => _isDark ? _cardDark   : _cardLight;
   Color get _border => _isDark ? _borderDark : _borderLight;
   Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
+  // Foreground for body text on _bg or _card surfaces. Without this getter,
+  // earlier code hardcoded Colors.white, which became invisible in light
+  // mode where _card resolves to Colors.white. Use this anywhere the text
+  // sits on a theme-switching background; keep Colors.white only on
+  // brand-colored surfaces (event type primary, green/purple buttons, etc.).
+  Color get _fg     => _isDark ? Colors.white : AppColors.dark;
 
   @override
   void initState() {
@@ -190,13 +299,11 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       if (selectedEventType != null) currentStep = 1;
     }
     titleController.addListener(_onTitleChanged);
-    _locationFocusNode.addListener(() {
-      if (!_locationFocusNode.hasFocus) {
-        Future.delayed(const Duration(milliseconds: 150), () {
-          if (mounted) setState(() => _suggestions = []);
-        });
-      }
-    });
+    // Keep the draft state in sync when the user types directly into the
+    // location field without picking a suggestion. The
+    // GooglePlaceAutoCompleteTextField widget owns the field's onChanged,
+    // so a controller listener is the only hook left to us.
+    locationController.addListener(_scheduleDraftSave);
     _checkBusinessAccount();
   }
 
@@ -238,6 +345,12 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         'accountType': acctType,
         'shortCode': shortCode,
         'yes': 0, 'maybe': 0, 'no': 0,
+        // Stamp date as null up front so the field is *present* on the
+        // doc. Firestore's orderBy('date') excludes docs where the field
+        // is missing entirely — without this, a fresh draft (created
+        // before the host picks a date) wouldn't appear in the home feed
+        // until the 600ms _saveDraftNow debounce fired.
+        'date': null,
         'createdAt': FieldValue.serverTimestamp(),
       });
       if (mounted) setState(() => _draftId = docRef.id);
@@ -268,10 +381,14 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         'coHosts': _coHosts.map((c) => c['uid'] as String).toList(),
         'isRecurring': _isRecurring && _isBusiness,
         'recurrenceRule': (_isRecurring && _isBusiness) ? _buildRecurrenceRule() : null,
-        'capacity': _capacityEnabled ? int.tryParse(_capacityController.text.trim()) : null,
+        // Capacity + waitlist are gated by _persistedCapacity so a 0 /
+        // empty / non-numeric field can't sneak into Firestore — and
+        // waitlist stays off when there's no real cap (waitlist
+        // without a cap has no trigger to fire on).
+        'capacity': _persistedCapacity,
         'allowPlusOnes': _allowPlusOnes,
         'maxPlusOnes': _allowPlusOnes ? _maxPlusOnes : null,
-        'allowWaitlist': _capacityEnabled ? _allowWaitlist : false,
+        'allowWaitlist': _persistedCapacity != null && _allowWaitlist,
         'wishlist': wishlistItems.map((item) => listType == 'Checklist'
             ? {'name': item['name'], 'quantity': item['quantity'], 'claimed': 0}
             : {'name': item['name'], 'price': item['price'], 'contributed': 0.0, 'bought': false}).toList(),
@@ -295,10 +412,10 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   @override
   void dispose() {
     _draftTimer?.cancel();
-    _suggestionsDebounce?.cancel();
     titleController.removeListener(_onTitleChanged);
     titleController.dispose();
     descController.dispose();
+    locationController.removeListener(_scheduleDraftSave);
     locationController.dispose();
     _locationFocusNode.dispose();
     newItemNameController.dispose();
@@ -434,68 +551,6 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     });
   }
 
-  Future<void> _fetchSuggestions(String input) async {
-    if (input.length < 3) {
-      if (mounted) setState(() { _suggestions = []; _fetchingSuggestions = false; });
-      return;
-    }
-    if (mounted) setState(() => _fetchingSuggestions = true);
-    try {
-      final uri = Uri.https('maps.googleapis.com', '/maps/api/place/autocomplete/json', {
-        'input': input,
-        'types': 'address',
-        'key': _placesApiKey,
-      });
-      final response = await http.get(uri);
-      if (!mounted) return;
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
-      final preds = (data['predictions'] as List? ?? []).cast<Map<String, dynamic>>();
-      setState(() {
-        _suggestions = preds.take(5).toList();
-        _fetchingSuggestions = false;
-      });
-    } catch (_) {
-      if (mounted) setState(() { _suggestions = []; _fetchingSuggestions = false; });
-    }
-  }
-
-  Future<void> _selectSuggestion(Map<String, dynamic> prediction) async {
-    final placeId = prediction['place_id'] as String? ?? '';
-    final description = prediction['description'] as String? ?? '';
-    setState(() {
-      locationController.text = description;
-      _suggestions = [];
-      _zipCode = '';
-      _fetchingSuggestions = false;
-    });
-    _suggestionsDebounce?.cancel();
-    if (placeId.isEmpty) { _scheduleDraftSave(); return; }
-    try {
-      final uri = Uri.https('maps.googleapis.com', '/maps/api/place/details/json', {
-        'place_id': placeId,
-        'fields': 'formatted_address,address_components',
-        'key': _placesApiKey,
-      });
-      final response = await http.get(uri);
-      if (!mounted) return;
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
-      final result = data['result'] as Map<String, dynamic>?;
-      if (result != null) {
-        final formatted = result['formatted_address'] as String? ?? description;
-        locationController.text = formatted;
-        final comps = result['address_components'] as List? ?? [];
-        for (final comp in comps) {
-          final types = List<String>.from((comp as Map)['types'] as List? ?? []);
-          if (types.contains('postal_code')) {
-            setState(() => _zipCode = (comp['long_name'] as String?) ?? '');
-            break;
-          }
-        }
-      }
-    } catch (_) {}
-    _scheduleDraftSave();
-  }
-
   Future<void> _addCoHost() async {
     final email = _coHostEmailController.text.trim().toLowerCase();
     if (email.isEmpty) return;
@@ -533,15 +588,61 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     }
   }
 
-  void _addWishlistItem() {
-    if (newItemNameController.text.isEmpty) return;
-    if (listType == 'Wishlist' && newItemPriceController.text.isEmpty) return;
-    if (listType == 'Checklist' && newItemQtyController.text.isEmpty) return;
+  /// Retailer chip catalog — same five stores as [EditEventScreen]'s
+  /// wishlist editor. Uses the canonical https URL rather than a custom
+  /// URI scheme; modern retailer apps register these as Android App
+  /// Links so launching with externalApplication hands off to the app
+  /// when installed and falls through to the browser otherwise.
+  static const _shopChips = <({String label, String emoji, String url})>[
+    (label: 'Amazon',   emoji: '📦', url: 'https://www.amazon.com'),
+    (label: 'Target',   emoji: '🎯', url: 'https://www.target.com'),
+    (label: 'Etsy',     emoji: '🧶', url: 'https://www.etsy.com'),
+    (label: 'Walmart',  emoji: '🛒', url: 'https://www.walmart.com'),
+    (label: 'Best Buy', emoji: '🔌', url: 'https://www.bestbuy.com'),
+  ];
+
+  /// Open the retailer's https URL with externalApplication mode so
+  /// Android can hand off to the registered App Link handler (the
+  /// retailer's native app, when installed) instead of routing to the
+  /// browser. Falls back to a Chrome Custom Tab if external launch
+  /// fails. Mirrors [EditEventScreen._openShop].
+  Future<void> _openShop(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (ok) return;
+    } catch (_) {/* fall through to in-app browser */}
+    try {
+      await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
+    } catch (_) {/* swallow — chip just becomes a no-op */}
+  }
+
+  /// Adds a new item of the given [kind] using whichever of the shared
+  /// input controllers is relevant. The `kind` field is stamped on
+  /// every item so a Both-mode event can route gifts vs. potluck items
+  /// to their own tabs at render time.
+  void _addItemOfKind(String kind) {
+    if (newItemNameController.text.trim().isEmpty) return;
     setState(() {
-      if (listType == 'Checklist') {
-        wishlistItems.add({'name': newItemNameController.text, 'quantity': newItemQtyController.text.trim(), 'claimed': 0});
+      if (kind == 'checklist') {
+        if (newItemQtyController.text.trim().isEmpty) return;
+        wishlistItems.add({
+          'name': newItemNameController.text.trim(),
+          'quantity': newItemQtyController.text.trim(),
+          'claimed': 0,
+          'claims': <Map<String, dynamic>>[],
+          'kind': 'checklist',
+        });
       } else {
-        wishlistItems.add({'name': newItemNameController.text, 'price': double.tryParse(newItemPriceController.text) ?? 0.0, 'contributed': 0.0, 'bought': false});
+        if (newItemPriceController.text.trim().isEmpty) return;
+        wishlistItems.add({
+          'name': newItemNameController.text.trim(),
+          'price': double.tryParse(newItemPriceController.text) ?? 0.0,
+          'contributed': 0.0,
+          'bought': false,
+          'kind': 'wishlist',
+        });
       }
       newItemNameController.clear();
       newItemPriceController.clear();
@@ -617,10 +718,10 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         surfaceTintColor: Colors.transparent,
         title: Text(
           currentStep == 0 ? 'Choose Event Type' : currentStep == 1 ? 'Event Details' : 'Wishlist',
-          style: const TextStyle(fontWeight: FontWeight.w700, color: Colors.white),
+          style: TextStyle(fontWeight: FontWeight.w700, color: _fg),
         ),
         leading: currentStep > 0
-            ? IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => setState(() => currentStep--))
+            ? IconButton(icon: Icon(Icons.arrow_back, color: _fg), onPressed: () => setState(() => currentStep--))
             : null,
       ),
       body: Column(
@@ -686,9 +787,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(24, 20, 24, 4),
-          child: Text("What's the occasion?", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Colors.white)),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 4),
+          child: Text("What's the occasion?", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: _fg)),
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
@@ -708,7 +809,17 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
               final type = eventTypes[index];
               final isSelected = selectedEventType?.name == type.name;
               return GestureDetector(
-                onTap: () => setState(() { selectedEventType = type; }),
+                onTap: () => setState(() {
+                  selectedEventType = type;
+                  // Plus ones is hidden for everything except Corporate/Wedding,
+                  // so clear any stale flag from a prior selection. Without
+                  // this, switching Wedding → Birthday would silently keep
+                  // allowPlusOnes=true on the saved doc.
+                  if (!_supportsPlusOnes) {
+                    _allowPlusOnes = false;
+                    _maxPlusOnes = 1;
+                  }
+                }),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 200),
                   decoration: BoxDecoration(
@@ -731,7 +842,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                         child: Center(child: Text(type.emoji, style: const TextStyle(fontSize: 26))),
                       ),
                       const SizedBox(height: 8),
-                      Text(type.name, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: isSelected ? type.primary : Colors.white)),
+                      Text(type.name, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: isSelected ? type.primary : _fg)),
                       if (isSelected)
                         Padding(
                           padding: const EdgeInsets.only(top: 4),
@@ -817,7 +928,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                 const SizedBox(width: 8),
                 Expanded(child: TextField(
                   controller: titleController,
-                  style: const TextStyle(color: Colors.white),
+                  style: TextStyle(color: _fg),
                   decoration: _inputDecoration('e.g. ${type.suggestion}'),
                 )),
               ],
@@ -854,7 +965,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             _glowWrap(TextField(
               controller: descController,
               maxLines: 2,
-              style: const TextStyle(color: Colors.white),
+              style: TextStyle(color: _fg),
               decoration: _inputDecoration('Tell your guests what to expect...'),
               onChanged: (_) => _scheduleDraftSave(),
             )),
@@ -875,7 +986,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                         Row(children: [
                           Icon(Icons.public, size: 16, color: _isPublic ? _purple : _muted),
                           const SizedBox(width: 6),
-                          Text('Make this event public', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isPublic ? _purple : Colors.white)),
+                          Text('Make this event public', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isPublic ? _purple : _fg)),
                         ]),
                         const SizedBox(height: 2),
                         Text('Appears in Explore tab for nearby guests', style: TextStyle(fontSize: 11, color: _muted)),
@@ -908,7 +1019,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     child: _rsvpDeadline != null
                         ? Text(
                             '${const ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][_rsvpDeadline!.month - 1]} ${_rsvpDeadline!.day}, ${_rsvpDeadline!.year}',
-                            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _fg),
                           )
                         : Text('RSVP Deadline (optional)', style: TextStyle(fontSize: 14, color: _muted)),
                   ),
@@ -966,8 +1077,6 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
 
   Widget _buildStep2() {
     final type = selectedEventType!;
-    final isNoList = listType == 'No List';
-    final isChecklist = listType == 'Checklist';
 
     return Column(
       children: [
@@ -985,83 +1094,91 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             ],
           ),
         ),
-        // List type toggle
+        // Lists section — two independent toggles. A host can enable
+        // wishlist (gift contributions), checklist (potluck "I'll bring
+        // X" claims), neither, or both. Internally this maps to
+        // listType ∈ {No List, Wishlist, Checklist, Both} so legacy
+        // readers (templates, analytics) still get a stable string.
         _glowWrap(Container(
           color: _card,
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('List Type', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  _listTypeChip('Wishlist', Icons.card_giftcard_outlined, type),
-                  const SizedBox(width: 8),
-                  _listTypeChip('Checklist', Icons.checklist_outlined, type),
-                  const SizedBox(width: 8),
-                  _listTypeChip('No List', Icons.block_outlined, type),
-                ],
+              Text('Lists', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _fg)),
+              const SizedBox(height: 4),
+              Text(
+                'Enable either, both, or neither — guests see whichever you turn on.',
+                style: TextStyle(fontSize: 11.5, color: _muted, height: 1.35),
               ),
               const SizedBox(height: 8),
-              Text(
-                isNoList
-                    ? 'No list will be shown to guests'
-                    : isChecklist
-                        ? 'Guests sign up to bring items — great for potlucks'
-                        : 'Guests can contribute money or buy items',
-                style: TextStyle(fontSize: 12, color: _muted),
+              if (kWishlistEnabled)
+                _listTypeToggle(
+                  type: type,
+                  icon: Icons.card_giftcard_outlined,
+                  label: 'Wishlist',
+                  description: 'Guests contribute money or buy items',
+                  value: _hasWishlist,
+                  onChanged: _setHasWishlist,
+                ),
+              _listTypeToggle(
+                type: type,
+                icon: Icons.checklist_outlined,
+                label: 'Checklist',
+                description: "Guests claim items they'll bring (great for potlucks)",
+                value: _hasChecklist,
+                onChanged: _setHasChecklist,
               ),
-              const SizedBox(height: 14),
             ],
           ),
         )),
-        // Item input row (hidden for No List)
-        if (!isNoList)
+        // Retailer chips — wishlist mode only. Tap a chip to open the
+        // store's native app (or the web fallback in a Chrome Custom Tab),
+        // shop, then come back and add manually below — or use the
+        // system share sheet → "Add to QR Party" to drop a shared
+        // product into the wishlist subcollection live during creation.
+        if (listType == 'Wishlist')
           Container(
             color: _card,
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Row(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: newItemNameController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: _inputDecoration(isChecklist ? 'Item to bring' : 'Item name'),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    'BROWSE STORES',
+                    style: TextStyle(
+                      fontFamily: 'Nunito', fontSize: 11, fontWeight: FontWeight.w800,
+                      letterSpacing: 1.4, color: _muted,
+                    ),
                   ),
                 ),
-                const SizedBox(width: 10),
-                SizedBox(
-                  width: 90,
-                  child: isChecklist
-                      ? TextField(
-                          controller: newItemQtyController,
-                          style: const TextStyle(color: Colors.white),
-                          decoration: _inputDecoration('e.g. 2 bags'),
-                        )
-                      : TextField(
-                          controller: newItemPriceController,
-                          keyboardType: TextInputType.number,
-                          style: const TextStyle(color: Colors.white),
-                          decoration: _inputDecoration('\$ Price'),
-                        ),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(children: [
+                    for (final s in _shopChips) ...[
+                      _shopChip(s),
+                      const SizedBox(width: 8),
+                    ],
+                  ]),
                 ),
-                const SizedBox(width: 10),
-                ElevatedButton(
-                  onPressed: _addWishlistItem,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: type.primary,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                  ),
-                  child: const Icon(Icons.add),
+                const SizedBox(height: 8),
+                Text(
+                  'Tap a store, find an item, then use the share menu → "Add to QR Party" — or add manually below.',
+                  style: TextStyle(fontSize: 11, color: _muted, height: 1.4),
                 ),
+                const SizedBox(height: 4),
               ],
             ),
           ),
+        // Items area. When listType=='No List' show an empty-state.
+        // Otherwise stack one or both kind sections inside a scroll
+        // view — each section owns its own input row + items list,
+        // filtered by `kind`. Single-list mode renders just the active
+        // section so the layout matches the prior behavior.
         Expanded(
-          child: isNoList
+          child: listType == 'No List'
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -1070,28 +1187,18 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                       const SizedBox(height: 12),
                       Text('No list for this event', style: TextStyle(fontSize: 16, color: _muted)),
                       const SizedBox(height: 4),
-                      Text('The Wishlist tab will be hidden from guests', style: TextStyle(fontSize: 13, color: _muted)),
+                      Text('Both tabs will be hidden from guests', style: TextStyle(fontSize: 13, color: _muted)),
                     ],
                   ),
                 )
-              : wishlistItems.isEmpty
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(isChecklist ? '📋' : '🎁', style: const TextStyle(fontSize: 48)),
-                          const SizedBox(height: 12),
-                          Text('No ${isChecklist ? 'checklist' : 'wishlist'} items yet', style: TextStyle(fontSize: 16, color: _muted)),
-                          const SizedBox(height: 4),
-                          Text(isChecklist ? 'Add items for guests to claim' : 'Add items above for guests to gift', style: TextStyle(fontSize: 13, color: _muted)),
-                        ],
-                      ),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.all(16),
-                      itemCount: wishlistItems.length,
-                      itemBuilder: (context, index) => _buildWishlistItem(index),
-                    ),
+              : ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                  children: [
+                    if (_hasWishlist) _buildKindSection('wishlist', type),
+                    if (_hasWishlist && _hasChecklist) const SizedBox(height: 18),
+                    if (_hasChecklist) _buildKindSection('checklist', type),
+                  ],
+                ),
         ),
         Padding(
           padding: const EdgeInsets.all(16),
@@ -1135,10 +1242,12 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     'isRecurring': isRecurring,
                     if (seriesId != null) 'recurringSeriesId': seriesId,
                     if (recurrenceRule != null) 'recurrenceRule': recurrenceRule,
-                    'capacity': _capacityEnabled ? int.tryParse(_capacityController.text.trim()) : null,
+                    // Same clamp as the draft-save path above — see
+                    // _persistedCapacity getter for the rationale.
+                    'capacity': _persistedCapacity,
                     'allowPlusOnes': _allowPlusOnes,
                     'maxPlusOnes': _allowPlusOnes ? _maxPlusOnes : null,
-                    'allowWaitlist': _capacityEnabled ? _allowWaitlist : false,
+                    'allowWaitlist': _persistedCapacity != null && _allowWaitlist,
                     'isDraft': false,
                     'createdAt': FieldValue.serverTimestamp(),
                   };
@@ -1200,8 +1309,45 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     });
                   }
                   _eventFinalized = true;
-                  if (mounted) {
-                    Navigator.push(context, MaterialPageRoute(builder: (_) => GenerateQRCodeScreen(eventId: eventId, eventTitle: titleController.text)));
+                  if (!mounted) return;
+                  // Prompt the host to order stickers / invitations before
+                  // dropping them on the QR screen. Whichever option they
+                  // pick (or skip), they always end up on the QR screen.
+                  //
+                  // While [kMerchOrderingEnabled] is false (beta gate),
+                  // skip the prompt entirely and go straight to the QR
+                  // screen — the prompt's only outcomes are merch flows
+                  // that are themselves hidden right now.
+                  final pick = kMerchOrderingEnabled
+                      ? await _showPostEventMerchPrompt()
+                      : null;
+                  if (!mounted) return;
+                  if (pick == 'sticker' || pick == 'invitation') {
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(builder: (_) => GenerateQRCodeScreen(eventId: eventId, eventTitle: titleController.text)),
+                    );
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        fullscreenDialog: true,
+                        builder: (_) => OrderMerchScreen(
+                          eventId: eventId,
+                          eventTitle: titleController.text,
+                          hostName: user.displayName ?? 'Host',
+                          eventDate: selectedDate,
+                          eventType: selectedEventType?.name,
+                          initialProduct: pick == 'sticker'
+                              ? MerchProduct.sticker
+                              : MerchProduct.invitation,
+                        ),
+                      ),
+                    );
+                  } else {
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(builder: (_) => GenerateQRCodeScreen(eventId: eventId, eventTitle: titleController.text)),
+                    );
                   }
                 } catch (e) {
                   if (mounted) {
@@ -1226,24 +1372,78 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     );
   }
 
-  Widget _listTypeChip(String label, IconData icon, EventType type) {
-    final isSelected = listType == label;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () { setState(() { listType = label; wishlistItems.clear(); }); _scheduleDraftSave(); },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: isSelected ? type.primary : _border,
-            borderRadius: BorderRadius.circular(12),
-          ),
+  /// Bottom sheet shown immediately after a host saves a new event.
+  /// Returns the user's pick: `'sticker'`, `'invitation'`, or `null` (Maybe
+  /// Later / dismissed). Caller routes accordingly.
+  Future<String?> _showPostEventMerchPrompt() {
+    return showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: _card,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (sheetCtx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Icon(icon, size: 18, color: isSelected ? Colors.white : _muted),
-              const SizedBox(height: 4),
-              Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: isSelected ? Colors.white : _muted)),
+              Center(child: Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(color: _border, borderRadius: BorderRadius.circular(2)),
+              )),
+              const SizedBox(height: 18),
+              Text(
+                'Your event is ready! 🎉',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontFamily: 'FredokaOne', fontSize: 24, color: _fg),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Want printed merch with your QR code on it?',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, color: _muted, height: 1.4),
+              ),
+              const SizedBox(height: 22),
+              SizedBox(
+                height: 56,
+                child: ElevatedButton.icon(
+                  onPressed: () => Navigator.pop(sheetCtx, 'sticker'),
+                  icon: const Text('🌟', style: TextStyle(fontSize: 18)),
+                  label: const Text('Order Stickers',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _purple,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 56,
+                child: ElevatedButton.icon(
+                  onPressed: () => Navigator.pop(sheetCtx, 'invitation'),
+                  icon: const Text('💌', style: TextStyle(fontSize: 18)),
+                  label: const Text('Order Invitations',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _gold,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              TextButton(
+                onPressed: () => Navigator.pop(sheetCtx),
+                child: Text(
+                  'Maybe Later',
+                  style: TextStyle(fontSize: 14, color: _muted, fontWeight: FontWeight.w600),
+                ),
+              ),
             ],
           ),
         ),
@@ -1251,12 +1451,188 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     );
   }
 
+  /// Independent on/off row for the Wishlist or Checklist feature.
+  /// Replaces the prior 3-chip mutually-exclusive selector so a host
+  /// can enable both lists on the same event (e.g. potluck birthday
+  /// where guests bring food AND contribute to a gift).
+  Widget _listTypeToggle({
+    required EventType type,
+    required IconData icon,
+    required String label,
+    required String description,
+    required bool value,
+    required void Function(bool) onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Container(
+            width: 40, height: 40,
+            decoration: BoxDecoration(
+              color: value ? type.primary : _border,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            alignment: Alignment.center,
+            child: Icon(icon, size: 20, color: value ? Colors.white : _muted),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: _fg)),
+                const SizedBox(height: 2),
+                Text(description, style: TextStyle(fontSize: 11.5, color: _muted, height: 1.3)),
+              ],
+            ),
+          ),
+          Switch(
+            value: value,
+            onChanged: onChanged,
+            activeThumbColor: Colors.white,
+            activeTrackColor: type.primary,
+            inactiveThumbColor: _muted,
+            inactiveTrackColor: _border,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _shopChip(({String label, String emoji, String url}) s) {
+    return InkWell(
+      onTap: () => _openShop(s.url),
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: _bg,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: _border),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text(s.emoji, style: const TextStyle(fontSize: 16)),
+          const SizedBox(width: 8),
+          Text(
+            s.label,
+            style: TextStyle(
+              fontFamily: 'Nunito', fontSize: 13, fontWeight: FontWeight.w800,
+              color: _fg,
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  /// One section of the items area — either Wishlist or Checklist.
+  /// Each section owns its own header, its own input row (the price
+  /// vs. quantity field switches by [kind]), its own Add button, and
+  /// its own filtered list of items. Items keep their original index
+  /// in the master `wishlistItems` array so delete still finds the
+  /// right entry.
+  Widget _buildKindSection(String kind, EventType type) {
+    final isChecklist = kind == 'checklist';
+    final headerLabel = isChecklist ? 'Checklist' : 'Wishlist';
+    final headerIcon = isChecklist ? Icons.checklist_outlined : Icons.card_giftcard_outlined;
+    final emptyEmoji = isChecklist ? '📋' : '🎁';
+    final emptyTitle = isChecklist ? 'No checklist items yet' : 'No wishlist items yet';
+    final emptySub = isChecklist ? 'Add items for guests to claim' : 'Add items for guests to gift';
+
+    final indices = <int>[];
+    for (var i = 0; i < wishlistItems.length; i++) {
+      if (_itemKind(wishlistItems[i]) == kind) indices.add(i);
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _border),
+      ),
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(headerIcon, size: 18, color: type.primary),
+            const SizedBox(width: 8),
+            Text(headerLabel,
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: _fg)),
+          ]),
+          const SizedBox(height: 10),
+          // Input row — price for wishlist, quantity for checklist.
+          // Controllers are shared across both sections; each Add
+          // button clears them so jumping between sections is clean.
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: newItemNameController,
+                style: TextStyle(color: _fg),
+                decoration: _inputDecoration(isChecklist ? 'Item to bring' : 'Item name'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 90,
+              child: isChecklist
+                  ? TextField(
+                      controller: newItemQtyController,
+                      style: TextStyle(color: _fg),
+                      decoration: _inputDecoration('e.g. 2 bags'),
+                    )
+                  : TextField(
+                      controller: newItemPriceController,
+                      keyboardType: TextInputType.number,
+                      style: TextStyle(color: _fg),
+                      decoration: _inputDecoration('\$ Price'),
+                    ),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: () => _addItemOfKind(kind),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: type.primary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+              ),
+              child: const Icon(Icons.add),
+            ),
+          ]),
+          const SizedBox(height: 12),
+          if (indices.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 18),
+              child: Center(
+                child: Column(children: [
+                  Text(emptyEmoji, style: const TextStyle(fontSize: 36)),
+                  const SizedBox(height: 6),
+                  Text(emptyTitle, style: TextStyle(fontSize: 14, color: _muted, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 2),
+                  Text(emptySub, style: TextStyle(fontSize: 12, color: _muted)),
+                ]),
+              ),
+            )
+          else
+            ...indices.map(_buildWishlistItem),
+        ],
+      ),
+    );
+  }
+
   Widget _buildWishlistItem(int index) {
     final item = wishlistItems[index];
-    final isChecklist = listType == 'Checklist';
+    // Per-item kind beats the screen-level listType — when the host
+    // has Both lists enabled, items still need to render with the
+    // shape that matches THEIR kind, not the most recently selected
+    // toggle. Falls back to the listType-based heuristic in
+    // [_itemKind] for legacy items missing the field.
+    final isChecklist = _itemKind(item) == 'checklist';
     final subtitle = isChecklist
         ? 'Qty needed: ${item['quantity']}'
-        : '\$${(item['price'] as double).toStringAsFixed(2)}';
+        : '\$${(item['price'] as double? ?? 0.0).toStringAsFixed(2)}';
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
       decoration: BoxDecoration(
@@ -1271,7 +1647,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(item['name'] as String, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white)),
+                Text(item['name'] as String, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _fg)),
                 const SizedBox(height: 4),
                 Text(subtitle, style: TextStyle(fontSize: 14, color: _muted)),
               ],
@@ -1290,107 +1666,120 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _glowWrap(TextField(
-          controller: locationController,
+        _glowWrap(GooglePlaceAutoCompleteTextField(
+          textEditingController: locationController,
           focusNode: _locationFocusNode,
-          style: const TextStyle(color: Colors.white),
-          decoration: _inputDecoration('e.g. 123 Celebration Lane, Seaside CA').copyWith(
+          googleAPIKey: _placesApiKey,
+          // 400ms — long enough to avoid burning billable autocomplete
+          // requests on every keystroke, short enough to feel responsive.
+          debounceTime: 400,
+          // US-only — the rest of the address flow (state dropdown, ZIP)
+          // assumes US addresses.
+          countries: const ['us'],
+          isLatLngRequired: false,
+          textStyle: TextStyle(color: _fg, fontSize: 15),
+          // Match the rest of the form's input styling.
+          inputDecoration: _inputDecoration('e.g. 123 Celebration Lane, Seaside CA').copyWith(
             prefixIcon: Icon(Icons.location_on_outlined, size: 18, color: _muted),
-            suffixIcon: _fetchingSuggestions
-                ? const Padding(
-                    padding: EdgeInsets.all(14),
-                    child: SizedBox(
-                      width: 16, height: 16,
-                      child: CircularProgressIndicator(color: _purple, strokeWidth: 2),
-                    ),
-                  )
-                : locationController.text.isNotEmpty
-                    ? IconButton(
-                        icon: Icon(Icons.close, size: 16, color: _muted),
-                        onPressed: () {
-                          locationController.clear();
-                          setState(() { _suggestions = []; _zipCode = ''; });
-                          _scheduleDraftSave();
-                        },
-                      )
-                    : null,
           ),
-          onChanged: (v) {
-            setState(() {});
-            _scheduleDraftSave();
-            _suggestionsDebounce?.cancel();
-            if (v.length >= 3) {
-              _suggestionsDebounce = Timer(
-                const Duration(milliseconds: 400),
-                () => _fetchSuggestions(v),
-              );
-            } else {
-              setState(() { _suggestions = []; _fetchingSuggestions = false; });
+          // Fired when the user taps a suggestion. The package writes the
+          // full description into the controller; we kick off a place
+          // details fetch so we can extract the postal code separately.
+          itemClick: (Prediction p) {
+            final desc = p.description ?? '';
+            locationController.text = desc;
+            locationController.selection = TextSelection.fromPosition(
+              TextPosition(offset: desc.length),
+            );
+            setState(() => _zipCode = '');
+            final placeId = p.placeId;
+            if (placeId != null && placeId.isNotEmpty) {
+              _fetchZipFromPlaceId(placeId);
             }
+            _scheduleDraftSave();
+            _locationFocusNode.unfocus();
           },
-        )),
-        if (_suggestions.isNotEmpty)
-          Container(
-            margin: const EdgeInsets.only(top: 4),
-            decoration: BoxDecoration(
+          // Render each suggestion with the same look as the old custom
+          // list: pin icon + main text (street) + secondary (city/state).
+          itemBuilder: (context, index, Prediction p) {
+            final structured = p.structuredFormatting;
+            final main = structured?.mainText ?? p.description ?? '';
+            final secondary = structured?.secondaryText ?? '';
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               color: _card,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: _border),
-            ),
-            child: ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: _suggestions.length,
-              separatorBuilder: (_, _) => Divider(height: 1, color: _border, indent: 40),
-              itemBuilder: (_, i) {
-                final s = _suggestions[i];
-                final fmt = s['structured_formatting'] as Map<String, dynamic>?;
-                final main = fmt?['main_text'] as String? ?? (s['description'] as String? ?? '');
-                final secondary = fmt?['secondary_text'] as String? ?? '';
-                return InkWell(
-                  onTap: () => _selectSuggestion(s),
-                  borderRadius: BorderRadius.vertical(
-                    top: i == 0 ? const Radius.circular(12) : Radius.zero,
-                    bottom: i == _suggestions.length - 1 ? const Radius.circular(12) : Radius.zero,
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.location_on_outlined, size: 16, color: _purple),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(main, style: const TextStyle(fontSize: 14, color: Colors.white, fontWeight: FontWeight.w500)),
-                              if (secondary.isNotEmpty) ...[
-                                const SizedBox(height: 2),
-                                Text(secondary, style: TextStyle(fontSize: 11, color: _muted)),
-                              ],
-                            ],
-                          ),
-                        ),
+              child: Row(children: [
+                const Icon(Icons.location_on_outlined, size: 16, color: _purple),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(main, style: TextStyle(fontSize: 14, color: _fg, fontWeight: FontWeight.w500)),
+                      if (secondary.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(secondary, style: TextStyle(fontSize: 11, color: _muted)),
                       ],
-                    ),
+                    ],
                   ),
-                );
-              },
-            ),
-          ),
+                ),
+              ]),
+            );
+          },
+          seperatedBuilder: Divider(height: 1, color: _border, indent: 40),
+        )),
         if (_zipCode.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 6),
-            child: Row(
-              children: [
-                Icon(Icons.pin_drop_outlined, size: 13, color: _muted),
-                const SizedBox(width: 4),
-                Text('ZIP: $_zipCode', style: TextStyle(fontSize: 12, color: _muted)),
-              ],
-            ),
+            child: Row(children: [
+              Icon(Icons.pin_drop_outlined, size: 13, color: _muted),
+              const SizedBox(width: 4),
+              Text('ZIP: $_zipCode', style: TextStyle(fontSize: 12, color: _muted)),
+            ]),
           ),
       ],
     );
+  }
+
+  /// Fetches the place details for [placeId] and pulls the postal_code out
+  /// of the address_components array. Mirrors what the old custom
+  /// `_selectSuggestion` did — kept as a separate helper because the
+  /// `google_places_flutter` widget hands us a `Prediction` without parsed
+  /// components, so we still need a follow-up details call to populate ZIP.
+  Future<void> _fetchZipFromPlaceId(String placeId) async {
+    try {
+      final uri = Uri.https('maps.googleapis.com', '/maps/api/place/details/json', {
+        'place_id': placeId,
+        'fields': 'address_components',
+        'key': _placesApiKey,
+      });
+      final response = await http.get(uri);
+      if (!mounted) return;
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      // Surface API auth failures to the developer console — Google's
+      // status string lives in `status`, the human-readable cause in
+      // `error_message`. Without this, an expired key / disabled API /
+      // wrong restriction silently returned nothing and the only
+      // symptom was "autocomplete looks broken".
+      final status = data['status'] as String?;
+      if (status != null && status != 'OK' && status != 'ZERO_RESULTS') {
+        debugPrint('[Places] details rejected: status=$status '
+            'message=${data['error_message']} '
+            '(see _placesApiKey comment for GCP setup pitfalls)');
+      }
+      final result = data['result'] as Map<String, dynamic>?;
+      if (result == null) return;
+      final comps = result['address_components'] as List? ?? [];
+      for (final comp in comps) {
+        final types = List<String>.from((comp as Map)['types'] as List? ?? []);
+        if (types.contains('postal_code')) {
+          setState(() => _zipCode = (comp['long_name'] as String?) ?? '');
+          break;
+        }
+      }
+    } catch (e) {
+      debugPrint('[Places] details request failed: $e');
+    }
   }
 
   Future<void> _pickRecurrenceEndDate() async {
@@ -1428,7 +1817,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                   Row(children: [
                     Icon(Icons.groups_outlined, size: 16, color: _capacityEnabled ? _purple : _muted),
                     const SizedBox(width: 6),
-                    Text('Set capacity limit', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _capacityEnabled ? _purple : Colors.white)),
+                    Text('Set capacity limit', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _capacityEnabled ? _purple : _fg)),
                   ]),
                   const SizedBox(height: 2),
                   Text('Cap how many guests can RSVP Yes', style: TextStyle(fontSize: 11, color: _muted)),
@@ -1454,7 +1843,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
           _glowWrap(TextField(
             controller: _capacityController,
             keyboardType: TextInputType.number,
-            style: const TextStyle(color: Colors.white),
+            style: TextStyle(color: _fg),
             decoration: _inputDecoration('Max guests (e.g. 50)'),
             onChanged: (_) => _scheduleDraftSave(),
           )),
@@ -1474,7 +1863,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     Row(children: [
                       Icon(Icons.hourglass_bottom, size: 16, color: _allowWaitlist ? _purple : _muted),
                       const SizedBox(width: 6),
-                      Text('Allow waitlist', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _allowWaitlist ? _purple : Colors.white)),
+                      Text('Allow waitlist', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _allowWaitlist ? _purple : _fg)),
                     ]),
                     const SizedBox(height: 2),
                     Text('Notify the next person when a spot opens', style: TextStyle(fontSize: 11, color: _muted)),
@@ -1490,69 +1879,74 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             ]),
           ),
         ],
-        const SizedBox(height: 10),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          decoration: BoxDecoration(
-            color: _card,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: _allowPlusOnes ? _purple : _border, width: _allowPlusOnes ? 1.5 : 1),
-          ),
-          child: Row(children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(children: [
-                    Icon(Icons.person_add_alt, size: 16, color: _allowPlusOnes ? _purple : _muted),
-                    const SizedBox(width: 6),
-                    Text('Allow plus ones', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _allowPlusOnes ? _purple : Colors.white)),
-                  ]),
-                  const SizedBox(height: 2),
-                  Text('Let guests bring extra people', style: TextStyle(fontSize: 11, color: _muted)),
-                ],
-              ),
-            ),
-            Switch(
-              value: _allowPlusOnes,
-              onChanged: (v) { setState(() => _allowPlusOnes = v); _scheduleDraftSave(); },
-              activeTrackColor: _purple,
-              activeThumbColor: Colors.white,
-            ),
-          ]),
-        ),
-        if (_allowPlusOnes) ...[
+        // Plus-ones is gated to Corporate and Wedding event types only.
+        // For every other type the toggle and the count selector are
+        // hidden entirely, and _allowPlusOnes stays false in the saved doc.
+        if (_supportsPlusOnes) ...[
           const SizedBox(height: 10),
-          Row(
-            children: [
-              for (final opt in const [(1, '1'), (2, '2'), (null, 'Unlimited')]) ...[
-                Expanded(
-                  child: GestureDetector(
-                    onTap: () { setState(() => _maxPlusOnes = opt.$1); _scheduleDraftSave(); },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      decoration: BoxDecoration(
-                        color: _maxPlusOnes == opt.$1 ? _purple.withValues(alpha: 0.18) : _card,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: _maxPlusOnes == opt.$1 ? _purple : _border, width: _maxPlusOnes == opt.$1 ? 1.5 : 1),
-                      ),
-                      child: Center(
-                        child: Text(
-                          opt.$2,
-                          style: TextStyle(
-                            color: _maxPlusOnes == opt.$1 ? _purple : Colors.white,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: _card,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: _allowPlusOnes ? _purple : _border, width: _allowPlusOnes ? 1.5 : 1),
+            ),
+            child: Row(children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [
+                      Icon(Icons.person_add_alt, size: 16, color: _allowPlusOnes ? _purple : _muted),
+                      const SizedBox(width: 6),
+                      Text('Allow plus ones', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _allowPlusOnes ? _purple : _fg)),
+                    ]),
+                    const SizedBox(height: 2),
+                    Text('Let guests bring extra people', style: TextStyle(fontSize: 11, color: _muted)),
+                  ],
+                ),
+              ),
+              Switch(
+                value: _allowPlusOnes,
+                onChanged: (v) { setState(() => _allowPlusOnes = v); _scheduleDraftSave(); },
+                activeTrackColor: _purple,
+                activeThumbColor: Colors.white,
+              ),
+            ]),
+          ),
+          if (_allowPlusOnes) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                for (final opt in const [(1, '1'), (2, '2'), (null, 'Unlimited')]) ...[
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () { setState(() => _maxPlusOnes = opt.$1); _scheduleDraftSave(); },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        decoration: BoxDecoration(
+                          color: _maxPlusOnes == opt.$1 ? _purple.withValues(alpha: 0.18) : _card,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: _maxPlusOnes == opt.$1 ? _purple : _border, width: _maxPlusOnes == opt.$1 ? 1.5 : 1),
+                        ),
+                        child: Center(
+                          child: Text(
+                            opt.$2,
+                            style: TextStyle(
+                              color: _maxPlusOnes == opt.$1 ? _purple : _fg,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
-                if (opt.$2 != 'Unlimited') const SizedBox(width: 8),
+                  if (opt.$2 != 'Unlimited') const SizedBox(width: 8),
+                ],
               ],
-            ],
-          ),
+            ),
+          ],
         ],
       ],
     );
@@ -1575,7 +1969,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                 Row(children: [
                   Icon(Icons.repeat, size: 16, color: _isRecurring ? _purple : _muted),
                   const SizedBox(width: 6),
-                  Text('Make this recurring', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isRecurring ? _purple : Colors.white)),
+                  Text('Make this recurring', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isRecurring ? _purple : _fg)),
                 ]),
                 const SizedBox(height: 2),
                 Text('Automatically create the next event in the series', style: TextStyle(fontSize: 11, color: _muted)),
@@ -1641,7 +2035,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
                     Icon(icon, size: 14, color: selected ? _purple : _muted),
                     const SizedBox(width: 6),
-                    Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: selected ? _purple : Colors.white)),
+                    Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: selected ? _purple : _fg)),
                   ]),
                 ),
               );
@@ -1670,7 +2064,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             child: _recurrenceEndDate != null
                 ? Text(
                     'Stop on ${months[_recurrenceEndDate!.month - 1]} ${_recurrenceEndDate!.day}, ${_recurrenceEndDate!.year}',
-                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _fg),
                   )
                 : Text('End date (optional — repeats forever if empty)', style: TextStyle(fontSize: 14, color: _muted)),
           ),
@@ -1692,7 +2086,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         Row(children: [
           Expanded(child: TextField(
             controller: _coHostEmailController,
-            style: const TextStyle(color: Colors.white),
+            style: TextStyle(color: _fg),
             keyboardType: TextInputType.emailAddress,
             decoration: _inputDecoration('Email address').copyWith(
               errorText: _coHostError,
@@ -1754,7 +2148,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
 
   Widget _fieldLabel(String label) => Padding(
         padding: const EdgeInsets.only(bottom: 8),
-        child: Text(label, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.white)),
+        child: Text(label, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: _fg)),
       );
 
   InputDecoration _inputDecoration(String hint) => InputDecoration(
@@ -1774,7 +2168,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         child: Row(children: [
           Icon(icon, size: 18, color: _muted),
           const SizedBox(width: 8),
-          Text(text, style: const TextStyle(fontSize: 14, color: Colors.white)),
+          Text(text, style: TextStyle(fontSize: 14, color: _fg)),
         ]),
       );
 }
@@ -1804,6 +2198,7 @@ class _TemplatePickerSheetState extends State<_TemplatePickerSheet> {
   Color get _card   => _isDark ? _cardDark   : _cardLight;
   Color get _border => _isDark ? _borderDark : _borderLight;
   Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
+  Color get _fg     => _isDark ? Colors.white : AppColors.dark;
 
   @override
   void initState() {
@@ -1833,13 +2228,13 @@ class _TemplatePickerSheetState extends State<_TemplatePickerSheet> {
             const SizedBox(height: 12),
             Container(width: 40, height: 4, decoration: BoxDecoration(color: _border, borderRadius: BorderRadius.circular(2))),
             const SizedBox(height: 16),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 20),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Row(
                 children: [
-                  Icon(Icons.bookmark_outlined, color: _gold, size: 20),
-                  SizedBox(width: 8),
-                  Text('Your Templates', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Colors.white)),
+                  const Icon(Icons.bookmark_outlined, color: _gold, size: 20),
+                  const SizedBox(width: 8),
+                  Text('Your Templates', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: _fg)),
                 ],
               ),
             ),
@@ -1891,7 +2286,7 @@ class _TemplatePickerSheetState extends State<_TemplatePickerSheet> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
+                                Text(title, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: _fg)),
                                 const SizedBox(height: 2),
                                 Text(
                                   offsetDays > 0 ? '$typeName · RSVP $offsetDays days before' : typeName,

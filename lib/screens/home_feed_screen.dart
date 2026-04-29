@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import '../utils.dart';
+import '../widgets/rsvp_live_counts.dart';
 import 'create_event_screen.dart';
 import 'guest_event_screen.dart';
 import 'settings_screen.dart';
@@ -39,12 +40,22 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
   String _exploreSearch = '';
   final TextEditingController _exploreSearchController = TextEditingController();
 
+  // Events the current user has RSVP'd 'Yes' to as a guest. Driven by a
+  // collectionGroup('rsvps') stream filtered to status=='Yes' + uid==me;
+  // the parent event docs are fetched lazily when the stream fires.
+  // _attendingLoaded flips true after the first snapshot arrives so we
+  // can distinguish "still loading" from "no attending events".
+  List<Map<String, dynamic>> _attendingEvents = [];
+  bool _attendingLoaded = false;
+  StreamSubscription<QuerySnapshot>? _attendingSub;
+
   @override
   void initState() {
     super.initState();
     print('[HomeFeed] initState — calling _subscribeToPublicEvents()');
     _subscribeToEvents();
     _subscribeToPublicEvents();
+    _subscribeToAttendingEvents();
     _saveFcmToken();
   }
 
@@ -69,8 +80,106 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
   void dispose() {
     _eventsSub?.cancel();
     _publicEventsSub?.cancel();
+    _attendingSub?.cancel();
     _exploreSearchController.dispose();
     super.dispose();
+  }
+
+  /// Listens to RSVP docs across every event subcollection where the
+  /// current user is `uid` AND `status == 'Yes'`. Each matching RSVP
+  /// is joined back to its parent event doc so the Attending card can
+  /// render the same chrome as the Hosting cards.
+  ///
+  /// Notes:
+  ///   • Status field is PascalCase ('Yes'/'Maybe'/'No') in Firestore —
+  ///     the user spec said lowercase but the actual data shape, set
+  ///     by guest_event_screen.dart's _saveRsvp, is PascalCase.
+  ///   • Events the user hosts themselves are filtered out so a host
+  ///     who RSVP'd Yes to their own event doesn't show in both
+  ///     sections (would double up the same card).
+  ///   • Past / archived / draft events are filtered client-side.
+  ///   • First time this query runs Firestore will throw with a
+  ///     console-link to create the required collectionGroup index
+  ///     (`rsvps` × uid + status). One-click resolution.
+  void _subscribeToAttendingEvents() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      setState(() => _attendingLoaded = true);
+      return;
+    }
+    debugPrint('[HomeFeed] subscribing to attending RSVPs for uid=${user.uid}');
+    _attendingSub = FirebaseFirestore.instance
+        .collectionGroup('rsvps')
+        .where('uid', isEqualTo: user.uid)
+        .where('status', isEqualTo: 'Yes')
+        .snapshots()
+        .listen((snap) async {
+      if (!mounted) return;
+      debugPrint('[HomeFeed] attending stream — ${snap.docs.length} Yes RSVP(s)');
+      // Each rsvp doc lives at events/{eventId}/rsvps/{uid}. Walk up
+      // to the parent event doc id, then fetch the event docs in
+      // parallel. Skip self-hosted events to avoid the duplicate
+      // hosting/attending card.
+      final eventIds = <String>[];
+      for (final rsvpDoc in snap.docs) {
+        final parent = rsvpDoc.reference.parent.parent;
+        if (parent == null) continue;
+        eventIds.add(parent.id);
+      }
+      if (eventIds.isEmpty) {
+        setState(() {
+          _attendingEvents = [];
+          _attendingLoaded = true;
+        });
+        return;
+      }
+      try {
+        final eventDocs = await Future.wait(eventIds.map(
+          (id) => FirebaseFirestore.instance.collection('events').doc(id).get(),
+        ));
+        if (!mounted) return;
+        final now = DateTime.now();
+        final results = <Map<String, dynamic>>[];
+        for (final eventSnap in eventDocs) {
+          if (!eventSnap.exists) continue;
+          final data = eventSnap.data() as Map<String, dynamic>;
+          if (data['hostId'] == user.uid) continue;
+          if ((data['isDraft']    as bool?) ?? false) continue;
+          if ((data['isArchived'] as bool?) ?? false) continue;
+          final ts = data['date'] as Timestamp?;
+          final calendarDate = ts?.toDate();
+          final eventStart = _resolveEventStart(calendarDate, data['time'] as String?);
+          if (eventStart.isBefore(now)) continue;
+          final typeName = (data['eventType'] as String?) ?? '';
+          final matchedType = eventTypes.firstWhere(
+            (t) => t.name == typeName,
+            orElse: () => eventTypes.last,
+          );
+          results.add({
+            'id': eventSnap.id,
+            'title': (data['title'] as String?) ?? 'Untitled',
+            'date': calendarDate ?? DateTime(2099),
+            'eventStart': eventStart,
+            'host': (data['hostName'] as String?) ?? 'Host',
+            'emoji': (data['eventEmoji'] as String?) ?? '🎉',
+            'color': matchedType.primary,
+            'rawData': data,
+          });
+        }
+        results.sort((a, b) =>
+            (a['eventStart'] as DateTime).compareTo(b['eventStart'] as DateTime));
+        setState(() {
+          _attendingEvents = results;
+          _attendingLoaded = true;
+        });
+      } catch (e) {
+        debugPrint('[HomeFeed] attending event-doc fetch failed: $e');
+        if (mounted) setState(() => _attendingLoaded = true);
+      }
+    }, onError: (Object e) {
+      debugPrint('[HomeFeed] attending stream ERROR: $e');
+      if (mounted) setState(() => _attendingLoaded = true);
+    });
   }
 
   void _subscribeToEvents() {
@@ -80,52 +189,97 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
       return;
     }
     debugPrint('[HomeFeed] subscribing to events for uid=${user.uid}');
+    // No .orderBy('date') here — Firestore would silently drop any draft
+    // doc that hasn't had a date field stamped on it yet (which used to
+    // hide drafts from this feed for ~600ms after creation, sometimes
+    // permanently if the host quit before the auto-save debounce fired).
+    // Sorted client-side below where DateTime(2099) is used as the
+    // sentinel for missing/null dates.
     _eventsSub = FirebaseFirestore.instance
         .collection('events')
         .where('hostId', isEqualTo: user.uid)
-        .orderBy('date')
         .snapshots()
         .listen((snap) {
-      debugPrint('[HomeFeed] stream received ${snap.docs.length} event(s)');
+      debugPrint('[HomeFeed] stream received ${snap.docs.length} event(s) for hostId=${user.uid}');
       final now = DateTime.now();
       setState(() {
         _loading = false;
-        _events = snap.docs.where((doc) {
-          // Personal feed only shows personal events (and legacy events with no
-          // accountType set, for backwards compatibility with docs written
-          // before the field existed).
-          final acctType = doc.data()['accountType'] as String?;
-          return acctType == null || acctType == 'personal';
-        }).map((doc) {
+        // No accountType filter here. The query is already scoped by
+        // hostId == user.uid so this is exclusively the user's own
+        // events; dropping any of them based on accountType caused
+        // trialing business users (whom HomeRouter pins to this feed)
+        // to see a blank list because their newly-created events were
+        // stamped 'business'/'businessPlus' and silently filtered out.
+        _events = snap.docs.map((doc) {
           final data = doc.data() as Map<String, dynamic>;
           final ts = data['date'] as Timestamp?;
-          final date = ts?.toDate() ?? DateTime(2099);
+          final calendarDate = ts?.toDate();
+          // Combine `date` (midnight Timestamp) with `time` ("HH:MM"
+          // string) into the actual event-start DateTime. Without
+          // this, an event picked for TODAY had date=00:00 and was
+          // classified as `past` the moment it was created (because
+          // now > 00:00) — silently disappearing from Upcoming. If no
+          // time was set, end-of-day is used so today's events stay
+          // in Upcoming until midnight passes.
+          final eventStart = _resolveEventStart(calendarDate, data['time'] as String?);
+          // Sortable date keeps the prior contract: drafts and
+          // date-less events sort last via the DateTime(2099) sentinel.
+          final sortDate = calendarDate ?? DateTime(2099);
+          final isDraft = (data['isDraft'] as bool?) ?? false;
+          final isPast = !isDraft && eventStart.isBefore(now);
+          debugPrint('[HomeFeed]   doc=${doc.id} title="${data['title']}" date=$calendarDate time=${data['time']} eventStart=$eventStart isPast=$isPast isDraft=$isDraft accountType=${data['accountType']}');
           final typeName = (data['eventType'] as String?) ?? '';
           final matchedType = eventTypes.firstWhere((t) => t.name == typeName, orElse: () => eventTypes.last);
           return {
             'id': doc.id,
             'title': (data['title'] as String?) ?? 'Untitled',
-            'date': date,
+            'date': sortDate,
+            'eventStart': eventStart,
             'host': (data['hostName'] as String?) ?? 'You',
-            'isPast': date.isBefore(now),
+            'isPast': isPast,
             'yes': (data['yes'] as num?)?.toInt() ?? 0,
             'maybe': (data['maybe'] as num?)?.toInt() ?? 0,
             'no': (data['no'] as num?)?.toInt() ?? 0,
             'type': typeName,
             'emoji': (data['eventEmoji'] as String?) ?? '🎉',
             'color': matchedType.primary,
-            'isDraft': (data['isDraft'] as bool?) ?? false,
+            'isDraft': isDraft,
             'isPublic': (data['isPublic'] as bool?) ?? false,
             'isArchived': (data['isArchived'] as bool?) ?? false,
             'rawData': data,
           };
-        }).toList();
+        }).toList()..sort((a, b) {
+          return (a['date'] as DateTime).compareTo(b['date'] as DateTime);
+        });
       });
       _autoArchivePastEvents();
     }, onError: (Object e) {
       debugPrint('[HomeFeed] stream ERROR: $e');
       if (mounted) setState(() => _loading = false);
     });
+  }
+
+  /// Combines the `date` Timestamp (midnight on the picked calendar
+  /// date) with the `time` string ("HH:MM") into a single DateTime
+  /// representing the actual event start. Used by the upcoming/past
+  /// classifier so an event scheduled for today doesn't get treated
+  /// as already-past at 00:00:01.
+  DateTime _resolveEventStart(DateTime? calendarDate, String? timeStr) {
+    if (calendarDate == null) return DateTime(2099);
+    if (timeStr != null) {
+      final parts = timeStr.split(':');
+      if (parts.length == 2) {
+        final h = int.tryParse(parts[0]);
+        final m = int.tryParse(parts[1]);
+        if (h != null && m != null) {
+          return DateTime(calendarDate.year, calendarDate.month, calendarDate.day, h, m);
+        }
+      }
+    }
+    // No usable time — fall back to end-of-day so a same-day event
+    // without a specific start time still counts as upcoming until
+    // midnight rolls over.
+    return DateTime(calendarDate.year, calendarDate.month, calendarDate.day, 23, 59, 59);
   }
 
   void _subscribeToPublicEvents() {
@@ -177,8 +331,12 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
           final data = e['rawData'] as Map<String, dynamic>;
           final isArchived = (data['isArchived'] as bool?) ?? false;
           final isDraft = (data['isDraft'] as bool?) ?? false;
-          final date = e['date'] as DateTime;
-          return !isArchived && !isDraft && !date.isBefore(now);
+          // Combine date + time so today's events stay visible until
+          // their actual start time (not midnight). Same fix as the
+          // host's own-events stream above.
+          final calendarDate = (data['date'] as Timestamp?)?.toDate();
+          final eventStart = _resolveEventStart(calendarDate, data['time'] as String?);
+          return !isArchived && !isDraft && !eventStart.isBefore(now);
         }).toList();
 
         print('[Explore] *** ${_publicEvents.length} event(s) after client-side filter ***');
@@ -198,16 +356,17 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
     }).toList();
   }
 
-  int get _pastCount => _events.where((e) => !(e['isDraft'] as bool) && (e['date'] as DateTime).isBefore(DateTime.now())).length;
+  // Upcoming/past classification reads the precomputed `isPast` field,
+  // which compares against `eventStart` (date+time combined) instead
+  // of `date` (midnight). Without this, an event scheduled for today
+  // gets classified as "past" the moment it's created.
+  int get _pastCount => _events.where((e) => !(e['isDraft'] as bool) && (e['isPast'] as bool)).length;
 
   List<Map<String, dynamic>> get _drafts => _events.where((e) => e['isDraft'] as bool).toList();
 
   List<Map<String, dynamic>> get filteredEvents {
-    final now = DateTime.now();
-    // Upcoming tab shows only FUTURE, non-draft events. Drafts render in their own
-    // pinned section above the list (handled in the build method).
-    if (selectedTab == 0) return _events.where((e) => !(e['isDraft'] as bool) && (e['date'] as DateTime).isAfter(now)).toList();
-    if (selectedTab == 1) return _events.where((e) => !(e['isDraft'] as bool) && !(e['date'] as DateTime).isAfter(now)).toList();
+    if (selectedTab == 0) return _events.where((e) => !(e['isDraft'] as bool) && !(e['isPast'] as bool)).toList();
+    if (selectedTab == 1) return _events.where((e) => !(e['isDraft'] as bool) &&  (e['isPast'] as bool)).toList();
     return _events;
   }
 
@@ -294,21 +453,38 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
                             ),
                           Expanded(
                             child: Builder(builder: (_) {
-                              // Upcoming tab: prepend a Drafts section when drafts exist.
+                              // Upcoming tab section order: Attending (events
+                              // I'm a guest at) → Upcoming (events I host) →
+                              // Drafts. Empty-state only fires when ALL three
+                              // lists are empty — otherwise the sections that
+                              // DO have content render normally.
                               if (selectedTab == 0) {
                                 final drafts = _drafts;
-                                if (drafts.isEmpty && filteredEvents.isEmpty) return _buildEmptyState();
+                                final attending = _attendingEvents;
+                                if (drafts.isEmpty
+                                    && filteredEvents.isEmpty
+                                    && attending.isEmpty) return _buildEmptyState();
                                 return ListView(
                                   padding: EdgeInsets.fromLTRB(16, 8, 16, _selectMode ? 100 : 80),
                                   children: [
+                                    if (attending.isNotEmpty) ...[
+                                      _attendingSectionHeader(attending.length),
+                                      ...attending.map((a) => _buildAttendingCard(context, a)),
+                                      const SizedBox(height: 8),
+                                    ],
+                                    // Show the UPCOMING header only when
+                                    // there's an Attending list above it —
+                                    // otherwise the hosted-events list IS
+                                    // the page and a header is redundant.
+                                    if (filteredEvents.isNotEmpty && attending.isNotEmpty)
+                                      _upcomingSectionHeader(filteredEvents.length),
+                                    ...filteredEvents.map((e) => _buildEventCard(context, e)),
+                                    if (filteredEvents.isNotEmpty && drafts.isNotEmpty)
+                                      const SizedBox(height: 8),
                                     if (drafts.isNotEmpty) ...[
                                       _draftsSectionHeader(drafts.length),
                                       ...drafts.map((d) => _buildEventCard(context, d)),
-                                      const SizedBox(height: 8),
                                     ],
-                                    if (filteredEvents.isNotEmpty && drafts.isNotEmpty)
-                                      _upcomingSectionHeader(filteredEvents.length),
-                                    ...filteredEvents.map((e) => _buildEventCard(context, e)),
                                   ],
                                 );
                               }
@@ -674,6 +850,115 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
         ),
       );
 
+  /// Section header for the Attending list. Purple to distinguish from
+  /// the user's own UPCOMING/DRAFTS sections at a glance — the brand
+  /// accent for "guest mode" surfaces.
+  Widget _attendingSectionHeader(int count) => Padding(
+        padding: const EdgeInsets.only(top: 4, bottom: 10, left: 2),
+        child: Row(children: [
+          const Icon(Icons.event_available_outlined, size: 16, color: AppColors.purple),
+          const SizedBox(width: 6),
+          Text(
+            'ATTENDING · $count',
+            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.purple, letterSpacing: 1.2),
+          ),
+        ]),
+      );
+
+  /// Compact card for events the user is attending as a guest. Mirrors
+  /// the chrome of [_buildEventCard] — same 20-radius, same Inter/Nunito
+  /// hierarchy, same emoji-tile-on-the-left layout — but trims the
+  /// host-only affordances (edit/notify, draft state, select mode,
+  /// RSVP totals) and adds a "RSVP'd Yes" pill so the user knows at a
+  /// glance which line they responded to. Tapping opens the same
+  /// GuestEventScreen the QR scan flow lands on.
+  Widget _buildAttendingCard(BuildContext context, Map<String, dynamic> event) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fg = isDark ? Colors.white : AppColors.dark;
+    final cardBg = isDark ? const Color(0xFF383B56) : Colors.white;
+    final borderColor = isDark
+        ? const Color(0xFF4A4E6B)
+        : Colors.black.withValues(alpha: 0.05);
+    final color = event['color'] as Color;
+    final date = event['date'] as DateTime;
+    final months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final dateStr = date.year < 2099 ? '${months[date.month - 1]} ${date.day}, ${date.year}' : 'Date TBD';
+    final eventId = event['id'] as String;
+    final hostName = event['host'] as String;
+
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GuestEventScreen(
+            eventId: eventId,
+            eventData: Map<String, dynamic>.from(event['rawData'] as Map),
+          ),
+        ),
+      ),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: cardBg,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: borderColor),
+        ),
+        padding: const EdgeInsets.all(16),
+        child: Row(children: [
+          Container(
+            width: 48, height: 48,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            alignment: Alignment.center,
+            child: Text(event['emoji'] as String, style: const TextStyle(fontSize: 24)),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  event['title'] as String,
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: fg),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  dateStr,
+                  style: const TextStyle(fontSize: 12, color: AppColors.muted, fontWeight: FontWeight.w500),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Hosted by $hostName',
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11.5, color: AppColors.muted),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+            decoration: BoxDecoration(
+              color: AppColors.green.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: const Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.check_circle_outline, size: 12, color: AppColors.green),
+              SizedBox(width: 4),
+              Text(
+                "RSVP'd Yes",
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.green, letterSpacing: 0.2),
+              ),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+
   Widget _buildEmptyState() {
     return Center(
       child: Column(
@@ -762,13 +1047,27 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
             ),
             if (!isDraft) ...[
               const SizedBox(height: 14),
-              Row(children: [
-                _buildPill('${event['yes']} Yes', AppColors.green),
-                const SizedBox(width: 8),
-                _buildPill('${event['maybe']} Maybe', AppColors.gold),
-                const SizedBox(width: 8),
-                _buildPill('${event['no']} No', Colors.redAccent),
-              ]),
+              // Live counts straight from the rsvps subcollection — sums
+              // adults+children+plusOnes per doc so a family-of-4 RSVP
+              // shows as 4, not 1. The cached event doc counters
+              // (event['yes']/['maybe']/['no']) are passed as the
+              // initial render to avoid a 0-flash before the snapshot
+              // resolves; once the listener fires the live totals win.
+              RsvpLiveCounts(
+                eventId: event['id'] as String,
+                initial: (
+                  yes:   event['yes']   as int? ?? 0,
+                  maybe: event['maybe'] as int? ?? 0,
+                  no:    event['no']    as int? ?? 0,
+                ),
+                builder: (ctx, yes, maybe, no) => Row(children: [
+                  _buildPill('$yes Yes', AppColors.green),
+                  const SizedBox(width: 8),
+                  _buildPill('$maybe Maybe', AppColors.gold),
+                  const SizedBox(width: 8),
+                  _buildPill('$no No', Colors.redAccent),
+                ]),
+              ),
               if (!isPast) ...[
                 const SizedBox(height: 12),
                 GestureDetector(
@@ -800,7 +1099,7 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
                       draftData: event['rawData'] as Map<String, dynamic>,
                     ))),
                     icon: const Icon(Icons.edit_outlined, size: 16),
-                    label: const Text('Continue editing', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                    label: const Text('Edit & Publish', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.orange,
                       foregroundColor: Colors.white,

@@ -45,6 +45,7 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
   Color get _card   => _isDark ? _cardDark   : _cardLight;
   Color get _border => _isDark ? _borderDark : _borderLight;
   Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
+  Color get _fg     => _isDark ? Colors.white : AppColors.dark;
 
   static const _businessFeatures = [
     'Co-hosting with your team',
@@ -187,10 +188,10 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
                 child: const Text('✨', style: TextStyle(fontSize: 60)),
               ),
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 'Level Up Your Events',
                 textAlign: TextAlign.center,
-                style: TextStyle(fontFamily: 'FredokaOne', fontSize: 30, color: Colors.white),
+                style: TextStyle(fontFamily: 'FredokaOne', fontSize: 30, color: _fg),
               ),
               const SizedBox(height: 8),
               Text(
@@ -273,7 +274,6 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
   }) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: _card,
         borderRadius: BorderRadius.circular(20),
@@ -282,111 +282,156 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
             ? [BoxShadow(color: accent.withValues(alpha: 0.18), blurRadius: 24, spreadRadius: 2)]
             : null,
       ),
+      clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontFamily: 'Nunito',
-                  fontSize: 13,
-                  fontWeight: FontWeight.w900,
-                  color: accent,
-                  letterSpacing: 2,
+          // Full-width Coming Soon strip — sits flush to the top of
+          // the card, no rounded inner corners, gold so it reads as
+          // an announcement rather than a warning. Subtitle line tells
+          // users their reading the page IS still useful (they're
+          // previewing what they'll get) — without this, the banner
+          // looks like a "go away" sign on top of the pricing.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            color: _gold,
+            child: const Column(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Text(
+                  'COMING SOON',
+                  style: TextStyle(
+                    fontFamily: 'Nunito',
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF1A1A1A),
+                    letterSpacing: 1.6,
+                  ),
                 ),
-              ),
-              if (featured) ...[
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(color: accent, borderRadius: BorderRadius.circular(20)),
-                  child: const Text(
-                    'MOST POWERFUL',
-                    style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: .8),
+                SizedBox(height: 2),
+                Text(
+                  'Not yet available — preview the plan below',
+                  style: TextStyle(
+                    fontFamily: 'Nunito',
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1A1A1A),
                   ),
                 ),
               ],
-            ],
+            ),
           ),
-          const SizedBox(height: 6),
-          Text(
-            subtitle,
-            style: TextStyle(fontSize: 14, color: _muted, fontWeight: FontWeight.w500),
-          ),
-          const SizedBox(height: 16),
-          ...features.map((f) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   children: [
-                    Text('✓', style: TextStyle(fontSize: 15, color: accent, fontWeight: FontWeight.w900)),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(f, style: const TextStyle(fontSize: 14, color: Colors.white, height: 1.35)),
+                    Text(
+                      label,
+                      style: TextStyle(
+                        fontFamily: 'Nunito',
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                        color: accent,
+                        letterSpacing: 2,
+                      ),
                     ),
+                    if (featured) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(color: accent, borderRadius: BorderRadius.circular(20)),
+                        child: const Text(
+                          'MOST POWERFUL',
+                          style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: .8),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
-              )),
-          const SizedBox(height: 18),
-          Row(
-            children: [
-              Expanded(
-                child: _buildPlanCard(
-                  label: 'Monthly',
-                  price: monthlyPrice,
-                  period: '/month',
-                  selected: selectedPlan == 'monthly',
-                  accent: accent,
-                  onTap: () => onPlanChanged('monthly'),
+                const SizedBox(height: 6),
+                Text(
+                  subtitle,
+                  style: TextStyle(fontSize: 14, color: _muted, fontWeight: FontWeight.w500),
                 ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Stack(
-                  clipBehavior: Clip.none,
+                const SizedBox(height: 16),
+                ...features.map((f) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('✓', style: TextStyle(fontSize: 15, color: accent, fontWeight: FontWeight.w900)),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(f, style: TextStyle(fontSize: 14, color: _fg, height: 1.35)),
+                          ),
+                        ],
+                      ),
+                    )),
+                const SizedBox(height: 18),
+                Row(
                   children: [
-                    _buildPlanCard(
-                      label: 'Annual',
-                      price: yearlyPrice,
-                      period: '/year',
-                      selected: selectedPlan == 'annual',
-                      accent: accent,
-                      onTap: () => onPlanChanged('annual'),
+                    Expanded(
+                      child: _buildPlanCard(
+                        label: 'Monthly',
+                        price: monthlyPrice,
+                        period: '/month',
+                        selected: selectedPlan == 'monthly',
+                        accent: accent,
+                        onTap: () => onPlanChanged('monthly'),
+                      ),
                     ),
-                    Positioned(
-                      top: -9, right: 6,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(color: AppColors.green, borderRadius: BorderRadius.circular(20)),
-                        child: const Text('SAVE 33%', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Colors.white)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          _buildPlanCard(
+                            label: 'Annual',
+                            price: yearlyPrice,
+                            period: '/year',
+                            selected: selectedPlan == 'annual',
+                            accent: accent,
+                            onTap: () => onPlanChanged('annual'),
+                          ),
+                          Positioned(
+                            top: -9, right: 6,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(color: AppColors.green, borderRadius: BorderRadius.circular(20)),
+                              child: const Text('SAVE 33%', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Colors.white)),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 18),
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: ElevatedButton(
-              onPressed: kTestingMode || _loadingProducts || _purchasing ? null : onSubscribe,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: accent,
-                foregroundColor: featured ? const Color(0xFF1A1A1A) : Colors.white,
-                disabledBackgroundColor: _border,
-                disabledForegroundColor: _muted,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                elevation: 0,
-              ),
-              child: kTestingMode
-                  ? const Text('Coming Soon', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800))
-                  : (_loadingProducts || _purchasing)
-                      ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5))
-                      : const Text('Start 14-Day Free Trial', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: ElevatedButton(
+                    onPressed: kTestingMode || _loadingProducts || _purchasing ? null : onSubscribe,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: accent,
+                      foregroundColor: featured ? const Color(0xFF1A1A1A) : Colors.white,
+                      disabledBackgroundColor: _border,
+                      disabledForegroundColor: _muted,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      elevation: 0,
+                    ),
+                    child: kTestingMode
+                        ? const Text('Coming Soon', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800))
+                        : (_loadingProducts || _purchasing)
+                            ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5))
+                            : const Text('Start 14-Day Free Trial', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -419,7 +464,7 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
           children: [
             Text(label, style: TextStyle(fontSize: 12, color: _muted, fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
-            Text(price, style: const TextStyle(fontSize: 22, color: Colors.white, fontWeight: FontWeight.w800)),
+            Text(price, style: TextStyle(fontSize: 22, color: _fg, fontWeight: FontWeight.w800)),
             Text(period, style: TextStyle(fontSize: 11, color: _muted)),
           ],
         ),

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -32,6 +34,24 @@ void main() async {
   } catch (e) {
     print('Firebase init error: $e');
   }
+
+  // ── App Check ─────────────────────────────────────────────────
+  // Silences the "missing reCAPTCHA token" warning that Firebase Auth
+  // logs on Android during password-reset / sign-in flows, and gates
+  // backend traffic to verified app instances. Debug builds use the
+  // built-in debug provider — copy the debug token from logcat once on
+  // first launch and register it under Firebase Console → App Check →
+  // Apps → (Android app) → Manage debug tokens. Release builds use
+  // Play Integrity (Android) / DeviceCheck (iOS), no manual setup.
+  try {
+    await FirebaseAppCheck.instance.activate(
+      androidProvider: kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
+      appleProvider:   kDebugMode ? AppleProvider.debug   : AppleProvider.deviceCheck,
+    );
+    debugPrint('[AppCheck] activated (debug=$kDebugMode)');
+  } catch (e) {
+    debugPrint('[AppCheck] activation failed: $e');
+  }
   try {
     Stripe.publishableKey = 'pk_live_51TONnSP1UPrQlK3nOMMQFnrDtZFpTKbwiW607iVq3RZVn1aGI9B4EL0AWrXQZ0rWLMdK3NZMdz7iahPateMlIJNW00Sq9ckq3q';
     await Stripe.instance.applySettings();
@@ -61,6 +81,13 @@ class _QRPartyAppState extends State<QRPartyApp> {
   StreamSubscription<Uri>? _linkSub;
   StreamSubscription<List<PurchaseDetails>>? _purchaseSub;
   StreamSubscription<String>? _shareSub;
+  StreamSubscription<User?>? _authSub;
+
+  /// Holds a deep-link target (shortCode or docId) that arrived while the
+  /// user wasn't signed in yet. Drained by [_setupPendingDeepLinkDrain]
+  /// the moment auth state flips to a non-null user, so the visitor lands
+  /// on the right event screen automatically after login.
+  String? _pendingDeepLinkEventLookup;
 
   @override
   void initState() {
@@ -69,6 +96,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
     _setupDeepLinks();
     _setupBilling();
     _setupSharedUrls();
+    _setupPendingDeepLinkDrain();
   }
 
   @override
@@ -76,6 +104,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
     _linkSub?.cancel();
     _purchaseSub?.cancel();
     _shareSub?.cancel();
+    _authSub?.cancel();
     super.dispose();
   }
 
@@ -102,6 +131,14 @@ class _QRPartyAppState extends State<QRPartyApp> {
   /// URL and wait for the next auth-state emission to flush it — the
   /// share is preserved across the sign-in flow.
   void _presentShareSheet(String url) {
+    // Wishlist beta gate — drop incoming shared URLs on the floor when
+    // the feature is hidden. The handler still queues them in case the
+    // gate re-opens later in the same session, but no user-visible
+    // bottom sheet appears for them in the meantime.
+    if (!kWishlistEnabled) {
+      debugPrint('[WishlistShare] dropped — kWishlistEnabled=false url=$url');
+      return;
+    }
     final ctx = _navigatorKey.currentContext;
     if (ctx == null) return;
     final user = FirebaseAuth.instance.currentUser;
@@ -153,20 +190,86 @@ class _QRPartyAppState extends State<QRPartyApp> {
     _linkSub = _appLinks.uriLinkStream.listen(_handleDeepLink, onError: (_) {});
   }
 
+  /// Watches the auth stream so we can re-fire a deep link that arrived
+  /// while the user was on the welcome / login screen. When auth flips to
+  /// a signed-in user we drain `_pendingDeepLinkEventLookup` once and
+  /// route to the matching event. Harmless on warm-state sign-ins because
+  /// the pending field stays null when no link is queued.
+  void _setupPendingDeepLinkDrain() {
+    _authSub = FirebaseAuth.instance.authStateChanges().listen((user) async {
+      if (user == null) return;
+      final pending = _pendingDeepLinkEventLookup;
+      if (pending == null || pending.isEmpty) return;
+      _pendingDeepLinkEventLookup = null;
+      // Defer one frame so HomeRouter has had a chance to mount —
+      // otherwise the push lands on a still-rebuilding navigator.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _resolveAndPushEvent(pending);
+      });
+    });
+  }
+
+  /// Two URL shapes recognised here:
+  ///   • New: `https://partywithqr.com/event/{shortCode}` — path-based,
+  ///     used by the QR encoder ([generate_qr_screen.dart]) and by share
+  ///     buttons. shortCode is a 4–8 char uppercase alphanumeric.
+  ///   • Legacy: `https://partywithqr.com/?id={docId}` — querystring,
+  ///     kept around for older invitations / merch print files that
+  ///     stamped the long-form URL.
+  /// On a hit we look up the event (shortCode → doc-id fallback) and
+  /// push [GuestEventScreen]. If the user isn't signed in yet we stash
+  /// the lookup; the auth-drain listener routes them once they're in.
   Future<void> _handleDeepLink(Uri uri) async {
     if (uri.host != 'partywithqr.com') return;
-    final eventId = uri.queryParameters['id'];
-    if (eventId == null || eventId.isEmpty) return;
+    String? lookup;
+    final segs = uri.pathSegments;
+    if (segs.length >= 2 && segs[0] == 'event' && segs[1].isNotEmpty) {
+      lookup = segs[1];
+    } else {
+      lookup = uri.queryParameters['id'];
+    }
+    if (lookup == null || lookup.isEmpty) return;
+    debugPrint('[DeepLink] received uri=$uri → lookup=$lookup');
+
+    if (FirebaseAuth.instance.currentUser == null) {
+      debugPrint('[DeepLink] not signed in — queuing for post-login drain');
+      _pendingDeepLinkEventLookup = lookup;
+      return;
+    }
+    await _resolveAndPushEvent(lookup);
+  }
+
+  /// shortCode → docId lookup. A 4–8 char uppercase alphanumeric input
+  /// is almost certainly a shortCode, so the where() runs first; on a
+  /// miss (or for any longer input) we fall back to a literal doc.get().
+  Future<void> _resolveAndPushEvent(String input) async {
     try {
-      final doc = await FirebaseFirestore.instance.collection('events').doc(eventId).get();
-      if (!doc.exists) return;
+      final upper = input.toUpperCase();
+      final looksLikeShortCode = RegExp(r'^[A-Z0-9]{4,8}$').hasMatch(upper);
+      DocumentSnapshot? snap;
+      if (looksLikeShortCode) {
+        final qs = await FirebaseFirestore.instance
+            .collection('events')
+            .where('shortCode', isEqualTo: upper)
+            .limit(1)
+            .get();
+        if (qs.docs.isNotEmpty) snap = qs.docs.first;
+      }
+      final resolved = snap
+          ?? await FirebaseFirestore.instance.collection('events').doc(input).get();
+      if (!resolved.exists) {
+        debugPrint('[DeepLink] no event for input=$input (shortCode? $looksLikeShortCode)');
+        return;
+      }
       _navigatorKey.currentState?.push(MaterialPageRoute(
         builder: (_) => GuestEventScreen(
-          eventId: eventId,
-          eventData: doc.data() as Map<String, dynamic>,
+          eventId: resolved.id,
+          eventData: resolved.data() as Map<String, dynamic>,
         ),
       ));
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[DeepLink] resolve failed for input=$input: $e');
+    }
   }
 
   Future<void> _setupBilling() async {

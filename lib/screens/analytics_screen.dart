@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' show pi;
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -104,6 +105,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
   String? _error;
 
   bool _isAdmin = false;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _userDocSub;
   bool _revenueLoading = false;
   double? _stripeRevenue;
   int? _chargeCount;
@@ -149,16 +151,105 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
     }
   }
 
-  Future<void> _checkAdmin() async {
+  /// Live admin check. Subscribes to the user doc instead of fetching it
+  /// once so the flag flips the instant `users/{uid}.isAdmin` is updated
+  /// on the backend — Firestore console flip, Cloud Function role grant,
+  /// admin-promoting another user, etc. The screen rebuilds without
+  /// requiring the user to log out/in or restart the app.
+  ///
+  /// Tolerant boolean parsing — Firestore can carry `isAdmin` as a real
+  /// `bool true`, the string `'true'`, or `1` depending on how it was
+  /// written. [_parseIsAdmin] handles all three so a manually-set field
+  /// in the console doesn't fail the strict `== true` comparison.
+  void _checkAdmin() {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    try {
-      final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
-      if (doc.data()?['isAdmin'] == true && mounted) {
-        setState(() => _isAdmin = true);
-        _loadStripeRevenue();
-      }
-    } catch (_) {}
+    if (user == null) {
+      debugPrint('[Analytics] _checkAdmin skipped — no signed-in user');
+      return;
+    }
+
+    // Identity dump — confirms WHICH account the app is reading for, so
+    // any mismatch with the Firestore Console doc you're editing
+    // becomes obvious. Compare these values against the doc you opened
+    // in https://console.firebase.google.com/project/qrparty-6e648/firestore
+    debugPrint('[Analytics] auth identity uid="${user.uid}" email="${user.email}" displayName="${user.displayName}" anonymous=${user.isAnonymous} providerIds=${user.providerData.map((p) => p.providerId).toList()}');
+    debugPrint('[Analytics] reading Firestore path: users/${user.uid}');
+
+    // One-shot server-only read alongside the listener. The listener
+    // will use whatever's faster (cache or server); this read is forced
+    // through to the server so we can compare. If the cache has
+    // {fcmToken} only but the server has the full admin doc, the two
+    // log entries will diverge — pinpointing offline-cache staleness
+    // as the root cause.
+    FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .get(const GetOptions(source: Source.server))
+        .then((doc) {
+      debugPrint('[Analytics] SERVER-ONLY read users/${user.uid} exists=${doc.exists} keys=${doc.data()?.keys.toList()} isAdmin=${doc.data()?['isAdmin']} accountType=${doc.data()?['accountType']}');
+    }).catchError((Object e) {
+      debugPrint('[Analytics] SERVER-ONLY read failed: $e');
+    });
+
+    _userDocSub?.cancel();
+    _userDocSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .snapshots()
+        .listen(
+      (doc) {
+        // Full-doc dump from server (not cache) — verifies what
+        // Firestore actually holds for this exact uid. If the keys
+        // don't match what you see in the console, you're either
+        // looking at a different doc or the app is signed in as a
+        // different user than you think.
+        debugPrint('[Analytics] snapshot uid=${user.uid} exists=${doc.exists} fromCache=${doc.metadata.isFromCache} hasPendingWrites=${doc.metadata.hasPendingWrites}');
+        final data = doc.data();
+        if (data == null) {
+          debugPrint('[Analytics]   doc has no data (exists=${doc.exists})');
+        } else {
+          debugPrint('[Analytics]   doc keys = ${data.keys.toList()}');
+          data.forEach((k, v) {
+            debugPrint('[Analytics]     $k = $v (${v.runtimeType})');
+          });
+        }
+        final isAdmin = _parseIsAdmin(data?['isAdmin']);
+        debugPrint('[Analytics] parsed isAdmin=$isAdmin (was $_isAdmin)');
+        if (!mounted) return;
+        if (isAdmin == _isAdmin) return;
+        final wasFalse = !_isAdmin;
+        setState(() => _isAdmin = isAdmin);
+        // Trigger the revenue fetch the first moment we see admin=true.
+        // Subsequent flips back to false leave the cached numbers in
+        // place but the conditional UI hides them anyway.
+        if (isAdmin && wasFalse) {
+          _loadStripeRevenue();
+        }
+      },
+      onError: (Object e) {
+        debugPrint('[Analytics] user doc listener error: $e');
+      },
+    );
+  }
+
+  /// Tolerant `isAdmin` parser — accepts `bool true`, the strings
+  /// `'true'` / `'TRUE'` / `'1'`, and the number `1`. Anything else
+  /// (null, missing, false, '0', 'no', random typo) reads as not admin.
+  bool _parseIsAdmin(Object? raw) {
+    if (raw == null) return false;
+    if (raw is bool) return raw;
+    if (raw is num) return raw == 1;
+    if (raw is String) {
+      final v = raw.toLowerCase().trim();
+      return v == 'true' || v == '1' || v == 'yes';
+    }
+    return false;
+  }
+
+  @override
+  void dispose() {
+    _userDocSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadStripeRevenue() async {

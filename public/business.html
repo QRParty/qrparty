@@ -113,6 +113,17 @@
       font: 800 11px 'Nunito', sans-serif; letter-spacing: 1px;
       padding: 5px 12px; border-radius: 50px;
     }
+    /* Inline "Coming Soon" pill for individual tier features. Sits inline
+       next to the feature text — same gold/dark colorway as .plan-badge so
+       it reads as part of the brand, just smaller. */
+    .coming-soon {
+      display: inline-block; margin-left: 8px;
+      background: var(--gold); color: #1A1A1A;
+      font: 800 9.5px 'Nunito', sans-serif; letter-spacing: .8px;
+      padding: 2px 8px; border-radius: 50px;
+      text-transform: uppercase; vertical-align: middle;
+      white-space: nowrap;
+    }
     .plan-name { font-family: 'Fredoka One', cursive; font-size: 24px; letter-spacing: .5px; }
     .plan-name.business { color: var(--purple); }
     .plan-name.plus     { color: var(--gold); }
@@ -302,7 +313,7 @@
         <a class="plan-cta business" href="https://play.google.com/store/apps/developer?id=QR+Party+LLC">Start 14-day free trial</a>
       </div>
 
-      <!-- BUSINESS PLUS -->
+      <!-- HEADQUARTERS -->
       <div class="plan-card plus">
         <div class="plan-badge">MOST POWERFUL</div>
         <div class="plan-name plus">Headquarters</div>
@@ -310,13 +321,14 @@
         <div class="plan-price-sub">or $159.99/year (save 33%)</div>
         <div class="plan-trial">✦ 14-day free trial</div>
         <ul class="plan-features">
-          <li class="pillar">Everything in Business, plus your brand on top</li>
-          <li>Organization page — one QR for your whole org</li>
-          <li>Account linking — connect related accounts under one org</li>
-          <li>White-label stickers — your logo, no QR Party branding</li>
+          <li class="pillar">Everything in Business</li>
+          <li>Organization Page — one QR code for your entire brand <span class="coming-soon">Coming Soon</span></li>
+          <li>Link Business accounts under your HQ <span class="coming-soon">Coming Soon</span></li>
+          <li>View and monitor all linked location events <span class="coming-soon">Coming Soon</span></li>
+          <li>White-label stickers with your logo <span class="coming-soon">Coming Soon</span></li>
           <li>Unlimited archived events</li>
           <li>2 year photo storage</li>
-          <li>Priority support — real help, fast</li>
+          <li>Priority support</li>
         </ul>
         <a class="plan-cta plus" href="https://play.google.com/store/apps/developer?id=QR+Party+LLC">Start 14-day free trial</a>
       </div>

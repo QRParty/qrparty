@@ -57,6 +57,15 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   List<String> uploadedPhotos = [];
 
   bool _allowPlusOnes = false;
+  String? _eventTypeName;
+
+  /// Plus-ones is only relevant for Corporate and Wedding events. Even
+  /// when the event doc has `allowPlusOnes: true` (carry-over from a
+  /// time when the toggle was offered for every type), we hide the
+  /// selector for every other event type and for events with no type
+  /// set (public web RSVPs especially).
+  bool get _supportsPlusOnesType =>
+      _eventTypeName == 'Corporate' || _eventTypeName == 'Wedding';
   int? _maxPlusOnes;
 
   late String eventTitle;
@@ -147,11 +156,17 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
 
   Future<void> _notifyHost(String title, String body) async {
     if (_hostId == null) return;
+    final eventId = widget.eventId;
+    // Both gates are required: the firestore.rules rule on
+    // notificationQueue requires the eventId field, so silently
+    // skipping when it's null is preferable to writing a doc that
+    // would just bounce with permission-denied anyway.
+    if (eventId == null || eventId.isEmpty) return;
     try {
       final doc = await FirebaseFirestore.instance.collection('users').doc(_hostId).get();
       final token = doc.data()?['fcmToken'] as String?;
       if (token != null) {
-        await NotificationService.sendNotification([token], title, body, eventId: widget.eventId);
+        await NotificationService.sendNotification([token], title, body, eventId: eventId);
       }
     } catch (_) {}
   }
@@ -179,11 +194,22 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   double get totalWishlistValue => wishlistItems.fold(0, (sum, i) => sum + (i['price'] as double));
   double get totalContributed => wishlistItems.fold(0, (sum, i) => sum + (i['contributed'] as double));
 
+  /// Whether the middle tab (Checklist/Wishlist) should render. Hidden
+  /// when the event has no list at all, OR when the event's list type
+  /// is `Wishlist` while the Wishlist beta gate is closed
+  /// (`kWishlistEnabled = false`). Existing wishlist data on the event
+  /// doc is preserved either way; only the UI surface is suppressed.
+  bool get _showListTab {
+    if (listType == 'No List') return false;
+    if (listType == 'Wishlist' && !kWishlistEnabled) return false;
+    return true;
+  }
+
   @override
   void initState() {
     super.initState();
     _initEventData(); // must run first to set listType
-    _tabController = TabController(length: listType == 'No List' ? 2 : 3, vsync: this);
+    _tabController = TabController(length: _showListTab ? 3 : 2, vsync: this);
     _welcomeCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
     _welcomeAnim = CurvedAnimation(parent: _welcomeCtrl, curve: Curves.easeIn);
     if (widget.isOnboarding) {
@@ -313,6 +339,14 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         .snapshots()
         .listen((snap) {
       if (!mounted) return;
+      // Raw-doc dump on every snapshot so any host/guest count mismatch
+      // can be diagnosed by comparing what each device received from
+      // Firestore. Look for `[RSVP] snapshot` lines in flutter logs.
+      debugPrint('[RSVP] snapshot eventId=${widget.eventId} docs=${snap.docs.length}');
+      for (final doc in snap.docs) {
+        final d = doc.data();
+        debugPrint('[RSVP]   docId=${doc.id} status=${d['status']} adults=${d['adults']} children=${d['children']} plusOnes=${d['plusOnes']} source=${d['source']} email=${d['email']}');
+      }
       setState(() {
         _rsvps = snap.docs.map((doc) {
           final d = doc.data();
@@ -320,9 +354,15 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
             'uid': doc.id,
             'name': (d['name'] as String?) ?? 'Guest',
             'status': (d['status'] as String?) ?? 'Not Responded',
+            // Default of 1 preserves legacy behavior: app RSVPs written
+            // before the multi-person feature didn't have an `adults`
+            // field and represented 1 person. Web RSVPs (which never
+            // write the count fields) also count as 1 person, which
+            // matches product intent.
             'adults': (d['adults'] as int?) ?? 1,
             'children': (d['children'] as int?) ?? 0,
             'plusOnes': (d['plusOnes'] as int?) ?? 0,
+            'source': (d['source'] as String?) ?? 'app',
           };
         }).toList();
       });
@@ -425,6 +465,38 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       return;
     }
 
+    // ── Optimistic local update ──────────────────────────────────
+    // Patch _rsvps in-memory so the headcount cards reflect the new
+    // status the moment the user taps Yes/Maybe/No, instead of waiting
+    // for the Firestore snapshot listener to fire (~150–500ms on a
+    // typical network). The listener replaces _rsvps wholesale when
+    // the write lands; if the transaction below fails, the next
+    // snapshot reverts the local view to whatever the server actually
+    // holds.
+    final myUid = user.uid;
+    // Plus-ones is gated to Corporate / Wedding events even when the host
+    // has the flag on — same rule the RSVP form UI uses, applied here so
+    // a stale flag on a Birthday/etc. doc can't sneak a count into the
+    // saved RSVP.
+    final effectivePlusOnes = (_allowPlusOnes && _supportsPlusOnesType) ? plusOnes : 0;
+    setState(() {
+      final without = _rsvps.where((r) => r['uid'] != myUid).toList();
+      _rsvps = [
+        ...without,
+        {
+          'uid': myUid,
+          'name': user.displayName ?? 'Guest',
+          'status': newStatus,
+          'adults': adults,
+          'children': children,
+          'plusOnes': effectivePlusOnes,
+          // Match the schema the snapshot listener parses below so
+          // _peopleFor's web/app dedupe sees consistent shapes.
+          'source': 'app',
+        },
+      ];
+    });
+
     setState(() => _savingRsvp = true);
 
     final eventRef = FirebaseFirestore.instance.collection('events').doc(widget.eventId);
@@ -438,12 +510,17 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         final oldHeadcount = ((existingData?['adults'] as int?) ?? 1)
             + ((existingData?['children'] as int?) ?? 0)
             + ((existingData?['plusOnes'] as int?) ?? 0);
-        final effectivePlusOnes = _allowPlusOnes ? plusOnes : 0;
+        final effectivePlusOnes = (_allowPlusOnes && _supportsPlusOnesType) ? plusOnes : 0;
         final newHeadcount = adults + children + effectivePlusOnes;
 
         tx.set(rsvpRef, {
           'uid': user.uid,
           'name': user.displayName ?? 'Guest',
+          // Explicit email + source so the host can later dedupe an app
+          // RSVP against a web RSVP from the same person, and so debug
+          // logs say which path wrote each row.
+          if (user.email != null) 'email': user.email,
+          'source': 'app',
           'status': newStatus,
           'adults': adults,
           'children': children,
@@ -468,7 +545,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       _notifyHost('New RSVP', '$guestName just RSVPd $newStatus to $eventTitle');
       if (mounted) {
         var msg = newStatus == 'Yes' ? '🎉 RSVP saved — see you there!' : newStatus == 'Maybe' ? '🤔 RSVP saved — hopefully you can make it!' : '😢 RSVP saved — you\'ll be missed!';
-        if (_allowPlusOnes && plusOnes > 0 && (newStatus == 'Yes' || newStatus == 'Maybe')) {
+        if (_allowPlusOnes && _supportsPlusOnesType && plusOnes > 0 && (newStatus == 'Yes' || newStatus == 'Maybe')) {
           msg = '$msg (+$plusOnes plus ${plusOnes == 1 ? 'one' : 'ones'})';
         }
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: AppColors.green));
@@ -536,12 +613,19 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         _rsvpDeadlineLabel = '${months[deadline.month - 1]} ${deadline.day}, ${deadline.year}';
       }
 
-      _capacity = (data['capacity'] as num?)?.toInt();
+      // Normalize capacity at hydration — treat null, 0, and any
+      // non-positive value as "no cap set". Without this, a stale doc
+      // carrying `capacity: 0` would make isFull true on first render
+      // and surface the "Event is full · Join Waitlist" UI to every
+      // guest before they've even had a chance to RSVP.
+      final rawCapacity = (data['capacity'] as num?)?.toInt();
+      _capacity = (rawCapacity != null && rawCapacity > 0) ? rawCapacity : null;
       _allowWaitlist = (data['allowWaitlist'] as bool?) ?? false;
       _allowPlusOnes = (data['allowPlusOnes'] as bool?) ?? false;
       _maxPlusOnes = (data['maxPlusOnes'] as num?)?.toInt();
 
       final typeName = (data['eventType'] as String?) ?? '';
+      _eventTypeName = typeName;
       final matchedType = eventTypes.firstWhere((t) => t.name == typeName, orElse: () => eventTypes.last);
       eventColor = matchedType.primary;
 
@@ -734,7 +818,12 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
           tabs: [
             const Tab(text: 'Info & RSVP'),
-            if (listType != 'No List') Tab(text: listType == 'Checklist' ? 'Checklist' : 'Wishlist'),
+            // Tab visibility is gated by _showListTab — covers both
+            // "No List" events and Wishlist events while the beta gate
+            // is closed. When shown the label is whichever variant is
+            // actually being rendered (Checklist or, if the gate ever
+            // re-opens, Wishlist).
+            if (_showListTab) Tab(text: listType == 'Checklist' ? 'Checklist' : 'Wishlist'),
             const Tab(text: 'Photos'),
           ],
         ),
@@ -743,7 +832,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         controller: _tabController,
         children: [
           _buildInfoTab(),
-          if (listType != 'No List') _buildWishlistTab(),
+          if (_showListTab) _buildWishlistTab(),
           _buildPhotosTab(),
         ],
       ),
@@ -877,22 +966,26 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                 // RSVP counts as a single row of stat boxes. Hosts/co-hosts can
                 // tap Yes / Maybe to see an adults+children breakdown; the No
                 // tile and all tiles for regular guests render as plain text.
+                // Counts are total people (adults + children + plus-ones),
+                // not RSVP doc count. .length would show 1 when a single
+                // guest RSVPs with a family of 4 — _peopleFor sums the
+                // three count fields stamped on each rsvps doc.
                 Row(children: [
                   _statBox(
-                    '${_rsvps.where((g) => g['status'] == 'Yes').length}',
+                    '${_peopleFor('Yes')}',
                     'Going',
                     AppColors.green,
                     onTap: (_isHost || _isCoHost) ? () => _showRsvpBreakdown('Yes') : null,
                   ),
                   const SizedBox(width: 8),
                   _statBox(
-                    '${_rsvps.where((g) => g['status'] == 'Maybe').length}',
+                    '${_peopleFor('Maybe')}',
                     'Maybe',
                     AppColors.gold,
                     onTap: (_isHost || _isCoHost) ? () => _showRsvpBreakdown('Maybe') : null,
                   ),
                   const SizedBox(width: 8),
-                  _statBox('${_rsvps.where((g) => g['status'] == 'No').length}', "Can't go", Colors.redAccent),
+                  _statBox('${_peopleFor('No')}', "Can't go", Colors.redAccent),
                 ]),
                 if ((_isHost || _isCoHost) && _waitlist.isNotEmpty) ...[
                   const SizedBox(height: 8),
@@ -1015,7 +1108,12 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                               .where((g) => g['status'] == 'Yes')
                               .fold<int>(0, (sum, g) => sum + ((g['adults'] as int? ?? 1) + (g['children'] as int? ?? 0) + (g['plusOnes'] as int? ?? 0)));
                           final cap = _capacity;
-                          final isFull = cap != null && yesHeadcount >= cap && rsvpStatus != 'Yes';
+                          // Belt-and-suspenders: even though the hydration
+                          // path normalizes 0/negative caps to null, also
+                          // guard `cap > 0` here so any future code path
+                          // that bypasses _initEventData can't silently
+                          // mark every event as full.
+                          final isFull = cap != null && cap > 0 && yesHeadcount >= cap && rsvpStatus != 'Yes';
                           final uid = FirebaseAuth.instance.currentUser?.uid;
                           final onWaitlist = uid != null && _waitlist.any((w) => w['uid'] == uid);
                           return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -1084,7 +1182,12 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                               ),
                             ])),
                           ]),
-                          if (_allowPlusOnes) ...[
+                          // Gate plus-ones to events that BOTH have the host
+                          // toggle on AND are Corporate or Wedding type.
+                          // Public events (no event type) and every other
+                          // type (Birthday, Graduation, Holiday, etc.) hide
+                          // the selector regardless of the saved flag.
+                          if (_allowPlusOnes && _supportsPlusOnesType) ...[
                             const SizedBox(height: 4),
                             Row(children: [
                               Icon(Icons.person_add_alt, size: 16, color: _purple),
@@ -1166,8 +1269,31 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                   ),
                 ],
                 const SizedBox(height: 20),
-                // Host announcements
-                Text('Announcements', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
+                // Host announcements. The header doubles as a tap
+                // target for hosts/co-hosts, opening the announcement
+                // composer (HostNotificationsScreen) — previously the
+                // section was inert chrome with no way for a host to
+                // edit / send a new one without leaving this screen.
+                Row(children: [
+                  Expanded(
+                    child: Text('Announcements',
+                        style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700,
+                            color: _isDark ? Colors.white : AppColors.dark)),
+                  ),
+                  if (_isHost || _isCoHost)
+                    TextButton.icon(
+                      onPressed: () => Navigator.push(context, MaterialPageRoute(
+                        builder: (_) => const HostNotificationsScreen(),
+                      )),
+                      icon: const Icon(Icons.edit_outlined, size: 16, color: AppColors.purple),
+                      label: const Text('Manage',
+                          style: TextStyle(color: AppColors.purple, fontSize: 13, fontWeight: FontWeight.w800)),
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                ]),
                 const SizedBox(height: 10),
                 _announcementCard("Don't forget to bring a gift! 🎁", '2 hours ago'),
                 _announcementCard("Parking is available on Celebration Lane 🚗", 'Yesterday'),
@@ -1189,10 +1315,30 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   // ── Weather ──────────────────────────────────────────────────
 
   Future<void> _fetchWeather() async {
-    final data = widget.eventData;
-    if (data == null) return;
+    // Pull event data from the constructor first; if the screen was
+    // opened with only an eventId (deep link, push notification tap),
+    // fall back to a one-shot Firestore read so the weather widget
+    // still works on those entry paths. Without this fallback the
+    // function early-returned and the widget stayed permanently blank.
+    Map<String, dynamic>? data = widget.eventData;
+    if (data == null && widget.eventId != null) {
+      try {
+        final snap = await FirebaseFirestore.instance
+            .collection('events').doc(widget.eventId).get();
+        data = snap.data();
+      } catch (e) {
+        debugPrint('[Weather] event doc fetch failed: $e');
+      }
+    }
+    if (data == null) {
+      debugPrint('[Weather] no event data — aborting');
+      return;
+    }
     final ts = data['date'];
-    if (ts is! Timestamp) return;
+    if (ts is! Timestamp) {
+      debugPrint('[Weather] no date Timestamp — aborting');
+      return;
+    }
 
     final eventDay = () {
       final d = ts.toDate();
@@ -1203,29 +1349,67 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       return DateTime(n.year, n.month, n.day);
     }();
     final daysUntil = eventDay.difference(today).inDays;
-    if (daysUntil < 0 || daysUntil > 7) return;
+    if (daysUntil < 0 || daysUntil > 7) {
+      debugPrint('[Weather] $daysUntil days out — outside 0..7 forecast window');
+      return;
+    }
+
+    // Build an ordered list of geocoder candidate strings. We try them
+    // in order, keeping the first that resolves. Open-Meteo's
+    // geocoder is NAME-based — raw US ZIP codes don't resolve, which
+    // is why preferring `zipCode` on its own caused most queries to
+    // silently return zero hits. Order chosen to maximize hit rate:
+    //   1. explicit zip + country (open-meteo accepts "94103,US"
+    //      style limited inputs in some regions)
+    //   2. city pulled out of the comma-delimited location string
+    //   3. the raw location string itself, trimmed
+    //   4. the bare zip as a last resort
+    final loc = (data['location'] as String?)?.trim() ?? '';
+    final zip = (data['zipCode'] as String?)?.trim() ?? '';
+    final candidates = <String>[
+      if (zip.isNotEmpty) '$zip, US',
+      if (loc.isNotEmpty) _extractCity(loc),
+      if (loc.isNotEmpty) loc,
+      if (zip.isNotEmpty) zip,
+    ].where((s) => s.isNotEmpty).toSet().toList();
+    if (candidates.isEmpty) {
+      debugPrint('[Weather] no usable location/zip on event — aborting');
+      return;
+    }
 
     if (mounted) setState(() => _weatherLoading = true);
     try {
-      // Prefer explicit zipCode field; fall back to parsing location string
-      final raw = (data['zipCode'] as String?)?.trim();
-      final query = (raw != null && raw.isNotEmpty)
-          ? raw
-          : _extractCity((data['location'] as String?) ?? '');
-      if (query.isEmpty) return;
+      double? lat;
+      double? lon;
+      String? matchedQuery;
+      for (final query in candidates) {
+        final geoUri = Uri.parse(
+          'https://geocoding-api.open-meteo.com/v1/search'
+          '?name=${Uri.encodeQueryComponent(query)}&count=1&language=en&format=json',
+        );
+        final geoRes = await http.get(geoUri).timeout(const Duration(seconds: 8));
+        if (geoRes.statusCode != 200) {
+          debugPrint('[Weather] geocode "$query" status=${geoRes.statusCode}');
+          continue;
+        }
+        final geoJson = jsonDecode(geoRes.body) as Map<String, dynamic>;
+        final results = geoJson['results'] as List<dynamic>?;
+        if (results == null || results.isEmpty) {
+          debugPrint('[Weather] geocode "$query" no results — trying next candidate');
+          continue;
+        }
+        lat = (results[0]['latitude'] as num).toDouble();
+        lon = (results[0]['longitude'] as num).toDouble();
+        matchedQuery = query;
+        break;
+      }
+      if (lat == null || lon == null) {
+        debugPrint('[Weather] all geocode candidates failed: $candidates');
+        if (mounted) setState(() => _weatherLoading = false);
+        return;
+      }
+      debugPrint('[Weather] geocoded "$matchedQuery" → $lat,$lon');
 
-      final geoUri = Uri.parse(
-        'https://geocoding-api.open-meteo.com/v1/search'
-        '?name=${Uri.encodeQueryComponent(query)}&count=1&language=en&format=json',
-      );
-      final geoRes = await http.get(geoUri).timeout(const Duration(seconds: 8));
-      if (geoRes.statusCode != 200) return;
-      final geoJson = jsonDecode(geoRes.body) as Map<String, dynamic>;
-      final results = geoJson['results'] as List<dynamic>?;
-      if (results == null || results.isEmpty) return;
-
-      final lat = (results[0]['latitude'] as num).toDouble();
-      final lon = (results[0]['longitude'] as num).toDouble();
       final dateStr =
           '${eventDay.year}-${eventDay.month.toString().padLeft(2, '0')}-${eventDay.day.toString().padLeft(2, '0')}';
 
@@ -1237,15 +1421,25 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         '&start_date=$dateStr&end_date=$dateStr',
       );
       final wxRes = await http.get(wxUri).timeout(const Duration(seconds: 8));
-      if (wxRes.statusCode != 200) return;
+      if (wxRes.statusCode != 200) {
+        debugPrint('[Weather] forecast status=${wxRes.statusCode}');
+        if (mounted) setState(() => _weatherLoading = false);
+        return;
+      }
       final wxJson = jsonDecode(wxRes.body) as Map<String, dynamic>;
       final daily = wxJson['daily'] as Map<String, dynamic>?;
-      if (daily == null) return;
+      if (daily == null) {
+        if (mounted) setState(() => _weatherLoading = false);
+        return;
+      }
 
       final codes = daily['weather_code'] as List<dynamic>;
       final maxTemps = daily['temperature_2m_max'] as List<dynamic>;
       final minTemps = daily['temperature_2m_min'] as List<dynamic>;
-      if (codes.isEmpty) return;
+      if (codes.isEmpty) {
+        if (mounted) setState(() => _weatherLoading = false);
+        return;
+      }
 
       final code = (codes[0] as num).toInt();
       if (mounted) {
@@ -1259,15 +1453,34 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           };
         });
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[Weather] fetch failed: $e');
       if (mounted) setState(() => _weatherLoading = false);
     }
   }
 
+  /// Picks the most likely "city" segment out of a comma-delimited
+  /// address. Google Places typically returns one of:
+  ///   "City"                                 → use as-is
+  ///   "City, State"                          → use first segment
+  ///   "City, State, Country"                 → first segment
+  ///   "Street, City, State, ZIP"             → 2nd segment (city)
+  ///   "Street, City, State, ZIP, Country"    → 2nd segment (city)
+  /// The previous heuristic always picked the second-to-last segment,
+  /// which returned the *state* on 4-part addresses — the geocoder
+  /// could resolve states but the lat/lon was hundreds of miles from
+  /// the actual venue, hence "weather not updating" visually.
   String _extractCity(String location) {
-    final parts = location.split(',');
-    if (parts.length >= 2) return parts[parts.length - 2].trim();
-    return location.trim();
+    final parts = location.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+    if (parts.isEmpty) return '';
+    if (parts.length == 1) return parts.first;
+    if (parts.length == 2) return parts.first;
+    // 3+ segments: index 1 is almost always the city. (Index 0 is the
+    // street; 2+ is state / zip / country in some order.) When the
+    // first segment is a number-prefixed street like "123 Main St",
+    // index 1 is reliable; when it's not (rare), the geocoder still
+    // tends to find a hit on the city anyway.
+    return parts[1];
   }
 
   String _wmoCondition(int code) {
@@ -1532,6 +1745,67 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     ]);
   }
 
+  /// Total people for a given RSVP [status] (`Yes` / `Maybe` / `No`).
+  /// Sums adults + children + plusOnes across every matching rsvps doc
+  /// — not the doc count, which would underreport family RSVPs (a
+  /// single doc holding 1 adult + 3 children would otherwise show as 1).
+  ///
+  /// Two failure modes guarded against:
+  ///
+  /// 1. **Same person counted twice** — a physical guest can end up
+  ///    with two rsvps docs if they RSVP'd via the web flow on
+  ///    `event.html` (doc id = email) AND via the app (doc id = uid).
+  ///    Both docs land in `_rsvps` with different `'uid'` values
+  ///    (because we set `'uid': doc.id`). Since the app RSVP is
+  ///    authoritative, we collapse anything that LOOKS like an email
+  ///    doc id when there's already an entry with the same `name`,
+  ///    keeping only the app-source row.
+  ///
+  /// 2. **In-list duplicates of the SAME doc id** — defensive only;
+  ///    the snapshot listener replaces `_rsvps` wholesale so this
+  ///    shouldn't happen, but if a future code path mutates `_rsvps`
+  ///    by `.add()` it would. Latest entry per uid wins.
+  int _peopleFor(String status) {
+    final matching = _rsvps.where((g) => g['status'] == status).toList();
+
+    // Dedupe by `uid` (= doc id) first — last write wins.
+    final byId = <String, Map<String, dynamic>>{};
+    for (final g in matching) {
+      byId[g['uid'] as String] = g;
+    }
+
+    // Then collapse web-source duplicates: a doc id that LOOKS like an
+    // email AND has the same `name` as an entry whose uid does NOT look
+    // like an email (i.e. the app RSVP) → drop the web-source row.
+    bool looksLikeEmail(String id) => id.contains('@');
+    final emails = byId.entries.where((e) => looksLikeEmail(e.key)).toList();
+    for (final webEntry in emails) {
+      final webName = (webEntry.value['name'] as String?)?.trim().toLowerCase();
+      if (webName == null || webName.isEmpty) continue;
+      final hasAppDup = byId.values.any((other) {
+        final otherUid = other['uid'] as String;
+        if (looksLikeEmail(otherUid)) return false;
+        final otherName = (other['name'] as String?)?.trim().toLowerCase();
+        return otherName == webName;
+      });
+      if (hasAppDup) byId.remove(webEntry.key);
+    }
+
+    final total = byId.values.fold<int>(
+      0,
+      (acc, g) =>
+          acc +
+          ((g['adults']   as int?) ?? 0) +
+          ((g['children'] as int?) ?? 0) +
+          ((g['plusOnes'] as int?) ?? 0),
+    );
+    debugPrint('[RSVP] _peopleFor($status) total=$total fromDocs=${byId.length} (raw _rsvps=${_rsvps.length})');
+    for (final g in byId.values) {
+      debugPrint('[RSVP]   uid=${g['uid']} name=${g['name']} status=${g['status']} adults=${g['adults']} children=${g['children']} plusOnes=${g['plusOnes']}');
+    }
+    return total;
+  }
+
   Widget _buildGuestAvatarRow() {
     return SizedBox(
       height: 72,
@@ -1546,7 +1820,19 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           final Color dotColor = status == 'Yes' ? AppColors.green : status == 'Maybe' ? AppColors.gold : Colors.redAccent;
           final adults = guest['adults'] as int;
           final children = guest['children'] as int;
-          final peopleLabel = children == 0 ? '$adults adult${adults == 1 ? '' : 's'}' : '$adults + $children';
+          final guestPlusOnes = (guest['plusOnes'] as int?) ?? 0;
+          // Compact label for the avatar tile under each guest in the
+          // horizontal scroller. Just the total people — the full
+          // breakdown lives in the tap-detail dialog below.
+          final totalPeople = adults + children + guestPlusOnes;
+          // Detail-dialog breakdown lines — each non-zero count gets its
+          // own pluralised line so the host can see exactly who's on
+          // the guest's RSVP.
+          final breakdownLines = <String>[
+            '$adults adult${adults == 1 ? '' : 's'}',
+            if (children > 0) '$children child${children == 1 ? '' : 'ren'}',
+            if (guestPlusOnes > 0) '$guestPlusOnes plus-one${guestPlusOnes == 1 ? '' : 's'}',
+          ];
           return GestureDetector(
             onTap: () {
               showDialog(
@@ -1570,8 +1856,23 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                         decoration: BoxDecoration(color: dotColor, borderRadius: BorderRadius.circular(100)),
                         child: Text(status, style: const TextStyle(fontSize: 13, color: Colors.white, fontWeight: FontWeight.w600)),
                       ),
-                      const SizedBox(height: 6),
-                      Text(peopleLabel, style: TextStyle(fontSize: 13, color: _muted)),
+                      const SizedBox(height: 10),
+                      // Headline: total people on this guest's RSVP.
+                      Text(
+                        '$totalPeople ${totalPeople == 1 ? 'person' : 'people'}',
+                        style: TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.w800,
+                          color: _isDark ? Colors.white : AppColors.dark,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      // Per-segment breakdown — adults always shown,
+                      // children + plus-ones only when > 0.
+                      Text(
+                        breakdownLines.join(' · '),
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 13, color: _muted, height: 1.4),
+                      ),
                     ]),
                   ),
                 ),
@@ -1947,15 +2248,34 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     if (listType == 'Checklist') return _buildChecklistTab();
 
     // ── Wishlist mode ──
+    // Debug prints for host/co-host evaluation — if the shop chips below
+    // never appear, the cause is one of these flags being false at the
+    // moment the tab renders. _isHost is set in _initEventData after the
+    // event doc loads, so during the very first build (before the event
+    // resolves) both will be false; flipping host-mode forces a rebuild.
+    debugPrint('[Wishlist] build _isHost=$_isHost _isCoHost=$_isCoHost listType=$listType');
     final fulfilledCount = wishlistItems.where((i) =>
       i['bought'] == true || (i['contributed'] as double) >= (i['price'] as double)).length;
-    return Stack(
+    return SafeArea(
+      // top:false so we don't double-pad below the AppBar; we only want
+      // the bottom safe-area inset (gesture bar / nav buttons) folded in
+      // alongside the keyboard inset on the inner SingleChildScrollView.
+      top: false,
+      child: Stack(
       children: [
       // SingleChildScrollView wraps the whole wishlist body so the fixed-height
       // banners + header can't overflow the RenderFlex when the keyboard opens
       // and shrinks the viewport. The inner ListView.builder becomes shrinkWrap
       // with no physics of its own — the outer scroll view owns scrolling.
+      //
+      // We deliberately do NOT add viewInsets.bottom here: the parent Scaffold
+      // already has `resizeToAvoidBottomInset: true`, so the body is shrunken
+      // above the keyboard, and viewInsets.bottom still reports the keyboard
+      // height. Adding it as inner padding stacked on top of the resize was
+      // exactly the 99px overflow the user kept seeing. Just use a flat 16px
+      // breathing-room margin and let Scaffold own the keyboard handling.
       SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: 16),
       child: Column(
       children: [
         if (_isArchived)
@@ -2010,6 +2330,8 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
             ],
           ),
         ),
+        // Shop chips for browsing retailer apps live on EditEventScreen now,
+        // not here — guests should never see them.
         // Items shared into the event via the Android share sheet — separate
         // subcollection from the host-defined wishlist array. Hidden entirely
         // when nothing's been shared, so it adds zero noise for events that
@@ -2158,6 +2480,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           child: _buildCartBar(),
         ),
       ],
+      ),
     );
   }
 
@@ -2418,8 +2741,13 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   Widget _buildChecklistTab() {
     final claimedCount = wishlistItems.where((i) => (i['claimed'] as int) > 0).length;
     // Wrap the whole checklist body in a scroll view so the fixed-height
-    // banner + header can't overflow when the keyboard pops up to claim an item.
+    // banner + header can't overflow when the keyboard pops up to claim
+    // an item. The parent Scaffold has resizeToAvoidBottomInset: true,
+    // which already shrinks the body above the keyboard — adding
+    // viewInsets.bottom as extra padding here would double-count the
+    // inset and push the inner column off the bottom of the viewport.
     return SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: 16),
       child: Column(
       children: [
         if (_showChecklistBanner)
@@ -2677,36 +3005,119 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     );
   }
 
-  Widget _announcementCard(String message, String time) => Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: AppColors.purplePale,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.purple.withOpacity(0.15)),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 32, height: 32,
-              decoration: BoxDecoration(color: AppColors.purple.withOpacity(0.15), borderRadius: BorderRadius.circular(10)),
-              child: const Center(child: Icon(Icons.campaign_outlined, size: 16, color: AppColors.purple)),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(message, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.dark)),
-                  const SizedBox(height: 4),
-                  Text(time, style: const TextStyle(fontSize: 11, color: AppColors.muted)),
-                ],
+  /// Announcement card. Tappable for everyone now: hosts and co-hosts
+  /// jump straight into the announcement composer to send / manage,
+  /// regular guests get a bottom sheet that shows the full message in
+  /// case it was truncated by the row's ellipsis. Previously the cards
+  /// were inert chrome and the host had no in-screen path to manage.
+  Widget _announcementCard(String message, String time) {
+    final isHostMode = _isHost || _isCoHost;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: AppColors.purplePale,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.purple.withValues(alpha: 0.15)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () {
+          if (isHostMode) {
+            Navigator.push(context, MaterialPageRoute(
+              builder: (_) => const HostNotificationsScreen(),
+            ));
+          } else {
+            _showAnnouncementDetailSheet(message, time);
+          }
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 32, height: 32,
+                decoration: BoxDecoration(color: AppColors.purple.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(10)),
+                child: const Center(child: Icon(Icons.campaign_outlined, size: 16, color: AppColors.purple)),
               ),
-            ),
-          ],
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(message,
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.dark)),
+                    const SizedBox(height: 4),
+                    Text(time, style: const TextStyle(fontSize: 11, color: AppColors.muted)),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(
+                isHostMode ? Icons.edit_outlined : Icons.chevron_right,
+                size: 16,
+                color: AppColors.purple.withValues(alpha: 0.7),
+              ),
+            ],
+          ),
         ),
-      );
+      ),
+    );
+  }
+
+  /// Read-only detail sheet for guests who tap an announcement.
+  /// Hosts route to the manage screen instead — see [_announcementCard].
+  void _showAnnouncementDetailSheet(String message, String time) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _card,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (sheetCtx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(child: Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(color: _border, borderRadius: BorderRadius.circular(2)),
+              )),
+              const SizedBox(height: 18),
+              Row(children: [
+                const Icon(Icons.campaign_outlined, size: 18, color: AppColors.purple),
+                const SizedBox(width: 8),
+                Text('Announcement',
+                    style: TextStyle(fontFamily: 'FredokaOne', fontSize: 18,
+                        color: _isDark ? Colors.white : AppColors.dark)),
+                const Spacer(),
+                Text(time, style: TextStyle(fontSize: 12, color: _muted)),
+              ]),
+              const SizedBox(height: 12),
+              Text(
+                message,
+                style: TextStyle(fontSize: 15, color: _isDark ? Colors.white : AppColors.dark, height: 1.45),
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                height: 44,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(sheetCtx),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.purple,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    elevation: 0,
+                  ),
+                  child: const Text('Close', style: TextStyle(fontWeight: FontWeight.w800)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _statBox(String number, String label, Color color, {VoidCallback? onTap}) {
     final inner = Container(

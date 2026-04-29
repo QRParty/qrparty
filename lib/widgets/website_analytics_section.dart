@@ -42,7 +42,26 @@ class WebsiteAnalyticsSectionState extends State<WebsiteAnalyticsSection> {
       setState(() { _data = d; _loading = false; });
     } catch (e) {
       if (!mounted) return;
-      setState(() { _error = e.toString(); _loading = false; });
+      // Map raw exception strings to a friendly tag so the empty-state UI
+      // can show "Analytics unavailable" instead of the
+      // `[firebase_functions/not-found]` red-banner message that means
+      // nothing to a non-engineer. The full exception is logged so the
+      // root cause is still recoverable from console output.
+      debugPrint('[WebsiteAnalytics] fetch failed: $e');
+      final raw = e.toString();
+      String friendly;
+      if (raw.contains('not-found')) {
+        friendly = 'unavailable';
+      } else if (raw.contains('failed-precondition')) {
+        friendly = 'not-configured';
+      } else if (raw.contains('permission-denied') || raw.contains('unauthenticated')) {
+        friendly = 'permission-denied';
+      } else if (raw.contains('unavailable') || raw.contains('SocketException')) {
+        friendly = 'offline';
+      } else {
+        friendly = 'unavailable';
+      }
+      setState(() { _error = friendly; _loading = false; });
     }
   }
 
@@ -278,6 +297,24 @@ class WebsiteAnalyticsSectionState extends State<WebsiteAnalyticsSection> {
   }
 
   Widget _emptyAll() {
+    String headline;
+    String? subtitle;
+    if (_error == null) {
+      headline = 'No data yet';
+    } else {
+      headline = 'Analytics unavailable';
+      switch (_error) {
+        case 'not-configured':
+          subtitle = 'GA4 property isn\'t configured for this project yet.';
+        case 'permission-denied':
+          subtitle = 'You don\'t have access to this dashboard.';
+        case 'offline':
+          subtitle = 'Couldn\'t reach the analytics server. Check your connection.';
+        case 'unavailable':
+        default:
+          subtitle = 'Try again in a moment — if this keeps happening, contact support.';
+      }
+    }
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -285,14 +322,17 @@ class WebsiteAnalyticsSectionState extends State<WebsiteAnalyticsSection> {
         border: Border.all(color: _border),
       ),
       child: Column(children: [
-        Icon(Icons.bar_chart_outlined, size: 32, color: _muted),
+        Icon(
+          _error == null ? Icons.bar_chart_outlined : Icons.cloud_off_outlined,
+          size: 32, color: _muted,
+        ),
         const SizedBox(height: 8),
-        Text(_error == null ? 'No data yet' : 'Could not load analytics',
+        Text(headline,
             style: TextStyle(color: _fg, fontWeight: FontWeight.w800, fontSize: 14)),
-        if (_error != null) ...[
+        if (subtitle != null) ...[
           const SizedBox(height: 6),
-          Text(_error!, textAlign: TextAlign.center,
-              style: TextStyle(color: _muted, fontSize: 12)),
+          Text(subtitle, textAlign: TextAlign.center,
+              style: TextStyle(color: _muted, fontSize: 12, height: 1.4)),
         ],
         const SizedBox(height: 12),
         TextButton.icon(
