@@ -14,9 +14,15 @@ workflows:
           cd ios
           rm -rf Pods Podfile.lock
           pod install
-      - name: Fix BoringSSL flag
+      - name: Patch gRPC-Core for Xcode Clang
         script: |
-          sed -i '' 's/-GCC_WARN_INHIBIT_ALL_WARNINGS//g' ios/Pods/Pods.xcodeproj/project.pbxproj
+          FILE="ios/Pods/gRPC-Core/src/core/lib/promise/detail/basic_seq.h"
+          if [ -f "$FILE" ]; then
+            sed -i '' 's/Traits::template CallSeqFactory(/Traits::template CallSeqFactory<>(/g' "$FILE"
+            echo "Patched $FILE"
+          else
+            echo "basic_seq.h not found - likely fixed upstream, skipping"
+          fi
       - name: Build iOS
         script: |
           flutter build ios --release --no-codesign
