@@ -80,19 +80,26 @@ post_install do |installer|
     end
   end
 
-  # gRPC-Core template syntax fix
+  # gRPC template syntax fix
   # Newer Clang (Xcode 15+) requires explicit empty template argument
-  # list <> after template-disambiguated names. Old gRPC-Core in
-  # Firebase 2.x emits Traits::template CallSeqFactory(...) which
+  # list <> after template-disambiguated names. Old gRPC pods in
+  # Firebase 2.x emit Traits::template CallSeqFactory(...) which
   # triggers: "A template argument list is expected after a name
-  # prefixed by the template keyword". Patch the source in-place.
-  basic_seq = File.expand_path('Pods/gRPC-Core/src/core/lib/promise/detail/basic_seq.h', __dir__)
-  if File.exist?(basic_seq)
-    content = File.read(basic_seq)
+  # prefixed by the template keyword". Patch the source in-place
+  # in BOTH gRPC-Core and gRPC-C++ pods (they ship the same broken
+  # basic_seq.h).
+  grpc_pod_paths = [
+    'Pods/gRPC-Core/src/core/lib/promise/detail/basic_seq.h',
+    'Pods/gRPC-C++/src/core/lib/promise/detail/basic_seq.h',
+  ]
+  grpc_pod_paths.each do |relative_path|
+    full_path = File.expand_path(relative_path, __dir__)
+    next unless File.exist?(full_path)
+    content = File.read(full_path)
     patched = content.gsub('Traits::template CallSeqFactory(', 'Traits::template CallSeqFactory<>(')
     if content != patched
-      File.write(basic_seq, patched)
-      puts "Patched gRPC-Core basic_seq.h"
+      File.write(full_path, patched)
+      puts "Patched #{relative_path}"
     end
   end
 end
