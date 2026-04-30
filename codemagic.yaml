@@ -17,6 +17,9 @@ workflows:
       - name: Fix BoringSSL flag
         script: |
           sed -i '' 's/-GCC_WARN_INHIBIT_ALL_WARNINGS//g' ios/Pods/Pods.xcodeproj/project.pbxproj
+      - name: Fix gRPC-Core template issue
+        script: |
+          sed -i '' 's/template </template</g' ios/Pods/gRPC-Core/src/core/lib/promise/detail/basic_seq.h
       - name: Build iOS
         script: |
           flutter build ios --release --no-codesign
