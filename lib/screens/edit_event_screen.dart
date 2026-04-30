@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../utils.dart';
+import 'wishlist_browser_screen.dart';
 
 // ── Theme palette ──────────────────────────────────────────────
 const _bgDark      = Color(0xFF2D3047); // dark-mode scaffold
@@ -65,6 +65,10 @@ class _EditEventScreenState extends State<EditEventScreen> {
   final TextEditingController _newItemNameCtrl  = TextEditingController();
   final TextEditingController _newItemPriceCtrl = TextEditingController();
   final TextEditingController _newItemQtyCtrl   = TextEditingController();
+  // Focus target for the item-name field — refocused after the in-app
+  // browser returns so the host can immediately edit the auto-extracted
+  // title. Mirrors the create-event screen.
+  final FocusNode _itemNameFocus = FocusNode();
 
   /// Retailer chip catalog — uses the retailer's canonical https URL
   /// rather than a custom URI scheme. Most modern retailer apps register
@@ -80,6 +84,9 @@ class _EditEventScreenState extends State<EditEventScreen> {
     (label: 'Etsy',     emoji: '🧶', url: 'https://www.etsy.com'),
     (label: 'Walmart',  emoji: '🛒', url: 'https://www.walmart.com'),
     (label: 'Best Buy', emoji: '🔌', url: 'https://www.bestbuy.com'),
+    // Generic entry — opens the in-app browser at about:blank so the
+    // host can navigate anywhere via the address bar.
+    (label: 'Browse the web', emoji: '🌐', url: 'about:blank'),
   ];
 
   // Theme-aware color getters — resolve light vs dark variant from the current Theme.
@@ -137,6 +144,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
     _descController.dispose();
     _newItemNameCtrl.dispose();
     _newItemPriceCtrl.dispose();
+    _itemNameFocus.dispose();
     _newItemQtyCtrl.dispose();
     super.dispose();
   }
@@ -148,16 +156,40 @@ class _EditEventScreenState extends State<EditEventScreen> {
   /// Falls back to a Chrome Custom Tab if external launch fails (no
   /// browser, app missing, etc.). Custom URI schemes are no longer
   /// fired client-side — modern retailer apps respond to App Links.
+  /// Opens [WishlistBrowserScreen] at [url], waits for the host to
+  /// tap "Add to Wishlist" inside it, appends the extracted item to
+  /// `_wishlistItems`, and refocuses the inline name field so the
+  /// host can immediately tweak the title or fill in a price.
+  ///
+  /// Replaces the prior `LaunchMode.externalApplication` flow that
+  /// kicked the host out to the retailer's native app or browser.
+  /// Mirrors [CreateEventScreen._openShop].
   Future<void> _openShop(String url) async {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
-    try {
-      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (ok) return;
-    } catch (_) {/* fall through to in-app browser */}
-    try {
-      await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
-    } catch (_) {/* swallow — chip just becomes a no-op */}
+    if (!mounted) return;
+    final result = await Navigator.of(context).push<WishlistBrowserResult>(
+      MaterialPageRoute(
+        builder: (_) => WishlistBrowserScreen(initialUrl: url),
+      ),
+    );
+    if (!mounted || result == null) return;
+    setState(() {
+      _wishlistItems.add({
+        'name': result.name,
+        // Default price 0 — WebView extraction can't reliably parse a
+        // price across retailers; the host edits it inline after we
+        // refocus the name field below.
+        'price': 0.0,
+        'contributed': 0.0,
+        'bought': false,
+        if (result.imageUrl.isNotEmpty) 'imageUrl': result.imageUrl,
+        if (result.url.isNotEmpty) 'url': result.url,
+      });
+      _newItemNameCtrl.text = result.name;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _itemNameFocus.requestFocus();
+    });
   }
 
   // ── Wishlist add/remove ────────────────────────────────────────
@@ -185,6 +217,12 @@ class _EditEventScreenState extends State<EditEventScreen> {
       _newItemPriceCtrl.clear();
       _newItemQtyCtrl.clear();
     });
+    // Return focus to the name field so the host can type the next
+    // item without re-tapping. Without this, the keyboard's caret
+    // stays in whichever subfield (qty / price) the host last
+    // touched, and they have to tap the name field every time —
+    // friction that adds up when entering a long potluck list.
+    _itemNameFocus.requestFocus();
   }
 
   void _removeWishlistItem(int index) {
@@ -886,6 +924,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
                 Expanded(
                   child: TextField(
                     controller: _newItemNameCtrl,
+                    focusNode: _itemNameFocus,
                     style: TextStyle(color: fg),
                     onSubmitted: (_) => _addWishlistItem(),
                     decoration: InputDecoration(

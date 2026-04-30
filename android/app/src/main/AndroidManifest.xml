@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="com.google.android.gms.permission.AD_ID" tools:node="remove"/>
+    <!-- Required by webview_flutter for the in-app wishlist browser
+         (lib/screens/wishlist_browser_screen.dart). Firebase plugins
+         merge this in transitively too, but declaring it explicitly
+         documents the dependency. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="qrparty"
         android:name="${applicationName}"

@@ -8,12 +8,12 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:google_places_flutter/google_places_flutter.dart';
 import 'package:google_places_flutter/model/prediction.dart';
 import 'package:http/http.dart' as http;
-import 'package:url_launcher/url_launcher.dart';
 import '../utils.dart';
 import '../models/merch_order.dart';
 import 'generate_qr_screen.dart';
 import 'home_feed_screen.dart';
 import 'order_merch_screen.dart';
+import 'wishlist_browser_screen.dart';
 
 // ── Theme palette ──────────────────────────────────────────────
 // Light + dark variants for the four surface colors; accents stay the same.
@@ -185,6 +185,13 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   // Set to true right before navigating to GenerateQRCodeScreen so the
   // back-press dialog doesn't prompt to save/discard a finalised event.
   bool _eventFinalized = false;
+  // Flips true for the duration of the Firestore write that finalises
+  // the event. Drives the Generate-QR button's spinner + disabled
+  // state so a slow write (offline, cold App Check) doesn't look
+  // like the button is broken — previously it stayed "Generate Event
+  // QR Code" with no indicator, and missing-required-field rejections
+  // surfaced as a transient SnackBar that was easy to miss.
+  bool _saving = false;
 
   List<Map<String, dynamic>> wishlistItems = [];
 
@@ -197,6 +204,15 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
 
   String _zipCode = '';
   final _locationFocusNode = FocusNode();
+  // Focus targets for the wishlist + checklist item-name fields.
+  // Two separate nodes are required because in 'Both' mode both
+  // sections render simultaneously — a single FocusNode can only
+  // attach to one TextField at a time. The right node is refocused
+  // after each manual `+ Add` press in [_addItemOfKind] so the host
+  // can keep typing the next item's name without re-tapping the
+  // field, AND after the WebView returns from [_openShop].
+  final _itemNameFocusNode = FocusNode();         // wishlist section
+  final _checklistNameFocusNode = FocusNode();    // checklist section
 
   bool _isRecurring = false;
   String _recurrenceFrequency = 'weekly';
@@ -309,9 +325,18 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
 
   void _onTitleChanged() {
     setState(() {});
-    if (titleController.text.isNotEmpty && _draftId == null) {
-      _createDraft();
-    } else if (_draftId != null) {
+    // Route the first-character-typed case through the debounced
+    // saver too, NOT a synchronous _createDraft() call. Earlier this
+    // method did an immediate await firestore.add() on the first
+    // keystroke; if the host popped the screen before the write
+    // resolved, dispose() couldn't cancel the in-flight Future and
+    // the draft landed in Firestore anyway as an orphan. The host
+    // never saw the "Save your progress?" dialog (because _draftId
+    // was still null at pop time) and the orphan kept showing up on
+    // the home feed every time they came back. Routing through
+    // _scheduleDraftSave fixes that — the 600ms Timer IS cancelable
+    // in dispose(), so a typo+back-out leaves no doc behind.
+    if (titleController.text.isNotEmpty || _draftId != null) {
       _scheduleDraftSave();
     }
   }
@@ -418,6 +443,8 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     locationController.removeListener(_scheduleDraftSave);
     locationController.dispose();
     _locationFocusNode.dispose();
+    _itemNameFocusNode.dispose();
+    _checklistNameFocusNode.dispose();
     newItemNameController.dispose();
     newItemPriceController.dispose();
     newItemQtyController.dispose();
@@ -599,23 +626,55 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     (label: 'Etsy',     emoji: '🧶', url: 'https://www.etsy.com'),
     (label: 'Walmart',  emoji: '🛒', url: 'https://www.walmart.com'),
     (label: 'Best Buy', emoji: '🔌', url: 'https://www.bestbuy.com'),
+    // Generic entry — launches the in-app browser at about:blank with
+    // the address bar focused so the host can navigate anywhere.
+    (label: 'Browse the web', emoji: '🌐', url: 'about:blank'),
   ];
 
-  /// Open the retailer's https URL with externalApplication mode so
-  /// Android can hand off to the registered App Link handler (the
-  /// retailer's native app, when installed) instead of routing to the
-  /// browser. Falls back to a Chrome Custom Tab if external launch
-  /// fails. Mirrors [EditEventScreen._openShop].
+  /// Opens the in-app [WishlistBrowserScreen] at [url] and waits for
+  /// the host to tap "Add to Wishlist" inside it. The screen pops with
+  /// a [WishlistBrowserResult] (or null on cancel); we append the
+  /// extracted name/imageUrl/url to wishlistItems and return focus to
+  /// the inline name field so the host can immediately edit the title
+  /// or fill in a price.
+  ///
+  /// Replaces the prior `LaunchMode.externalApplication` flow that
+  /// kicked the host out of the app to the retailer's native app or
+  /// browser. Mirrors [EditEventScreen._openShop].
   Future<void> _openShop(String url) async {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
-    try {
-      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (ok) return;
-    } catch (_) {/* fall through to in-app browser */}
-    try {
-      await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
-    } catch (_) {/* swallow — chip just becomes a no-op */}
+    if (!mounted) return;
+    final result = await Navigator.of(context).push<WishlistBrowserResult>(
+      MaterialPageRoute(
+        builder: (_) => WishlistBrowserScreen(initialUrl: url),
+      ),
+    );
+    if (!mounted || result == null) return;
+    setState(() {
+      wishlistItems.add({
+        'name': result.name,
+        // Default price 0 — the WebView extraction can't reliably
+        // parse a price across retailers; the host edits it inline
+        // after we refocus the name field below.
+        'price': 0.0,
+        'contributed': 0.0,
+        'bought': false,
+        'kind': 'wishlist',
+        if (result.imageUrl.isNotEmpty) 'imageUrl': result.imageUrl,
+        if (result.url.isNotEmpty) 'url': result.url,
+      });
+      // Pre-fill the inline name field too so the host sees the
+      // extracted title in the editor and can tweak it before it
+      // gets persisted via _scheduleDraftSave.
+      newItemNameController.text = result.name;
+    });
+    _scheduleDraftSave();
+    // Defer focus until after the popped route's transition finishes
+    // — without the post-frame callback the keyboard sometimes opens
+    // and closes back-to-back as the WebView screen tears down.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _itemNameFocusNode.requestFocus();
+    });
   }
 
   /// Adds a new item of the given [kind] using whichever of the shared
@@ -649,6 +708,13 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       newItemQtyController.clear();
     });
     _scheduleDraftSave();
+    // Return focus to the section's name field so the host can type
+    // the next item without re-tapping. Without this, the keyboard's
+    // caret stays in whichever subfield (qty / price) the host last
+    // touched, and entering a long potluck list becomes a tap-tap-
+    // tap chore.
+    (kind == 'checklist' ? _checklistNameFocusNode : _itemNameFocusNode)
+        .requestFocus();
   }
 
   Future<bool> _confirmExit() async {
@@ -1206,10 +1272,43 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             width: double.infinity,
             height: 56,
             child: ElevatedButton(
-              onPressed: () async {
+              onPressed: _saving ? null : () async {
+                // Required-field guard. Without this, an empty title
+                // would race straight into the Firestore create which
+                // rules reject with permission-denied (`title.size() > 0`),
+                // and the only feedback was a transient default-duration
+                // SnackBar from the catch block — easy to miss, hence
+                // the "button highlights but nothing happens" report.
+                final missing = <String>[];
+                if (titleController.text.trim().isEmpty) missing.add('a title');
+                if (selectedEventType == null) missing.add('an event type');
+                if (selectedDate == null) missing.add('a date');
+                if (missing.isNotEmpty) {
+                  final list = missing.length == 1
+                      ? missing.first
+                      : missing.length == 2
+                          ? '${missing[0]} and ${missing[1]}'
+                          : '${missing.sublist(0, missing.length - 1).join(', ')}, and ${missing.last}';
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text('Please add $list before generating a QR code.'),
+                    backgroundColor: AppColors.gold,
+                    behavior: SnackBarBehavior.floating,
+                    duration: const Duration(seconds: 4),
+                  ));
+                  return;
+                }
                 final user = FirebaseAuth.instance.currentUser;
-                if (user == null) return;
+                if (user == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text("You're signed out. Sign in and try again."),
+                    backgroundColor: Colors.redAccent,
+                    behavior: SnackBarBehavior.floating,
+                    duration: Duration(seconds: 4),
+                  ));
+                  return;
+                }
                 _draftTimer?.cancel();
+                setState(() => _saving = true);
                 try {
                   final isRecurring = _isRecurring && _isBusiness;
                   final recurrenceRule = isRecurring ? _buildRecurrenceRule() : null;
@@ -1350,21 +1449,49 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     );
                   }
                 } catch (e) {
+                  // Surface the failure clearly. Default SnackBar
+                  // duration is ~1.5s which is easy to miss and was
+                  // part of why this looked like "nothing happened"
+                  // when the underlying error was a rules rejection.
+                  debugPrint('[CreateEvent] save/navigate failed: $e');
                   if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error saving event: $e'), backgroundColor: Colors.redAccent));
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text('Error saving event: $e'),
+                      backgroundColor: Colors.redAccent,
+                      behavior: SnackBarBehavior.floating,
+                      duration: const Duration(seconds: 6),
+                    ));
                   }
+                } finally {
+                  // Reset _saving even on success — pushReplacement
+                  // tears the screen down on the success path so the
+                  // setState is a no-op there, but on any catch path
+                  // we need the button re-enabled so the host can
+                  // retry without backing out of the screen.
+                  if (mounted) setState(() => _saving = false);
                 }
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: type.primary,
                 foregroundColor: Colors.white,
+                disabledBackgroundColor: type.primary.withValues(alpha: 0.55),
+                disabledForegroundColor: Colors.white.withValues(alpha: 0.85),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               ),
-              child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                Icon(Icons.qr_code_2),
-                SizedBox(width: 10),
-                Text('Generate Event QR Code', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-              ]),
+              child: _saving
+                  ? const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      SizedBox(
+                        width: 18, height: 18,
+                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.2),
+                      ),
+                      SizedBox(width: 12),
+                      Text('Saving event…', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                    ])
+                  : const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      Icon(Icons.qr_code_2),
+                      SizedBox(width: 10),
+                      Text('Generate Event QR Code', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                    ]),
             ),
           ),
         ),
@@ -1569,6 +1696,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             Expanded(
               child: TextField(
                 controller: newItemNameController,
+                focusNode: isChecklist ? _checklistNameFocusNode : _itemNameFocusNode,
                 style: TextStyle(color: _fg),
                 decoration: _inputDecoration(isChecklist ? 'Item to bring' : 'Item name'),
               ),
