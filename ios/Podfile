@@ -38,6 +38,17 @@ target 'Runner' do
   # aren't modular; this is the canonical Flutter+Firebase fix.
   use_modular_headers!
 
+  # Explicit modular_headers for the Firebase umbrella + FirebaseCore +
+  # GoogleUtilities. use_modular_headers! above SHOULD reach these
+  # transitively, but in practice the umbrella `Firebase` pod (which
+  # provides Firebase.h) needs to be declared explicitly to be marked
+  # modular. Without this, firebase_storage 11.7.7's plugin code fails
+  # with "Include of non-modular header inside framework module
+  # 'firebase_storage.FLTTaskStateChannelStreamHandler'".
+  pod 'Firebase', :modular_headers => true
+  pod 'FirebaseCore', :modular_headers => true
+  pod 'GoogleUtilities', :modular_headers => true
+
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do
     inherit! :search_paths
