@@ -64,6 +64,15 @@ post_install do |installer|
       # build use 16.0. 14.0 matches Runner's IPHONEOS_DEPLOYMENT_TARGET.
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
 
+      # Allow Firebase plugins (firebase_messaging, firebase_app_check,
+      # firebase_database, etc.) to import the umbrella Firebase.h header
+      # which is non-modular. Without this, Xcode 15+ rejects:
+      #   "Include of non-modular header inside framework module
+      #    'firebase_messaging.FLTFirebaseMessagingPlugin'"
+      # Applied to all targets defensively so any future Firebase plugin
+      # added later inherits the same permission.
+      config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+
       # Belt-and-suspenders: strip any -G* flags that survived the
       # per-file pass above (e.g. flags injected via xcconfig rather
       # than the source-file COMPILER_FLAGS).
