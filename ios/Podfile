@@ -29,6 +29,14 @@ flutter_ios_podfile_setup
 
 target 'Runner' do
   use_frameworks!
+  # Force ALL pods (including Firebase) to expose modular headers so
+  # Flutter plugins like firebase_messaging can #import "Firebase.h"
+  # under use_frameworks! without tripping:
+  #   "Include of non-modular header inside framework module"
+  # The CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES build
+  # setting alone is not sufficient when the Firebase pods themselves
+  # aren't modular; this is the canonical Flutter+Firebase fix.
+  use_modular_headers!
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do
@@ -64,13 +72,9 @@ post_install do |installer|
       # build use 16.0. 14.0 matches Runner's IPHONEOS_DEPLOYMENT_TARGET.
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
 
-      # Allow Firebase plugins (firebase_messaging, firebase_app_check,
-      # firebase_database, etc.) to import the umbrella Firebase.h header
-      # which is non-modular. Without this, Xcode 15+ rejects:
-      #   "Include of non-modular header inside framework module
-      #    'firebase_messaging.FLTFirebaseMessagingPlugin'"
-      # Applied to all targets defensively so any future Firebase plugin
-      # added later inherits the same permission.
+      # Belt-and-suspenders alongside use_modular_headers!: keep the
+      # build setting flag too so any plugin that still tries to import
+      # a non-modular header can do so.
       config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
 
       # Belt-and-suspenders: strip any -G* flags that survived the
