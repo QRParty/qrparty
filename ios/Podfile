@@ -45,9 +45,6 @@ target 'Runner' do
   # modular. Without this, firebase_storage 11.7.7's plugin code fails
   # with "Include of non-modular header inside framework module
   # 'firebase_storage.FLTTaskStateChannelStreamHandler'".
-  pod 'Firebase', :modular_headers => true
-  pod 'FirebaseCore', :modular_headers => true
-  pod 'GoogleUtilities', :modular_headers => true
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do
