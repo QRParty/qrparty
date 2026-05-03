@@ -6,6 +6,8 @@ workflows:
       flutter: 3.41.7
       xcode: 16.4
       cocoapods: default
+      groups:
+        - ios_signing
     scripts:
       - name: Get Flutter packages
         script: flutter pub get
@@ -14,8 +16,23 @@ workflows:
           cd ios
           rm -rf Pods Podfile.lock
           pod install
+      - name: Set up code signing
+        script: |
+          keychain initialize
+          app-store-connect fetch-signing-files com.qrparty.app \
+            --type IOS_APP_STORE \
+            --create
+          keychain add-certificates
+          xcode-project use-profiles
       - name: Build iOS
         script: |
-          flutter build ios --release --no-codesign
+          flutter build ipa --release \
+            --export-options-plist=/Users/builder/export_options.plist
     artifacts:
-      - build/ios/iphoneos/Runner.app
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
