@@ -131,13 +131,29 @@ exports.createMerchOrder = onCall(
         formatted: shippingAddress.formatted ?? "",
       };
 
+      // Prefer the path-based shortCode URL form (`/event/{XXXXXX}`)
+      // — both the in-app scanner and the public web resolver handle
+      // it natively. Fall back to the legacy query-param form for
+      // events that haven't been migrated to a shortCode yet so this
+      // function never blocks an order.
+      const shortCode = (typeof event.shortCode === "string" && event.shortCode.length > 0)
+        ? event.shortCode
+        : null;
+      const eventQrCodeUrl = shortCode
+        ? `https://partywithqr.com/event/${shortCode}`
+        : `https://partywithqr.com/event?id=${eventId}`;
+
       const orderRef = db.collection("orders").doc();
       const baseOrder = {
         userId: uid,
         eventId,
         eventName: event.title || "Event",
         eventDate: event.date || null,
-        eventQrCode: `https://partywithqr.com/event?id=${eventId}`,
+        eventQrCode: eventQrCodeUrl,
+        // Persist the shortCode separately so the admin / print flows
+        // can re-derive the URL without re-fetching the event doc.
+        // Null on legacy events.
+        eventShortCode: shortCode,
         productType,
         packSize,
         theme: customDesignUrl ? "custom" : theme,
@@ -179,6 +195,11 @@ exports.createMerchOrder = onCall(
           themeVariant: baseOrder.themeVariant,
           productType, packSize,
           eventQrCode: baseOrder.eventQrCode,
+          // Pass through the raw shortCode + eventId so the print
+          // renderer can rebuild the URL itself if the SVG→PNG swap
+          // ever needs to (e.g. for a different deeplink scheme).
+          eventShortCode: shortCode,
+          eventId,
           eventName: baseOrder.eventName,
           eventDate: baseOrder.eventDate,
           hostName: event.hostName,
@@ -213,6 +234,13 @@ exports.createMerchOrder = onCall(
               orderId: orderRef.id,
               type: "admin_new_order",
             },
+            // Same channel as the rest of the app's notifications —
+            // see lib/main.dart NotificationBridge for registration.
+            // Required on Android 8+ or the system tray drops it.
+            android: {
+              notification: { sound: "default", priority: "high", channel_id: "qrparty_default" },
+            },
+            apns: { payload: { aps: { sound: "default", badge: 1 } } },
           });
           log("admin FCM sent", { tokenCount: tokens.length });
         }

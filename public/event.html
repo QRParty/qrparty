@@ -322,6 +322,23 @@
     .rsvp-status-chip.active.yes   { background: rgba(82,121,111,.30);  border-color: var(--green-light);  color: white; }
     .rsvp-status-chip.active.maybe { background: rgba(200,146,42,.25);  border-color: var(--gold);         color: white; }
     .rsvp-status-chip.active.no    { background: rgba(239,68,68,.20);   border-color: var(--red);          color: white; }
+    /* Headcount chips — same shape as status chips, purple accent
+       when active. Sits under the status row so a guest can RSVP
+       for themselves + a small group from the same browser. */
+    .rsvp-count-row { display: flex; gap: 6px; margin-top: 6px; }
+    .rsvp-count-chip {
+      flex: 1; padding: 11px 4px; border-radius: 10px;
+      border: 1px solid var(--border); background: rgba(0,0,0,.18);
+      color: rgba(255,255,255,.72);
+      font: 800 14px 'Nunito', sans-serif; letter-spacing: .3px;
+      cursor: pointer; text-align: center;
+      transition: border-color .15s, background .15s, color .15s;
+    }
+    .rsvp-count-chip.active {
+      background: rgba(156,127,212,.25);
+      border-color: var(--purple);
+      color: white;
+    }
     .rsvp-form-error {
       font-size: 12.5px; color: var(--red); margin-top: 8px;
       font-weight: 700; text-align: center;
@@ -603,6 +620,14 @@
         <button type="button" class="rsvp-status-chip maybe" data-status="Maybe" onclick="setRsvpStatus('Maybe')">Maybe</button>
         <button type="button" class="rsvp-status-chip no"    data-status="No"    onclick="setRsvpStatus('No')">No</button>
       </div>
+      <label class="rsvp-form-label">How many people? (including you)</label>
+      <div class="rsvp-count-row" role="radiogroup" aria-label="Headcount">
+        <button type="button" class="rsvp-count-chip" data-count="1" onclick="setRsvpCount(1)">1</button>
+        <button type="button" class="rsvp-count-chip" data-count="2" onclick="setRsvpCount(2)">2</button>
+        <button type="button" class="rsvp-count-chip" data-count="3" onclick="setRsvpCount(3)">3</button>
+        <button type="button" class="rsvp-count-chip" data-count="4" onclick="setRsvpCount(4)">4</button>
+        <button type="button" class="rsvp-count-chip" data-count="5" onclick="setRsvpCount(5)">5</button>
+      </div>
       <div id="rsvp-form-error" class="rsvp-form-error" style="display:none"></div>
     </form>
     <div class="rsvp-modal-actions">
@@ -665,9 +690,15 @@
   // Three states inside one backdrop: form (default), success (after a
   // successful submit). Cancel / Done collapse back to the page.
   var _selectedStatus = 'Yes';
+  // Headcount the guest is RSVPing for (themselves + companions). The
+  // listener at subscribeRsvpCounts() reads `adults` off the doc when
+  // tallying, so we write the chosen value to that field. Capped 1–5
+  // by the chip UI.
+  var _selectedCount = 1;
 
   function openRsvpForm(initialStatus) {
     setRsvpStatus(initialStatus || 'Yes');
+    setRsvpCount(1);
     showState('form');
     var el = document.getElementById('rsvp-modal');
     if (el) el.classList.add('open');
@@ -703,6 +734,17 @@
     }
   }
 
+  function setRsvpCount(count) {
+    var n = parseInt(count, 10);
+    if (isNaN(n) || n < 1) n = 1;
+    if (n > 5) n = 5;
+    _selectedCount = n;
+    var chips = document.querySelectorAll('.rsvp-count-chip');
+    for (var i = 0; i < chips.length; i++) {
+      chips[i].classList.toggle('active', parseInt(chips[i].dataset.count, 10) === n);
+    }
+  }
+
   function setError(msg) {
     var el = document.getElementById('rsvp-form-error');
     if (!el) return;
@@ -722,19 +764,19 @@
     if (e.key === 'Escape') closeRsvpModal();
   });
 
-  // RSVP form submit handler. Runs a Firestore transaction that:
-  //   1. Reads any existing rsvp doc keyed by this email so we know
-  //      the previous status (for accurate counter deltas).
-  //   2. Writes the new rsvp doc with source='web'.
-  //   3. Updates the parent event doc's yes/maybe/no counters via
-  //      FieldValue.increment(±1) so cached counts in the app's home
-  //      feeds stay in sync with the rsvps subcollection.
+  // RSVP form submit handler. Each submit creates a NEW rsvp doc with
+  // an auto-generated id — multiple guests sharing the same device (or
+  // browser session) can each RSVP independently without overwriting
+  // each other. The previous email-as-doc-id scheme meant the second
+  // person to RSVP from the same phone clobbered the first; auto-ids
+  // remove that footgun. The trade-off is that one guest who edits
+  // their RSVP creates a duplicate row instead of replacing — that's
+  // acceptable here because the live headcount listener tallies people
+  // (not docs) and dupes can be cleaned up by the host.
   //
-  // Web RSVPs always represent 1 person — the form only collects
-  // name/email/status (no adults/children/plusOnes), so prev and new
-  // headcounts are both 1 here. The math still mirrors the app's
-  // _saveRsvp transaction structure so a future enhancement that
-  // collects party size on the web works without a rewrite.
+  // The parent event's yes/maybe/no counters are bumped via increment
+  // so the app's cached count stays in sync. Each web RSVP represents
+  // 1 person (the form doesn't collect party size).
   function submitRsvp(ev) {
     if (ev && ev.preventDefault) ev.preventDefault();
     var name  = (document.getElementById('rsvp-name').value  || '').trim();
@@ -746,71 +788,52 @@
 
     setError('');
     setSubmitting(true);
-    console.log('[QRParty] writing rsvp email=' + email + ' status=' + _selectedStatus);
+    var headcount = _selectedCount;
+    if (headcount < 1) headcount = 1;
+    if (headcount > 5) headcount = 5;
+    console.log('[QRParty] writing rsvp email=' + email + ' status=' + _selectedStatus + ' count=' + headcount);
 
-    var rsvpRef = _resolvedEventRef.collection('rsvps').doc(email);
+    var rsvpRef = _resolvedEventRef.collection('rsvps').doc();
     var newStatus = _selectedStatus;
-    var newHeadcount = 1; // web visitors are always 1 person
 
-    db.runTransaction(function (tx) {
-      return tx.get(rsvpRef).then(function (snap) {
-        var prev = snap.exists ? (snap.data() || {}) : null;
-        var prevStatus = prev ? prev.status : null;
-        // Web RSVPs don't write count fields, so an existing web doc
-        // is always 1 person too. Any future schema that adds counts
-        // on the web will land here without changing the surrounding
-        // increment math.
-        var prevHeadcount = prev ? 1 : 0;
-
-        tx.set(rsvpRef, {
-          name: name,
-          email: email,
-          status: newStatus,
-          source: 'web',
-          timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-        });
-
-        // Compute counter deltas. Three cases:
-        //   • No prior RSVP    → +newHeadcount on newStatus
-        //   • Same status      → newHeadcount - prevHeadcount (zero on
-        //                        web today, but mirrors the app math)
-        //   • Status changed   → -prevHeadcount on prevStatus AND
-        //                        +newHeadcount on newStatus
-        var counters = {};
-        var inc = firebase.firestore.FieldValue.increment;
-        var newKey = newStatus.toLowerCase();
-        if (prevStatus === newStatus) {
-          var delta = newHeadcount - prevHeadcount;
-          if (delta !== 0) counters[newKey] = inc(delta);
-        } else {
-          if (prevStatus === 'Yes' || prevStatus === 'Maybe' || prevStatus === 'No') {
-            counters[prevStatus.toLowerCase()] = inc(-prevHeadcount);
-          }
-          counters[newKey] = inc(newHeadcount);
-        }
-        if (Object.keys(counters).length > 0) {
-          console.log('[QRParty] counter deltas', counters);
-          tx.update(_resolvedEventRef, counters);
-        }
+    rsvpRef.set({
+      name: name,
+      email: email,
+      status: newStatus,
+      // `adults` mirrors the field the app's RSVP flow writes and the
+      // live listener (subscribeRsvpCounts) sums when tallying. Web
+      // RSVPs no longer hardcode 1 — the chip selector lets a guest
+      // include their plus-ones in a single submission.
+      adults: headcount,
+      source: 'web',
+      timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+    }).then(function () {
+      // Best-effort counter bump on the parent event doc. Increments
+      // by the chosen headcount so the app's cached yes/maybe/no
+      // counters stay in sync with the rsvps subcollection. Failures
+      // here are logged but don't block the success state.
+      var counters = {};
+      counters[newStatus.toLowerCase()] = firebase.firestore.FieldValue.increment(headcount);
+      return _resolvedEventRef.update(counters).catch(function (err) {
+        console.warn('[QRParty] counter bump failed (rsvp still saved): ' + err.code);
       });
-    })
-      .then(function () {
-        console.log('[QRParty] rsvp written + parent counters synced');
-        document.getElementById('rsvp-success-line').textContent =
-          'Thanks ' + name + ' — your "' + newStatus + '" RSVP is on file.';
-        showState('success');
-      })
-      .catch(function (err) {
-        console.error('[QRParty] rsvp transaction failed code=' + err.code + ' message=' + err.message);
-        var msg = 'Could not submit your RSVP.';
-        if (err.code === 'permission-denied') {
-          msg = 'Submitting blocked — check that your email is valid.';
-        } else if (err.code === 'unavailable') {
-          msg = 'Network issue — please try again.';
-        }
-        setError(msg);
-        setSubmitting(false);
-      });
+    }).then(function () {
+      console.log('[QRParty] rsvp written');
+      var peopleLabel = headcount === 1 ? '1 person' : headcount + ' people';
+      document.getElementById('rsvp-success-line').textContent =
+        'Thanks ' + name + ' — your "' + newStatus + '" RSVP for ' + peopleLabel + ' is on file.';
+      showState('success');
+    }).catch(function (err) {
+      console.error('[QRParty] rsvp write failed code=' + err.code + ' message=' + err.message);
+      var msg = 'Could not submit your RSVP.';
+      if (err.code === 'permission-denied') {
+        msg = 'Submitting blocked — check that your email is valid.';
+      } else if (err.code === 'unavailable') {
+        msg = 'Network issue — please try again.';
+      }
+      setError(msg);
+      setSubmitting(false);
+    });
     return false;
   }
 
@@ -855,6 +878,7 @@
   window.openRsvpForm   = openRsvpForm;
   window.closeRsvpModal = closeRsvpModal;
   window.setRsvpStatus  = setRsvpStatus;
+  window.setRsvpCount   = setRsvpCount;
   window.submitRsvp     = submitRsvp;
   // Checklist claim handlers — declared below near the modal markup.
   // Exposed on window so the inline onclick attributes on the dynamically-

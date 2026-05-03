@@ -916,7 +916,13 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
               color: Colors.white, borderRadius: BorderRadius.circular(12),
             ),
             child: QrImageView(
-              data: 'https://partywithqr.com/event?id=${widget.eventId}',
+              // Prefer the shortCode path form when we've resolved one
+              // (initState seeds + _resolveShortCode fetches). Legacy
+              // events without a shortCode fall back to the query-param
+              // form — both route through the same event.html resolver.
+              data: (_shortCode != null && _shortCode!.isNotEmpty)
+                  ? 'https://partywithqr.com/event/$_shortCode'
+                  : 'https://partywithqr.com/event?id=${widget.eventId}',
               backgroundColor: Colors.white,
             ),
           ),

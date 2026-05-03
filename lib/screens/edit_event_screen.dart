@@ -31,6 +31,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
   DateTime? _selectedDate;
   TimeOfDay? _selectedTime;
   bool _isPublic = false;
+  bool _isOutdoor = false;
   DateTime? _rsvpDeadline;
   bool _saving = false;
   bool _isBusiness = false;
@@ -67,8 +68,17 @@ class _EditEventScreenState extends State<EditEventScreen> {
   final TextEditingController _newItemQtyCtrl   = TextEditingController();
   // Focus target for the item-name field — refocused after the in-app
   // browser returns so the host can immediately edit the auto-extracted
-  // title. Mirrors the create-event screen.
+  // title. Mirrors the create-event screen. A second focus node is
+  // dedicated to the checklist add row so Both-mode events render two
+  // independent sections without their text fields stealing focus
+  // from each other.
   final FocusNode _itemNameFocus = FocusNode();
+  final FocusNode _checklistNameFocus = FocusNode();
+  // Secondary-field focus targets so the inline name field's Next
+  // button advances to the right input (qty for checklist, price
+  // for wishlist). Mirrors the create-event screen.
+  final FocusNode _checklistQtyFocus = FocusNode();
+  final FocusNode _wishlistPriceFocus = FocusNode();
 
   /// Retailer chip catalog — uses the retailer's canonical https URL
   /// rather than a custom URI scheme. Most modern retailer apps register
@@ -104,6 +114,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
     _locationController = TextEditingController(text: (d['location'] as String?) ?? '');
     _descController = TextEditingController(text: (d['description'] as String?) ?? '');
     _isPublic = (d['isPublic'] as bool?) ?? false;
+    _isOutdoor = (d['isOutdoor'] as bool?) ?? false;
     final ts = d['date'] as Timestamp?;
     if (ts != null) {
       _selectedDate = ts.toDate();
@@ -145,6 +156,9 @@ class _EditEventScreenState extends State<EditEventScreen> {
     _newItemNameCtrl.dispose();
     _newItemPriceCtrl.dispose();
     _itemNameFocus.dispose();
+    _checklistNameFocus.dispose();
+    _checklistQtyFocus.dispose();
+    _wishlistPriceFocus.dispose();
     _newItemQtyCtrl.dispose();
     super.dispose();
   }
@@ -172,19 +186,31 @@ class _EditEventScreenState extends State<EditEventScreen> {
       ),
     );
     if (!mounted || result == null) return;
+    // Use the WebView-extracted price when present; falls back to 0
+    // when the page didn't expose a parseable one. The result's
+    // price string is already cleaned (currency / commas stripped),
+    // so double.tryParse handles it directly.
+    final extractedPrice = double.tryParse(result.price) ?? 0.0;
     setState(() {
       _wishlistItems.add({
         'name': result.name,
-        // Default price 0 — WebView extraction can't reliably parse a
-        // price across retailers; the host edits it inline after we
-        // refocus the name field below.
-        'price': 0.0,
+        'price': extractedPrice,
         'contributed': 0.0,
         'bought': false,
+        // Items added through the retailer browser are always
+        // wishlist-kind. Stamping `kind` keeps Both-mode events
+        // routing them to the right tab on the guest screen.
+        'kind': 'wishlist',
         if (result.imageUrl.isNotEmpty) 'imageUrl': result.imageUrl,
         if (result.url.isNotEmpty) 'url': result.url,
       });
-      _newItemNameCtrl.text = result.name;
+      // Clear the form fields after adding (mirrors the create-event
+      // screen behavior) so the host sees the form is ready for the
+      // next item. Pre-filling here previously caused duplicate adds
+      // when a host tapped + thinking the item hadn't landed yet.
+      _newItemNameCtrl.clear();
+      _newItemPriceCtrl.clear();
+      _newItemQtyCtrl.clear();
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -193,16 +219,33 @@ class _EditEventScreenState extends State<EditEventScreen> {
   }
 
   // ── Wishlist add/remove ────────────────────────────────────────
-  void _addWishlistItem() {
+  // Stamps the per-item `kind` field on every add. Without it,
+  // Both-mode events couldn't route items to the right tab on the
+  // guest screen — the parser there falls back to listType-based
+  // inference, which can't distinguish wishlist-vs-checklist items
+  // sharing one mixed array. The [kind] argument lets a Both-mode
+  // event drive two separate Add buttons (one per section) into the
+  // same shared controllers, while single-mode events default to
+  // whichever kind matches the active listType.
+  void _addWishlistItem({String? kind}) {
     final name = _newItemNameCtrl.text.trim();
     if (name.isEmpty) return;
+    final resolvedKind = kind ?? (_listType == 'Checklist' ? 'checklist' : 'wishlist');
     setState(() {
-      if (_listType == 'Checklist') {
+      if (resolvedKind == 'checklist') {
+        final qtyStr = _newItemQtyCtrl.text.trim();
+        // Parse the qty input as integer count needed. Stored as
+        // `quantityNeeded` so the guest screen can cap claims and
+        // chip choices to the unclaimed remainder. Mirrors the
+        // create-event screen's serialization.
+        final qtyNeeded = int.tryParse(qtyStr.replaceAll(RegExp(r'[^0-9]'), ''));
         _wishlistItems.add({
           'name': name,
-          'quantity': _newItemQtyCtrl.text.trim(),
+          'quantity': qtyStr,
+          if (qtyNeeded != null && qtyNeeded > 0) 'quantityNeeded': qtyNeeded,
           'claimed': 0,
           'claims': <Map<String, dynamic>>[],
+          'kind': 'checklist',
         });
       } else {
         final price = double.tryParse(_newItemPriceCtrl.text.trim()) ?? 0.0;
@@ -211,22 +254,35 @@ class _EditEventScreenState extends State<EditEventScreen> {
           'price': price,
           'contributed': 0.0,
           'bought': false,
+          'kind': 'wishlist',
         });
       }
       _newItemNameCtrl.clear();
       _newItemPriceCtrl.clear();
       _newItemQtyCtrl.clear();
     });
-    // Return focus to the name field so the host can type the next
-    // item without re-tapping. Without this, the keyboard's caret
-    // stays in whichever subfield (qty / price) the host last
-    // touched, and they have to tap the name field every time —
-    // friction that adds up when entering a long potluck list.
-    _itemNameFocus.requestFocus();
+    // Return focus to the section's name field so the host can type
+    // the next item without re-tapping. Without this, the keyboard's
+    // caret stays in whichever subfield (qty / price) the host last
+    // touched. Both-mode events route to the right focus node so the
+    // wishlist add doesn't yank focus into the checklist section.
+    (resolvedKind == 'checklist' ? _checklistNameFocus : _itemNameFocus)
+        .requestFocus();
   }
 
   void _removeWishlistItem(int index) {
     setState(() => _wishlistItems.removeAt(index));
+  }
+
+  /// Resolves an item's kind, falling back to a listType-based default
+  /// when the item lacks the field (legacy items written before the
+  /// `kind` discriminator existed). 'Both' events with missing kind
+  /// default to wishlist — least-destructive: the item shows up
+  /// somewhere instead of nowhere.
+  String _itemKindOf(Map<String, dynamic> item) {
+    final stored = item['kind'] as String?;
+    if (stored == 'wishlist' || stored == 'checklist') return stored!;
+    return _listType == 'Checklist' ? 'checklist' : 'wishlist';
   }
 
   Future<void> _checkBusinessAccount() async {
@@ -360,6 +416,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
         'date': _selectedDate != null ? Timestamp.fromDate(_selectedDate!) : d['date'],
         'time': newTimeStr,
         'isPublic': _isPublic,
+        'isOutdoor': _isOutdoor,
         'rsvpDeadline': _rsvpDeadline != null ? Timestamp.fromDate(_rsvpDeadline!) : null,
         'coHosts': _coHosts.map((c) => c['uid'] as String).toList(),
         // Capacity + waitlist are gated by _persistedCapacity so a 0 /
@@ -386,6 +443,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
           'eventTemplate.location':    _locationController.text.trim(),
           'eventTemplate.time':        newTimeStr,
           'eventTemplate.isPublic':    _isPublic,
+          'eventTemplate.isOutdoor':   _isOutdoor,
           'eventTemplate.coHosts':     _coHosts.map((c) => c['uid'] as String).toList(),
           'updatedAt': FieldValue.serverTimestamp(),
         });
@@ -656,6 +714,11 @@ class _EditEventScreenState extends State<EditEventScreen> {
         backgroundColor: _card,
         elevation: 0,
         leading: IconButton(icon: Icon(Icons.close, color: _isDark ? Colors.white : AppColors.dark), onPressed: () => Navigator.pop(context)),
+        // Emoji-only AppBar title — event name dropped to match the
+        // banner cleanup applied across the guest screen and the
+        // create-event step 3 banner. Form fields below show the
+        // event title in the editable Title TextField, so removing
+        // it from the AppBar isn't a context loss.
         title: (() {
           final emoji = (widget.eventData['eventEmoji'] as String?) ?? '🎉';
           final typeName = (widget.eventData['eventType'] as String?) ?? '';
@@ -666,8 +729,6 @@ class _EditEventScreenState extends State<EditEventScreen> {
               decoration: BoxDecoration(color: eventColor.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
               child: Center(child: Text(emoji, style: const TextStyle(fontSize: 20))),
             ),
-            const SizedBox(width: 10),
-            Expanded(child: Text(widget.eventData['title'] as String? ?? 'Edit Event', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark))),
           ]);
         })(),
         actions: [
@@ -727,15 +788,26 @@ class _EditEventScreenState extends State<EditEventScreen> {
             const SizedBox(height: 14),
           ],
           // Wishlist / Checklist editor — only relevant when the event
-          // has a list. Hidden entirely for `'No List'` events, and
-          // also hidden for `'Wishlist'` events while the Wishlist beta
-          // gate is closed (`kWishlistEnabled = false`) so the host
-          // can't add wishlist items via this screen during beta. The
+          // has a list. Hidden entirely for `'No List'` events. Both
+          // mode renders TWO sections so the host can add to either
+          // list independently; single-mode events render one. The
+          // wishlist section additionally respects the wishlist beta
+          // gate (`kWishlistEnabled`) so adds are blocked during beta
+          // even though the section itself stays visible. The
           // existing wishlist array on the event doc is preserved
           // either way; the editor section just doesn't render.
-          if (_listType == 'Checklist' ||
-              (_listType == 'Wishlist' && kWishlistEnabled)) ...[
-            _buildWishlistSection(),
+          if (_listType == 'Checklist') ...[
+            _buildWishlistSection('checklist'),
+            const SizedBox(height: 14),
+          ] else if (_listType == 'Wishlist' && kWishlistEnabled) ...[
+            _buildWishlistSection('wishlist'),
+            const SizedBox(height: 14),
+          ] else if (_listType == 'Both') ...[
+            if (kWishlistEnabled) ...[
+              _buildWishlistSection('wishlist'),
+              const SizedBox(height: 14),
+            ],
+            _buildWishlistSection('checklist'),
             const SizedBox(height: 14),
           ],
           _buildCapacitySection(),
@@ -753,6 +825,29 @@ class _EditEventScreenState extends State<EditEventScreen> {
               Switch(
                 value: _isPublic,
                 onChanged: (v) => setState(() => _isPublic = v),
+                activeTrackColor: AppColors.green,
+                activeThumbColor: Colors.white,
+              ),
+            ]),
+          ),
+          const SizedBox(height: 14),
+          // Outdoor toggle — drives the weather widget on the guest
+          // event screen. Mirrors the toggle in CreateEventScreen so
+          // hosts can flip the flag after the fact (e.g. if the
+          // weather forecast becomes more relevant).
+          _sectionCard(
+            child: Row(children: [
+              Icon(Icons.wb_sunny_outlined, size: 18, color: _isOutdoor ? AppColors.green : _muted),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Outdoor event', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isDark ? Colors.white : AppColors.dark)),
+                  Text(_isOutdoor ? 'Weather forecast shown on guest page' : 'Weather forecast hidden', style: TextStyle(fontSize: 12, color: _muted)),
+                ]),
+              ),
+              Switch(
+                value: _isOutdoor,
+                onChanged: (v) => setState(() => _isOutdoor = v),
                 activeTrackColor: AppColors.green,
                 activeThumbColor: Colors.white,
               ),
@@ -807,14 +902,25 @@ class _EditEventScreenState extends State<EditEventScreen> {
   );
 
   // ── Wishlist section ──────────────────────────────────────────
-  // Three blocks stacked: retailer chips at the top, the existing item
-  // list with per-row remove buttons in the middle, and an inline Add
-  // Item form at the bottom. Edits are kept in memory until the host
-  // hits Save in the AppBar — the existing _save() flushes _wishlistItems
-  // back to the events doc as the canonical wishlist array.
-  Widget _buildWishlistSection() {
+  // Three blocks stacked: retailer chips at the top (wishlist only),
+  // the existing item list (filtered to [kind]) with per-row remove
+  // buttons in the middle, and an inline Add Item form at the bottom.
+  // Edits are kept in memory until the host hits Save in the AppBar —
+  // the existing _save() flushes _wishlistItems back to the events
+  // doc as the canonical wishlist array. Both-mode events call this
+  // twice (once with 'wishlist', once with 'checklist'); each pass
+  // shows only items whose stored kind matches.
+  Widget _buildWishlistSection(String kind) {
     final fg = _isDark ? Colors.white : AppColors.dark;
-    final isChecklist = _listType == 'Checklist';
+    final isChecklist = kind == 'checklist';
+    // Pull the master-array indices of items whose kind matches this
+    // section. Indices flow through to _removeWishlistItem so deletes
+    // hit the right slot regardless of which section the row was
+    // rendered in.
+    final indices = <int>[];
+    for (var i = 0; i < _wishlistItems.length; i++) {
+      if (_itemKindOf(_wishlistItems[i]) == kind) indices.add(i);
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -859,9 +965,10 @@ class _EditEventScreenState extends State<EditEventScreen> {
           ),
           const SizedBox(height: 10),
         ],
-        // Existing items + per-row remove. Empty state shows a quiet
-        // hint so the host knows where to add.
-        if (_wishlistItems.isEmpty)
+        // Existing items (filtered to this section's kind) + per-row
+        // remove. Empty state shows a quiet hint so the host knows
+        // where to add.
+        if (indices.isEmpty)
           _sectionCard(
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 6),
@@ -875,42 +982,81 @@ class _EditEventScreenState extends State<EditEventScreen> {
           )
         else
           Column(children: [
-            for (int i = 0; i < _wishlistItems.length; i++) ...[
-              _sectionCard(
-                child: Row(children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          (_wishlistItems[i]['name'] as String?) ?? '',
-                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: fg),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          isChecklist
-                              ? ((_wishlistItems[i]['quantity'] as String?)?.isNotEmpty == true
-                                  ? 'Qty: ${_wishlistItems[i]['quantity']}'
-                                  : 'No quantity set')
-                              : '\$${(((_wishlistItems[i]['price'] as num?) ?? 0).toDouble()).toStringAsFixed(2)}',
-                          style: TextStyle(fontSize: 12, color: _muted),
-                        ),
-                      ],
+            for (var pos = 0; pos < indices.length; pos++) ...[
+              Builder(builder: (_) {
+                final i = indices[pos];
+                final item = _wishlistItems[i];
+                if (isChecklist) {
+                  // Editable checklist tile — exposes a small numeric
+                  // qty field so the host can backfill quantityNeeded
+                  // on items created before the typed quantity flow
+                  // existed. Updates land directly in the in-memory
+                  // _wishlistItems map; the existing _save() flushes
+                  // the whole array to Firestore on Save, so no
+                  // separate persistence path is needed.
+                  return _ChecklistItemEditTile(
+                    // ValueKey ties the row's State to the item's
+                    // identity (name) so reordering / removing
+                    // doesn't recycle a controller into the wrong
+                    // row.
+                    key: ValueKey('cl-edit-${(item['name'] as String?) ?? ''}-$i'),
+                    item: item,
+                    fg: fg,
+                    muted: _muted,
+                    border: _border,
+                    bg: _bg,
+                    onRemove: () => _removeWishlistItem(i),
+                    onQtyChanged: (newQty) {
+                      // Update both the typed `quantityNeeded` (drives
+                      // the guest screen's claim cap) and the legacy
+                      // `quantity` String so old display paths stay
+                      // in sync. Skipping setState — the row owns its
+                      // controller so no parent rebuild needed.
+                      if (newQty == null) {
+                        _wishlistItems[i].remove('quantityNeeded');
+                        _wishlistItems[i]['quantity'] = '';
+                      } else {
+                        _wishlistItems[i]['quantityNeeded'] = newQty;
+                        _wishlistItems[i]['quantity'] = newQty.toString();
+                      }
+                    },
+                  );
+                }
+                return _sectionCard(
+                  child: Row(children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            (item['name'] as String?) ?? '',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: fg),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '\$${(((item['price'] as num?) ?? 0).toDouble()).toStringAsFixed(2)}',
+                            style: TextStyle(fontSize: 12, color: _muted),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
-                    tooltip: 'Remove',
-                    onPressed: () => _removeWishlistItem(i),
-                  ),
-                ]),
-              ),
-              if (i < _wishlistItems.length - 1) const SizedBox(height: 8),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
+                      tooltip: 'Remove',
+                      onPressed: () => _removeWishlistItem(i),
+                    ),
+                  ]),
+                );
+              }),
+              if (pos < indices.length - 1) const SizedBox(height: 8),
             ],
           ]),
         const SizedBox(height: 10),
         // Inline add form — name + (price OR quantity depending on
-        // listType) + green plus button.
+        // section's kind) + green plus button. Both-mode events
+        // share the underlying TextEditingControllers but route to
+        // different focus nodes so each section's name field tracks
+        // independently.
         _sectionCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -924,9 +1070,10 @@ class _EditEventScreenState extends State<EditEventScreen> {
                 Expanded(
                   child: TextField(
                     controller: _newItemNameCtrl,
-                    focusNode: _itemNameFocus,
+                    focusNode: isChecklist ? _checklistNameFocus : _itemNameFocus,
                     style: TextStyle(color: fg),
-                    onSubmitted: (_) => _addWishlistItem(),
+                    textInputAction: TextInputAction.next,
+                    onSubmitted: (_) => (isChecklist ? _checklistQtyFocus : _wishlistPriceFocus).requestFocus(),
                     decoration: InputDecoration(
                       hintText: isChecklist ? 'Item to bring' : 'Item name',
                       hintStyle: TextStyle(color: _muted, fontSize: 13),
@@ -942,16 +1089,18 @@ class _EditEventScreenState extends State<EditEventScreen> {
                 ),
                 const SizedBox(width: 8),
                 SizedBox(
-                  width: 92,
+                  width: 80,
                   child: TextField(
                     controller: isChecklist ? _newItemQtyCtrl : _newItemPriceCtrl,
+                    focusNode: isChecklist ? _checklistQtyFocus : _wishlistPriceFocus,
                     keyboardType: isChecklist
-                        ? TextInputType.text
+                        ? TextInputType.number
                         : const TextInputType.numberWithOptions(decimal: true),
+                    textInputAction: TextInputAction.done,
                     style: TextStyle(color: fg),
-                    onSubmitted: (_) => _addWishlistItem(),
+                    onSubmitted: (_) => _addWishlistItem(kind: kind),
                     decoration: InputDecoration(
-                      hintText: isChecklist ? '2 bags' : r'$ 0.00',
+                      hintText: isChecklist ? '× 12' : r'$ 0.00',
                       hintStyle: TextStyle(color: _muted, fontSize: 13),
                       isDense: true,
                       filled: true,
@@ -967,7 +1116,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
                 IconButton(
                   icon: const Icon(Icons.add_circle, color: AppColors.green, size: 28),
                   tooltip: 'Add item',
-                  onPressed: _addWishlistItem,
+                  onPressed: () => _addWishlistItem(kind: kind),
                 ),
               ]),
             ],
@@ -1000,6 +1149,117 @@ class _EditEventScreenState extends State<EditEventScreen> {
           ),
         ]),
       ),
+    );
+  }
+}
+
+/// Editable row for an existing checklist item on the edit-event
+/// screen. Owns its own qty controller (per-row state survives parent
+/// rebuilds via the ValueKey at the call site) so the host can type
+/// directly into the row instead of going back to the add form.
+/// Updates flow out via [onQtyChanged] which mutates the in-memory
+/// `_wishlistItems` map; the screen's existing _save() flushes the
+/// whole array to Firestore on Save.
+///
+/// Hydration prefers the typed `quantityNeeded` field, falling back
+/// to a leading-int parse of the legacy `quantity` String so an item
+/// originally created as "12 chairs" pre-fills "12" in the field
+/// instead of leaving the host to retype.
+class _ChecklistItemEditTile extends StatefulWidget {
+  final Map<String, dynamic> item;
+  final Color fg;
+  final Color muted;
+  final Color border;
+  final Color bg;
+  final VoidCallback onRemove;
+  final void Function(int? newQty) onQtyChanged;
+
+  const _ChecklistItemEditTile({
+    super.key,
+    required this.item,
+    required this.fg,
+    required this.muted,
+    required this.border,
+    required this.bg,
+    required this.onRemove,
+    required this.onQtyChanged,
+  });
+
+  @override
+  State<_ChecklistItemEditTile> createState() => _ChecklistItemEditTileState();
+}
+
+class _ChecklistItemEditTileState extends State<_ChecklistItemEditTile> {
+  late final TextEditingController _qtyCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _qtyCtrl = TextEditingController(text: _initialQtyText());
+  }
+
+  String _initialQtyText() {
+    final qn = widget.item['quantityNeeded'];
+    if (qn is num && qn > 0) return qn.toInt().toString();
+    final legacy = (widget.item['quantity'] as String?) ?? '';
+    final m = RegExp(r'\d+').firstMatch(legacy);
+    return m?.group(0) ?? '';
+  }
+
+  @override
+  void dispose() {
+    _qtyCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF383B56) : Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: widget.border),
+      ),
+      child: Row(children: [
+        Expanded(
+          child: Text(
+            (widget.item['name'] as String?) ?? '',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: widget.fg),
+          ),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 70,
+          child: TextField(
+            controller: _qtyCtrl,
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: widget.fg, fontWeight: FontWeight.w700, fontSize: 14),
+            decoration: InputDecoration(
+              hintText: '× 12',
+              hintStyle: TextStyle(color: widget.muted, fontSize: 13),
+              isDense: true,
+              filled: true,
+              fillColor: widget.bg,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: widget.border)),
+              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: widget.border)),
+              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.green, width: 1.5)),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            ),
+            onChanged: (v) {
+              final cleaned = v.replaceAll(RegExp(r'[^0-9]'), '');
+              final n = int.tryParse(cleaned);
+              widget.onQtyChanged(n != null && n > 0 ? n : null);
+            },
+          ),
+        ),
+        IconButton(
+          icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
+          tooltip: 'Remove',
+          onPressed: widget.onRemove,
+        ),
+      ]),
     );
   }
 }

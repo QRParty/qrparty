@@ -78,6 +78,11 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   bool _isCoHost = false;
   bool _isHostMode = false;
   bool _isArchived = false;
+  // True when the host marked the event as outdoor — gates the
+  // weather widget so indoor events don't surface a forecast pill
+  // that's irrelevant to them. Hydrated from `isOutdoor` on the
+  // event doc; defaults false for legacy events without the flag.
+  bool _isOutdoor = false;
   String? _hostId;
   bool _rsvpClosed = false;
   String _rsvpDeadlineLabel = '';
@@ -188,28 +193,132 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
 
   // Claim input (checklist tab)
   int? _activeClaimIndex;
-  final TextEditingController _claimAmountController = TextEditingController();
   bool _savingClaim = false;
+  // Selected quantity for the active claim. Replaces the prior
+  // free-text TextField — guests pick from preset chips (1–5, 6+) so
+  // the saved value is always a clean tally rather than free-form
+  // copy like "a couple". Default 1 mirrors the most common case.
+  // Stored as a string so the existing claim payload shape (String
+  // amount) doesn't change.
+  String _activeClaimQty = '1';
+  static const List<String> _claimQtyOptions = ['1', '2', '3', '4', '5'];
+  // Manual-entry escape hatch for the chip selector — tapping the
+  // "or enter amount" link below the chips swaps the chip row for a
+  // numeric TextField so a guest can type any number (30 cups, 12
+  // chairs, etc.) without being constrained to 1–6+. The controller
+  // is preserved across rebuilds while the active claim sheet is
+  // open; closing/confirming/saving resets both fields back to chip
+  // mode for the next item.
+  bool _activeClaimManualMode = false;
+  final TextEditingController _claimManualCtrl = TextEditingController();
 
-  double get totalWishlistValue => wishlistItems.fold(0, (sum, i) => sum + (i['price'] as double));
-  double get totalContributed => wishlistItems.fold(0, (sum, i) => sum + (i['contributed'] as double));
+  /// Numeric value behind a chip label. '6+' counts as 6 for cap
+  /// math; everything else parses straight. Default 1 keeps the
+  /// arithmetic safe even on malformed legacy entries.
+  int _claimAmountValue(String? amount) {
+    if (amount == null) return 1;
+    if (amount == '6+') return 6;
+    return int.tryParse(amount) ?? 1;
+  }
+
+  /// Sum of every guest's claim amount on a checklist item. Drives
+  /// the "X/Y claimed" header and the chip-cap math. Skips entries
+  /// that have no parseable amount (defaults to 1 each so legacy
+  /// claims still register as one person bringing one of the item).
+  int _itemTotalClaimed(Map<String, dynamic> item) {
+    final claims = (item['claims'] as List?) ?? const [];
+    return claims.fold<int>(
+      0,
+      (sum, c) => sum + _claimAmountValue((c as Map?)?['amount'] as String?),
+    );
+  }
+
+  /// Host-set quantity needed for a checklist item. Reads
+  /// `quantityNeeded` (int) when present; falls back to parsing a
+  /// leading integer out of the legacy free-form `quantity` String
+  /// (e.g. "12 chairs" → 12). Returns null when neither yields a
+  /// usable count — caller should treat that as "no cap".
+  int? _itemQuantityNeeded(Map<String, dynamic> item) {
+    final raw = item['quantityNeeded'];
+    if (raw is num && raw > 0) return raw.toInt();
+    final str = (item['quantity'] as String?) ?? '';
+    final m = RegExp(r'\d+').firstMatch(str);
+    if (m == null) return null;
+    final parsed = int.tryParse(m.group(0)!);
+    return (parsed != null && parsed > 0) ? parsed : null;
+  }
+
+  // Filter to wishlist-kind items before folding — checklist items
+  // have no `price` / `contributed` field, so a Both-mode event with
+  // a checklist item used to crash here on `null as double`. Cast
+  // through `num?` so int-shaped legacy values also lift cleanly.
+  double get totalWishlistValue => wishlistItems
+      .where((i) => _itemKind(i) == 'wishlist')
+      .fold<double>(0, (sum, i) => sum + ((i['price'] as num?)?.toDouble() ?? 0.0));
+  double get totalContributed => wishlistItems
+      .where((i) => _itemKind(i) == 'wishlist')
+      .fold<double>(0, (sum, i) => sum + ((i['contributed'] as num?)?.toDouble() ?? 0.0));
 
   /// Whether the middle tab (Checklist/Wishlist) should render. Hidden
   /// when the event has no list at all, OR when the event's list type
   /// is `Wishlist` while the Wishlist beta gate is closed
   /// (`kWishlistEnabled = false`). Existing wishlist data on the event
   /// doc is preserved either way; only the UI surface is suppressed.
-  bool get _showListTab {
-    if (listType == 'No List') return false;
-    if (listType == 'Wishlist' && !kWishlistEnabled) return false;
-    return true;
+  /// Per-kind visibility derived from [listType]. The host editor
+  /// writes one of {'No List','Wishlist','Checklist','Both'}; in Both
+  /// mode the guest screen renders TWO list tabs (Wishlist AND
+  /// Checklist) instead of one. Both flags also gate visibility of
+  /// the kWishlistEnabled beta toggle for the wishlist surface.
+  bool get _hasWishlist =>
+      kWishlistEnabled && (listType == 'Wishlist' || listType == 'Both');
+  bool get _hasChecklist =>
+      listType == 'Checklist' || listType == 'Both';
+
+  /// Resolves the per-item kind. Items written by the new editor
+  /// carry an explicit `kind` field; legacy items (no field) infer
+  /// from listType — a 'Wishlist' event's items are wishlist, a
+  /// 'Checklist' event's items are checklist. For 'Both' events
+  /// without a `kind` field, the price field decides: a positive
+  /// price means wishlist (someone meant for it to be gifted /
+  /// contributed to), and a missing or zero price means checklist
+  /// (potluck/RSVP item where guests claim what they'll bring).
+  /// This auto-routes legacy data without a Firestore migration.
+  String _itemKind(Map<String, dynamic> item) {
+    final stored = item['kind'] as String?;
+    if (stored == 'wishlist' || stored == 'checklist') return stored!;
+    if (listType == 'Checklist') return 'checklist';
+    if (listType == 'Both') {
+      final price = (item['price'] as num?)?.toDouble() ?? 0.0;
+      return price > 0 ? 'wishlist' : 'checklist';
+    }
+    return 'wishlist';
+  }
+
+  /// Original-array indices of items that match [kind]. Returned
+  /// indices reference [wishlistItems] directly so per-item mutations
+  /// (claim, contribute, bought toggle) keep working without
+  /// translating between filtered and master indexes. In single-mode
+  /// events (not 'Both'), this returns every index since all items
+  /// implicitly belong to the active kind.
+  List<int> _indicesOfKind(String kind) {
+    if (listType != 'Both') {
+      return List.generate(wishlistItems.length, (i) => i);
+    }
+    final out = <int>[];
+    for (var i = 0; i < wishlistItems.length; i++) {
+      if (_itemKind(wishlistItems[i]) == kind) out.add(i);
+    }
+    return out;
   }
 
   @override
   void initState() {
     super.initState();
     _initEventData(); // must run first to set listType
-    _tabController = TabController(length: _showListTab ? 3 : 2, vsync: this);
+    // Tab count = 2 (Info + Photos) + 1 per active list. Both mode
+    // gives 4 tabs; single-list mode gives 3; No-List gives 2.
+    final listTabs = (_hasWishlist ? 1 : 0) + (_hasChecklist ? 1 : 0);
+    _tabController = TabController(length: 2 + listTabs, vsync: this);
     _welcomeCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
     _welcomeAnim = CurvedAnimation(parent: _welcomeCtrl, curve: Curves.easeIn);
     if (widget.isOnboarding) {
@@ -342,30 +451,60 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       // Raw-doc dump on every snapshot so any host/guest count mismatch
       // can be diagnosed by comparing what each device received from
       // Firestore. Look for `[RSVP] snapshot` lines in flutter logs.
-      debugPrint('[RSVP] snapshot eventId=${widget.eventId} docs=${snap.docs.length}');
+      debugPrint('[RSVP] snapshot eventId=${widget.eventId} docs=${snap.docs.length} fromCache=${snap.metadata.isFromCache} hasPending=${snap.metadata.hasPendingWrites}');
       for (final doc in snap.docs) {
         final d = doc.data();
         debugPrint('[RSVP]   docId=${doc.id} status=${d['status']} adults=${d['adults']} children=${d['children']} plusOnes=${d['plusOnes']} source=${d['source']} email=${d['email']}');
       }
+      // Defensive merge: if the snapshot is missing the current
+      // user's own RSVP but we DO have an optimistic copy from a
+      // recent _saveRsvp call, keep it in the displayed list. The
+      // snapshot is normally authoritative, but a brief read-rule
+      // hiccup or eventual-consistency window between the write
+      // and the listener fire used to wipe the optimistic entry —
+      // the counter pill would still reflect the write (the same
+      // _rsvps source) for a beat, but a subsequent empty snapshot
+      // would leave both empty. Stamping the user's own row back in
+      // when it's missing means the avatar row never goes blank
+      // for the person who just RSVPed.
+      final myUid = FirebaseAuth.instance.currentUser?.uid;
+      final fresh = snap.docs.map<Map<String, dynamic>>((doc) {
+        final d = doc.data();
+        return <String, dynamic>{
+          'uid': doc.id,
+          'name': (d['name'] as String?) ?? 'Guest',
+          'status': (d['status'] as String?) ?? 'Not Responded',
+          // Default of 1 preserves legacy behavior: app RSVPs written
+          // before the multi-person feature didn't have an `adults`
+          // field and represented 1 person. Web RSVPs (which never
+          // write the count fields) also count as 1 person, which
+          // matches product intent.
+          'adults': (d['adults'] as int?) ?? 1,
+          'children': (d['children'] as int?) ?? 0,
+          'plusOnes': (d['plusOnes'] as int?) ?? 0,
+          'source': (d['source'] as String?) ?? 'app',
+        };
+      }).toList();
+      if (myUid != null
+          && !fresh.any((r) => r['uid'] == myUid)
+          && _rsvps.any((r) => r['uid'] == myUid && r['status'] != 'Not Responded')) {
+        final mineLocal = _rsvps.firstWhere((r) => r['uid'] == myUid);
+        debugPrint('[RSVP] preserving local entry for myUid=$myUid (snapshot did not include it yet)');
+        fresh.add(mineLocal);
+      }
       setState(() {
-        _rsvps = snap.docs.map((doc) {
-          final d = doc.data();
-          return {
-            'uid': doc.id,
-            'name': (d['name'] as String?) ?? 'Guest',
-            'status': (d['status'] as String?) ?? 'Not Responded',
-            // Default of 1 preserves legacy behavior: app RSVPs written
-            // before the multi-person feature didn't have an `adults`
-            // field and represented 1 person. Web RSVPs (which never
-            // write the count fields) also count as 1 person, which
-            // matches product intent.
-            'adults': (d['adults'] as int?) ?? 1,
-            'children': (d['children'] as int?) ?? 0,
-            'plusOnes': (d['plusOnes'] as int?) ?? 0,
-            'source': (d['source'] as String?) ?? 'app',
-          };
-        }).toList();
+        _rsvps = fresh;
       });
+    },
+    // Subscriptions previously had no error handler, so a transient
+    // listener failure (auth-state churn, brief offline window,
+    // rules evaluation error) silently killed the stream and
+    // _rsvps was never updated again. Logging the error makes the
+    // failure visible in flutter logs; cancelOnError stays at the
+    // default false so Firestore's built-in reconnect can resume
+    // the stream once the underlying issue clears.
+    onError: (err, st) {
+      debugPrint('[RSVP] listener error eventId=${widget.eventId}: $err');
     });
   }
 
@@ -598,6 +737,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       }
       debugPrint('[GuestEventScreen] title="$eventTitle" eventHasEnded=$eventHasEnded');
       _isArchived = (data['isArchived'] as bool?) ?? false;
+      _isOutdoor  = (data['isOutdoor']  as bool?) ?? false;
       final hostId = data['hostId'] as String?;
       _hostId = hostId;
       final currentUid = FirebaseAuth.instance.currentUser?.uid;
@@ -631,23 +771,37 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
 
       listType = (data['listType'] as String?) ?? 'Wishlist';
 
+      // Parse every field on every item regardless of listType. Both
+      // mode mixes wishlist + checklist items in the same array, so
+      // narrowing the parsed shape based on listType silently drops
+      // the other kind's fields (quantity for checklist items in a
+      // Wishlist/Both event, price for wishlist items in a Checklist
+      // event). The downstream tabs gate on `_itemKind(item)` which
+      // reads the stored `kind` field — so preserving it here is
+      // load-bearing for the checklist tab to find its items.
       final rawWishlist = data['wishlist'] as List<dynamic>? ?? [];
       wishlistItems = rawWishlist.map((item) {
         final m = item as Map<String, dynamic>;
-        if (listType == 'Checklist') {
-          final rawClaims = m['claims'] as List<dynamic>? ?? [];
-          return {
-            'name': m['name'] as String? ?? '',
-            'quantity': m['quantity']?.toString() ?? '',
-            'claimed': (m['claimed'] as num?)?.toInt() ?? 0,
-            'claims': rawClaims.map((c) => Map<String, dynamic>.from(c as Map)).toList(),
-          };
-        }
-        return {
+        final rawClaims = m['claims'] as List<dynamic>? ?? [];
+        return <String, dynamic>{
           'name': m['name'] as String? ?? '',
+          'kind': m['kind'] as String?,
+          // Wishlist fields
           'price': (m['price'] as num?)?.toDouble() ?? 0.0,
           'contributed': (m['contributed'] as num?)?.toDouble() ?? 0.0,
           'bought': m['bought'] as bool? ?? false,
+          // Buyer info stamped by the "Buy & Bring" flow — `{uid,
+          // name}`. Distinct from the legacy/cart-based bought flag,
+          // which clears `contributed` to price without recording who.
+          // Presence of boughtBy flips the badge from "Bought ✓" to
+          // "Buying it 🛍️" so the host can see who's handling it.
+          if (m['boughtBy'] is Map) 'boughtBy': Map<String, dynamic>.from(m['boughtBy'] as Map),
+          // Checklist fields
+          'quantity': m['quantity']?.toString() ?? '',
+          'claimed': (m['claimed'] as num?)?.toInt() ?? 0,
+          'claims': rawClaims.map((c) => Map<String, dynamic>.from(c as Map)).toList(),
+          if (m['imageUrl'] is String) 'imageUrl': m['imageUrl'],
+          if (m['url'] is String) 'url': m['url'],
         };
       }).toList();
     } else {
@@ -673,8 +827,8 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     _contribSub?.cancel();
     _tabController.dispose();
     _welcomeCtrl.dispose();
-    _claimAmountController.dispose();
     _plusOnesController.dispose();
+    _claimManualCtrl.dispose();
     if (widget.isOnboarding) _completeOnboarding();
     super.dispose();
   }
@@ -765,6 +919,177 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     });
   }
 
+  /// "Buy & Bring" flow — distinct from the cart/Stripe `_toggleBuy`
+  /// path that's gated behind kTestingMode. Opens the item's external
+  /// retailer URL (if any) so the guest can purchase it directly,
+  /// then asks "Did you buy it?" via a confirmation dialog. On
+  /// confirm, the item is marked bought + contributed=price and the
+  /// buyer's uid+name is stamped under `boughtBy`. Other guests see
+  /// the "Buying it 🛍️" badge and contribute buttons disappear so
+  /// nobody double-buys.
+  Future<void> _buyAndBring(int itemIdx) async {
+    final item = wishlistItems[itemIdx];
+    final url = (item['url'] as String?) ?? '';
+    final name = (item['name'] as String?) ?? 'this item';
+
+    // 1. Open the URL if present so the guest can complete the
+    //    purchase on the retailer's site/app. We don't block the
+    //    confirmation dialog on launchUrl success — even if the
+    //    launch failed, the guest may already have bought via
+    //    another channel and just want to mark it.
+    if (url.isNotEmpty) {
+      final uri = Uri.tryParse(url);
+      if (uri != null) {
+        try {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        } catch (e) {
+          debugPrint('[BuyAndBring] launchUrl failed for $url: $e');
+        }
+      }
+    }
+    if (!mounted) return;
+
+    // 2. Confirmation dialog. The guest may have just opened the
+    //    retailer page and not actually committed yet — "Not yet"
+    //    leaves the item open so they (or someone else) can claim
+    //    it later.
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          'Got it covered?',
+          style: TextStyle(
+            fontFamily: 'FredokaOne', fontSize: 18,
+            color: _isDark ? Colors.white : AppColors.dark,
+          ),
+        ),
+        content: Text(
+          url.isEmpty
+              ? 'Marking "$name" as taken care of lets the host know. Other guests won\'t be able to contribute toward it after — you can undo from the item card.'
+              : 'If you\'re bringing "$name", we\'ll mark it as taken care of and let the host know. Other guests won\'t be able to contribute toward it after — you can undo from the item card.',
+          style: TextStyle(fontFamily: 'Nunito', color: _muted, fontSize: 13, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Not yet', style: TextStyle(color: _muted, fontWeight: FontWeight.w700)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.purple,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            ),
+            child: const Text("Yes, I'll bring it", style: TextStyle(fontWeight: FontWeight.w800)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    // 3. Stamp the buyer + flip bought+contributed via a transaction
+    //    against the master wishlist array. Mirrors the read-modify-
+    //    write pattern used by _saveClaimToFirestore.
+    await _markBoughtViaBuyBring(itemIdx);
+  }
+
+  Future<void> _markBoughtViaBuyBring(int itemIdx) async {
+    if (widget.eventId == null) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final price = (wishlistItems[itemIdx]['price'] as num?)?.toDouble() ?? 0.0;
+    final buyerName = user.displayName ?? 'Guest';
+    final boughtBy = <String, dynamic>{'uid': user.uid, 'name': buyerName};
+    final eventRef = FirebaseFirestore.instance.collection('events').doc(widget.eventId);
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final snap = await tx.get(eventRef);
+        final rawWishlist = List<Map<String, dynamic>>.from(
+          (snap.data()?['wishlist'] as List<dynamic>? ?? []).map((e) => Map<String, dynamic>.from(e as Map)),
+        );
+        if (itemIdx >= rawWishlist.length) return;
+        rawWishlist[itemIdx]['bought'] = true;
+        rawWishlist[itemIdx]['contributed'] = price;
+        rawWishlist[itemIdx]['boughtBy'] = boughtBy;
+        tx.update(eventRef, {'wishlist': rawWishlist});
+      });
+
+      if (mounted) {
+        setState(() {
+          wishlistItems[itemIdx]['bought'] = true;
+          wishlistItems[itemIdx]['contributed'] = price;
+          wishlistItems[itemIdx]['boughtBy'] = boughtBy;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('You\'re bringing "${wishlistItems[itemIdx]['name']}" 🛍️'),
+          backgroundColor: AppColors.purple,
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not save: $e'),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
+    }
+  }
+
+  /// Reverses a "Bring It" claim that the current user made earlier
+  /// — clears `bought`, zeroes `contributed`, and removes the
+  /// `boughtBy` stamp so the item returns to its open state and the
+  /// contribute / Bring It buttons reappear for everyone (including
+  /// the original claimer who can re-claim later). The undo button
+  /// only surfaces on the wishlist item card when
+  /// `boughtBy.uid == current user`, so this should never be called
+  /// against someone else's claim, but the transaction re-checks the
+  /// uid on the server too as a defensive guard.
+  Future<void> _undoBuyAndBring(int itemIdx) async {
+    if (widget.eventId == null) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final eventRef = FirebaseFirestore.instance.collection('events').doc(widget.eventId);
+    try {
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final snap = await tx.get(eventRef);
+        final rawWishlist = List<Map<String, dynamic>>.from(
+          (snap.data()?['wishlist'] as List<dynamic>? ?? []).map((e) => Map<String, dynamic>.from(e as Map)),
+        );
+        if (itemIdx >= rawWishlist.length) return;
+        final by = rawWishlist[itemIdx]['boughtBy'];
+        // Server-side guard — only undo when the current user is the
+        // recorded buyer. Prevents a stale UI tap from clobbering
+        // someone else's claim if the snapshot listener dropped a
+        // beat.
+        if (by is! Map || by['uid'] != user.uid) return;
+        rawWishlist[itemIdx]['bought'] = false;
+        rawWishlist[itemIdx]['contributed'] = 0.0;
+        rawWishlist[itemIdx].remove('boughtBy');
+        tx.update(eventRef, {'wishlist': rawWishlist});
+      });
+      if (mounted) {
+        setState(() {
+          wishlistItems[itemIdx]['bought'] = false;
+          wishlistItems[itemIdx]['contributed'] = 0.0;
+          wishlistItems[itemIdx].remove('boughtBy');
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not undo: $e'),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
+    }
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -778,14 +1103,18 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         iconTheme: IconThemeData(color: _isDark ? Colors.white : AppColors.dark),
+        // Emoji-only AppBar title — event name removed per the
+        // "drop banner text" cleanup. The colored emoji tile is
+        // enough visual identity at the top; the screen's tabs
+        // (Info & RSVP / Wishlist / Checklist / Photos) carry the
+        // contextual orientation. If the user needs the full event
+        // name, it's still shown prominently inside the Info tab.
         title: Row(children: [
           Container(
             width: 40, height: 40,
             decoration: BoxDecoration(color: eventColor.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
             child: Center(child: Text(eventEmoji, style: const TextStyle(fontSize: 20))),
           ),
-          const SizedBox(width: 10),
-          Expanded(child: Text(eventTitle, style: TextStyle(fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark, fontSize: 16))),
         ]),
         actions: (_isHost || _isCoHost) ? [
           Padding(
@@ -815,15 +1144,24 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           unselectedLabelColor: _muted,
           indicatorColor: AppColors.green,
           indicatorWeight: 2.5,
-          labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+          // 13px (was 14) so all four labels fit on narrow phones
+          // without ellipsis when Both-mode is active. The 4-tab
+          // layout (Info / Wishlist / Checklist / Photos) was tight
+          // at 14px on iPhone SE-class widths.
+          labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+          // Shortened from "Info & RSVP" — that label was being
+          // truncated to "Info & RSV" on Both-mode events. The tab
+          // body still includes RSVP controls, weather, host
+          // announcements, etc.; "Info" is the broader umbrella.
           tabs: [
-            const Tab(text: 'Info & RSVP'),
-            // Tab visibility is gated by _showListTab — covers both
-            // "No List" events and Wishlist events while the beta gate
-            // is closed. When shown the label is whichever variant is
-            // actually being rendered (Checklist or, if the gate ever
-            // re-opens, Wishlist).
-            if (_showListTab) Tab(text: listType == 'Checklist' ? 'Checklist' : 'Wishlist'),
+            const Tab(text: 'Info'),
+            // Per-list tabs, in a stable order regardless of which
+            // are active: Wishlist comes before Checklist in Both
+            // mode. The TabBarView children list below mirrors this
+            // ordering so the controller's index points at the right
+            // body for the visible tab.
+            if (_hasWishlist) const Tab(text: 'Wishlist'),
+            if (_hasChecklist) const Tab(text: 'Checklist'),
             const Tab(text: 'Photos'),
           ],
         ),
@@ -832,7 +1170,8 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         controller: _tabController,
         children: [
           _buildInfoTab(),
-          if (_showListTab) _buildWishlistTab(),
+          if (_hasWishlist) _buildWishlistTab(),
+          if (_hasChecklist) _buildChecklistTab(),
           _buildPhotosTab(),
         ],
       ),
@@ -959,7 +1298,15 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                   ),
                 ),
                 const SizedBox(height: 16),
-                if (!_isHostMode) ...[
+                // Weather widget — gated to outdoor events only. The
+                // host opts in via the "Outdoor event" toggle on
+                // create / edit; indoor events get nothing here so
+                // the forecast pill doesn't surface where it's
+                // irrelevant. _buildWeatherWidget itself still
+                // self-hides when geocoding failed or the event is
+                // >7 days out — this gate is the host-controlled
+                // outer switch.
+                if (_isOutdoor) ...[
                   _buildWeatherWidget(),
                   if (_weatherLoading || _weatherData != null) const SizedBox(height: 16),
                 ],
@@ -1073,34 +1420,29 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                          Text('Will you attend?', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
-                          Row(mainAxisSize: MainAxisSize.min, children: [
-                            if (_rsvpDeadlineLabel.isNotEmpty) ...[
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                decoration: BoxDecoration(color: const Color(0xFFFFF8E1), borderRadius: BorderRadius.circular(20)),
-                                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                                  const Icon(Icons.schedule, size: 12, color: AppColors.gold),
-                                  const SizedBox(width: 4),
-                                  Text('By $_rsvpDeadlineLabel', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.gold)),
+                          Expanded(
+                            child: Text('Will you attend?', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
+                          ),
+                          // The deadline banner used to live here next to
+                          // the title; pairing it with the Add-to-Calendar
+                          // pill on the same line caused a 54px overflow on
+                          // narrow phones once the deadline was set. The
+                          // banner now renders below the Yes/Maybe/No
+                          // chips (see _rsvpDeadlineLabel block further
+                          // down) so the header stays single-line.
+                          if (rsvpStatus == 'Yes')
+                            GestureDetector(
+                              onTap: _addToCalendar,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(color: AppColors.dark, borderRadius: BorderRadius.circular(10)),
+                                child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                                  Icon(Icons.calendar_month_outlined, size: 12, color: Colors.white),
+                                  SizedBox(width: 4),
+                                  Text('Add to Calendar', style: TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.w600)),
                                 ]),
                               ),
-                              if (rsvpStatus == 'Yes') const SizedBox(width: 8),
-                            ],
-                            if (rsvpStatus == 'Yes')
-                              GestureDetector(
-                                onTap: _addToCalendar,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                  decoration: BoxDecoration(color: AppColors.dark, borderRadius: BorderRadius.circular(10)),
-                                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                                    Icon(Icons.calendar_month_outlined, size: 12, color: Colors.white),
-                                    SizedBox(width: 4),
-                                    Text('Add to Calendar', style: TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.w600)),
-                                  ]),
-                                ),
-                              ),
-                          ]),
+                            ),
                         ]),
                         const SizedBox(height: 14),
                         Builder(builder: (_) {
@@ -1124,6 +1466,25 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                               const SizedBox(width: 10),
                               Expanded(child: _rsvpButton('No', Colors.redAccent)),
                             ]),
+                            // Deadline banner — moved here from the
+                            // header row to keep the title line single-
+                            // line. Centered below the chips so it reads
+                            // as a soft reminder rather than competing
+                            // with the title.
+                            if (_rsvpDeadlineLabel.isNotEmpty) ...[
+                              const SizedBox(height: 10),
+                              Center(
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(color: const Color(0xFFFFF8E1), borderRadius: BorderRadius.circular(20)),
+                                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                    const Icon(Icons.schedule, size: 12, color: AppColors.gold),
+                                    const SizedBox(width: 4),
+                                    Text('RSVP by $_rsvpDeadlineLabel', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.gold)),
+                                  ]),
+                                ),
+                              ),
+                            ],
                             if (isFull) ...[
                               const SizedBox(height: 12),
                               Row(children: [
@@ -1295,8 +1656,33 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                     ),
                 ]),
                 const SizedBox(height: 10),
-                _announcementCard("Don't forget to bring a gift! 🎁", '2 hours ago'),
-                _announcementCard("Parking is available on Celebration Lane 🚗", 'Yesterday'),
+                // No announcements pipeline reads back into this
+                // screen yet — host-sent announcements go out via push
+                // / email through HostNotificationsScreen and aren't
+                // mirrored to a per-event subcollection. Until that
+                // pipeline exists, render an empty state rather than
+                // the previous hardcoded placeholders, which made it
+                // look like every event had two phantom announcements.
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                  decoration: BoxDecoration(
+                    color: _card,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: _border),
+                  ),
+                  child: Row(children: [
+                    Icon(Icons.campaign_outlined, size: 18, color: _muted),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        (_isHost || _isCoHost)
+                            ? 'No announcements sent yet. Tap Manage to send one.'
+                            : 'No announcements yet.',
+                        style: TextStyle(fontSize: 13, color: _muted),
+                      ),
+                    ),
+                  ]),
+                ),
                 if (_isHostMode) ...[
                   const SizedBox(height: 20),
                   _buildRunningLateButton(),
@@ -1354,21 +1740,35 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       return;
     }
 
-    // Build an ordered list of geocoder candidate strings. We try them
-    // in order, keeping the first that resolves. Open-Meteo's
-    // geocoder is NAME-based — raw US ZIP codes don't resolve, which
-    // is why preferring `zipCode` on its own caused most queries to
-    // silently return zero hits. Order chosen to maximize hit rate:
-    //   1. explicit zip + country (open-meteo accepts "94103,US"
-    //      style limited inputs in some regions)
-    //   2. city pulled out of the comma-delimited location string
-    //   3. the raw location string itself, trimmed
-    //   4. the bare zip as a last resort
+    // Build candidate queries with state + country context up
+    // front. Open-Meteo's geocoder is name-based and disambiguates
+    // by population, so a bare "Seaside" picks Seaside, FL (more
+    // populous) over Seaside, CA — wrong city, wildly wrong
+    // weather. _parseLocation pulls out the state when present so
+    // we can build "Seaside, California, US" as the highest-priority
+    // query. The expectedState below is also used to FILTER the
+    // multi-result response in the geocode loop, picking the
+    // California row even if it wasn't first in the list.
     final loc = (data['location'] as String?)?.trim() ?? '';
     final zip = (data['zipCode'] as String?)?.trim() ?? '';
+    final parsed = _parseLocation(loc);
+    final expectedState = parsed.state; // e.g. "California"
+    final city = parsed.city;
     final candidates = <String>[
+      // Most specific first: city + canonical state name + country.
+      if (city != null && expectedState != null)
+        '$city, $expectedState, US',
+      // City + state alone (no country) — covers cases where the
+      // geocoder dislikes the trailing country.
+      if (city != null && expectedState != null)
+        '$city, $expectedState',
+      // Zip + country — only resolves in some regions but cheap.
       if (zip.isNotEmpty) '$zip, US',
-      if (loc.isNotEmpty) _extractCity(loc),
+      // Bare city — last-resort name-only lookup; the admin1
+      // filter in the loop below catches mis-disambiguation here.
+      if (city != null) city,
+      // Raw location string (trimmed) and bare zip as final
+      // fallbacks for whatever shape an event might have.
       if (loc.isNotEmpty) loc,
       if (zip.isNotEmpty) zip,
     ].where((s) => s.isNotEmpty).toSet().toList();
@@ -1376,31 +1776,84 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       debugPrint('[Weather] no usable location/zip on event — aborting');
       return;
     }
+    debugPrint('[Weather] parsed location: city="$city" state="$expectedState"');
+    debugPrint('[Weather] candidates (in order): $candidates');
+    debugPrint('[Weather] event location raw="$loc" zip="$zip"');
 
     if (mounted) setState(() => _weatherLoading = true);
     try {
       double? lat;
       double? lon;
       String? matchedQuery;
+      Map<String, dynamic>? geoTopResult;
       for (final query in candidates) {
+        // Ask for up to 10 results so we can filter by admin1
+        // when the geocoder's first pick disagrees with the parsed
+        // state. With count=1 the API picks by population only,
+        // which is exactly the failure mode that put Seaside, FL
+        // ahead of Seaside, CA on a bare "Seaside" query.
         final geoUri = Uri.parse(
           'https://geocoding-api.open-meteo.com/v1/search'
-          '?name=${Uri.encodeQueryComponent(query)}&count=1&language=en&format=json',
+          '?name=${Uri.encodeQueryComponent(query)}'
+          '&count=10&language=en&format=json',
         );
+        debugPrint('[Weather] geocode GET $geoUri');
         final geoRes = await http.get(geoUri).timeout(const Duration(seconds: 8));
         if (geoRes.statusCode != 200) {
           debugPrint('[Weather] geocode "$query" status=${geoRes.statusCode}');
           continue;
         }
+        final bodyPreview = geoRes.body.length > 2000
+            ? '${geoRes.body.substring(0, 2000)}…[+${geoRes.body.length - 2000}ch]'
+            : geoRes.body;
+        debugPrint('[Weather] geocode "$query" raw body: $bodyPreview');
         final geoJson = jsonDecode(geoRes.body) as Map<String, dynamic>;
-        final results = geoJson['results'] as List<dynamic>?;
+        final results = (geoJson['results'] as List<dynamic>?)
+            ?.cast<Map<String, dynamic>>();
         if (results == null || results.isEmpty) {
           debugPrint('[Weather] geocode "$query" no results — trying next candidate');
           continue;
         }
-        lat = (results[0]['latitude'] as num).toDouble();
-        lon = (results[0]['longitude'] as num).toDouble();
+
+        // Picker: prefer the result whose admin1 matches the
+        // parsed state. Match is case-insensitive substring so
+        // "California" matches "California" and "California, USA"
+        // (rare admin1 form) and the abbreviated "CA" (also rare).
+        // Falls back to results[0] when no state was parsed or no
+        // result matches it — same behaviour as before this fix
+        // for inputs without state context.
+        Map<String, dynamic> picked = results.first;
+        if (expectedState != null) {
+          final wantUpper = expectedState.toUpperCase();
+          for (final r in results) {
+            final admin1 = (r['admin1'] as String? ?? '').toUpperCase();
+            if (admin1.contains(wantUpper)
+                || admin1 == _resolveUsState(expectedState)?.toUpperCase()) {
+              picked = r;
+              break;
+            }
+          }
+          if (picked == results.first
+              && (picked['admin1'] as String? ?? '')
+                      .toUpperCase()
+                      .contains(wantUpper) ==
+                  false) {
+            debugPrint(
+                '[Weather] no result matched admin1≈"$expectedState" — falling back to top');
+          }
+        }
+        lat = (picked['latitude'] as num).toDouble();
+        lon = (picked['longitude'] as num).toDouble();
         matchedQuery = query;
+        geoTopResult = picked;
+        debugPrint('[Weather] geocode "$query" results=${results.length} '
+            'picked: name="${picked['name']}" '
+            'admin1="${picked['admin1']}" '
+            'admin2="${picked['admin2']}" '
+            'country="${picked['country']}" '
+            'lat=$lat lon=$lon '
+            'population=${picked['population']} '
+            'timezone=${picked['timezone']}');
         break;
       }
       if (lat == null || lon == null) {
@@ -1408,10 +1861,16 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         if (mounted) setState(() => _weatherLoading = false);
         return;
       }
-      debugPrint('[Weather] geocoded "$matchedQuery" → $lat,$lon');
+      debugPrint('[Weather] geocoded "$matchedQuery" → lat=$lat lon=$lon '
+          '(geoTopResult=$geoTopResult)');
 
       final dateStr =
           '${eventDay.year}-${eventDay.month.toString().padLeft(2, '0')}-${eventDay.day.toString().padLeft(2, '0')}';
+      debugPrint('[Weather] event ts (UTC)=${ts.toDate().toUtc()} '
+          'eventDay (local)=$eventDay '
+          'today (local)=$today '
+          'daysUntil=$daysUntil '
+          'dateStr=$dateStr');
 
       final wxUri = Uri.parse(
         'https://api.open-meteo.com/v1/forecast'
@@ -1420,15 +1879,33 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         '&temperature_unit=fahrenheit&timezone=auto'
         '&start_date=$dateStr&end_date=$dateStr',
       );
+      debugPrint('[Weather] forecast GET $wxUri');
       final wxRes = await http.get(wxUri).timeout(const Duration(seconds: 8));
       if (wxRes.statusCode != 200) {
-        debugPrint('[Weather] forecast status=${wxRes.statusCode}');
+        debugPrint('[Weather] forecast status=${wxRes.statusCode} body=${wxRes.body}');
         if (mounted) setState(() => _weatherLoading = false);
         return;
       }
+      // Full forecast body so we can compare what open-meteo
+      // returned against what we end up displaying. Particularly
+      // important when start_date == end_date but the API decides
+      // to honour the timezone shift and returns a different day.
+      final bodyPreview = wxRes.body.length > 4000
+          ? '${wxRes.body.substring(0, 4000)}…[+${wxRes.body.length - 4000}ch]'
+          : wxRes.body;
+      debugPrint('[Weather] forecast raw body: $bodyPreview');
       final wxJson = jsonDecode(wxRes.body) as Map<String, dynamic>;
+      // Top-level timezone fields tell you which TZ the API used to
+      // bucket the daily array — if it's a continent away from the
+      // expected one, the temps might be reading tomorrow's forecast.
+      debugPrint('[Weather] forecast meta: '
+          'timezone=${wxJson['timezone']} '
+          'timezone_abbreviation=${wxJson['timezone_abbreviation']} '
+          'utc_offset_seconds=${wxJson['utc_offset_seconds']} '
+          'elevation=${wxJson['elevation']}');
       final daily = wxJson['daily'] as Map<String, dynamic>?;
       if (daily == null) {
+        debugPrint('[Weather] forecast had no `daily` block');
         if (mounted) setState(() => _weatherLoading = false);
         return;
       }
@@ -1436,12 +1913,26 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       final codes = daily['weather_code'] as List<dynamic>;
       final maxTemps = daily['temperature_2m_max'] as List<dynamic>;
       final minTemps = daily['temperature_2m_min'] as List<dynamic>;
+      // Dump every day the API returned so we can verify we're
+      // reading the right slot. With start_date == end_date, this
+      // SHOULD be a single-day array, but if the request crossed a
+      // TZ boundary it could include the day before or after.
+      final times = daily['time'] as List<dynamic>?;
+      debugPrint('[Weather] daily.time=$times '
+          'codes=$codes '
+          'maxTemps=$maxTemps '
+          'minTemps=$minTemps');
       if (codes.isEmpty) {
+        debugPrint('[Weather] daily.weather_code is empty array');
         if (mounted) setState(() => _weatherLoading = false);
         return;
       }
 
       final code = (codes[0] as num).toInt();
+      debugPrint('[Weather] DISPLAY → date=${times != null && times.isNotEmpty ? times[0] : '?'} '
+          'code=$code (${_wmoCondition(code)}) '
+          'max=${maxTemps[0]}°F '
+          'min=${minTemps[0]}°F');
       if (mounted) {
         setState(() {
           _weatherLoading = false;
@@ -1470,17 +1961,82 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   /// which returned the *state* on 4-part addresses — the geocoder
   /// could resolve states but the lat/lon was hundreds of miles from
   /// the actual venue, hence "weather not updating" visually.
-  String _extractCity(String location) {
-    final parts = location.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
-    if (parts.isEmpty) return '';
-    if (parts.length == 1) return parts.first;
-    if (parts.length == 2) return parts.first;
-    // 3+ segments: index 1 is almost always the city. (Index 0 is the
-    // street; 2+ is state / zip / country in some order.) When the
-    // first segment is a number-prefixed street like "123 Main St",
-    // index 1 is reliable; when it's not (rare), the geocoder still
-    // tends to find a hit on the city anyway.
-    return parts[1];
+  /// Parses a free-form location string into (city, state) where
+  /// state is the canonical full name ("California") when found, or
+  /// null when no US state segment is recognizable. Used to enrich
+  /// the open-meteo geocoder query with admin1 context, so a query
+  /// for "Seaside" doesn't ambiguously match Seaside, Florida or
+  /// Seaside, Oregon when the host actually meant Seaside, California.
+  ///
+  /// Strategy: split by comma, walk segments from the END finding
+  /// the first one that matches a US state (full name OR two-letter
+  /// abbreviation). The segment immediately before is the city. If
+  /// no state segment matches, fall back to the single-/two-/three-
+  /// part heuristics from the prior `_extractCity` so events with
+  /// just "Seaside" or "Tokyo, Japan" still produce a usable query.
+  ({String? city, String? state}) _parseLocation(String location) {
+    final parts = location
+        .split(',')
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+    if (parts.isEmpty) return (city: null, state: null);
+
+    String? state;
+    int stateIdx = -1;
+    for (var i = parts.length - 1; i >= 0; i--) {
+      final canonical = _resolveUsState(parts[i]);
+      if (canonical != null) {
+        state = canonical;
+        stateIdx = i;
+        break;
+      }
+    }
+
+    if (state != null && stateIdx > 0) {
+      // City is the segment immediately preceding the state segment.
+      return (city: parts[stateIdx - 1], state: state);
+    }
+
+    // No state recognized — fall back to the single/multi-part
+    // heuristic. Keeps non-US events working.
+    if (parts.length == 1) return (city: parts.first, state: null);
+    if (parts.length == 2) return (city: parts.first, state: null);
+    return (city: parts[1], state: null);
+  }
+
+  /// US state lookup — accepts either the two-letter abbreviation
+  /// (`CA`) or the full name (`California`), case-insensitive,
+  /// returns the canonical full name or null. Centralised here so
+  /// _parseLocation parsing AND geocoder admin1-result filtering
+  /// can both round-trip through the same name.
+  static const Map<String, String> _usStateNames = {
+    'AL': 'Alabama', 'AK': 'Alaska', 'AZ': 'Arizona', 'AR': 'Arkansas',
+    'CA': 'California', 'CO': 'Colorado', 'CT': 'Connecticut',
+    'DE': 'Delaware', 'FL': 'Florida', 'GA': 'Georgia', 'HI': 'Hawaii',
+    'ID': 'Idaho', 'IL': 'Illinois', 'IN': 'Indiana', 'IA': 'Iowa',
+    'KS': 'Kansas', 'KY': 'Kentucky', 'LA': 'Louisiana', 'ME': 'Maine',
+    'MD': 'Maryland', 'MA': 'Massachusetts', 'MI': 'Michigan',
+    'MN': 'Minnesota', 'MS': 'Mississippi', 'MO': 'Missouri',
+    'MT': 'Montana', 'NE': 'Nebraska', 'NV': 'Nevada', 'NH': 'New Hampshire',
+    'NJ': 'New Jersey', 'NM': 'New Mexico', 'NY': 'New York',
+    'NC': 'North Carolina', 'ND': 'North Dakota', 'OH': 'Ohio',
+    'OK': 'Oklahoma', 'OR': 'Oregon', 'PA': 'Pennsylvania',
+    'RI': 'Rhode Island', 'SC': 'South Carolina', 'SD': 'South Dakota',
+    'TN': 'Tennessee', 'TX': 'Texas', 'UT': 'Utah', 'VT': 'Vermont',
+    'VA': 'Virginia', 'WA': 'Washington', 'WV': 'West Virginia',
+    'WI': 'Wisconsin', 'WY': 'Wyoming', 'DC': 'District of Columbia',
+  };
+
+  String? _resolveUsState(String segment) {
+    final upper = segment.toUpperCase().trim();
+    // Two-letter abbreviation lookup.
+    if (_usStateNames.containsKey(upper)) return _usStateNames[upper];
+    // Full-name match (case-insensitive).
+    for (final fullName in _usStateNames.values) {
+      if (fullName.toUpperCase() == upper) return fullName;
+    }
+    return null;
   }
 
   String _wmoCondition(int code) {
@@ -2077,8 +2633,13 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           const SizedBox(height: 10),
           // Action row — wraps so it stays readable on narrow screens with
           // many simultaneous actions (Contribute + Claim + Remove).
+          // Contribute is hidden for the host / co-host (same rule as
+          // the main wishlist tab — hosts shouldn't contribute to
+          // their own event); Claim + Remove still render so they
+          // can curate the shared-from-web list.
           Wrap(spacing: 8, runSpacing: 6, alignment: WrapAlignment.end, children: [
-            if (price != null && remaining != null && remaining > 0)
+            if (!_isHost && !_isCoHost
+                && price != null && remaining != null && remaining > 0)
               _smallActionBtn(
                 icon: Icons.attach_money,
                 label: 'Contribute',
@@ -2245,7 +2806,10 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   }
 
   Widget _buildWishlistTab() {
-    if (listType == 'Checklist') return _buildChecklistTab();
+    // No early dispatch to _buildChecklistTab here. The TabBarView
+    // wires _buildWishlistTab() and _buildChecklistTab() to their own
+    // tabs independently, so each method only ever renders its own
+    // body. In Both mode, both are called for their respective tabs.
 
     // ── Wishlist mode ──
     // Debug prints for host/co-host evaluation — if the shop chips below
@@ -2254,8 +2818,32 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     // event doc loads, so during the very first build (before the event
     // resolves) both will be false; flipping host-mode forces a rebuild.
     debugPrint('[Wishlist] build _isHost=$_isHost _isCoHost=$_isCoHost listType=$listType');
-    final fulfilledCount = wishlistItems.where((i) =>
-      i['bought'] == true || (i['contributed'] as double) >= (i['price'] as double)).length;
+    // Filter wishlistItems to wishlist-kind only. In single-mode events
+    // _indicesOfKind returns every index, so this is a no-op there.
+    // In Both mode it isolates wishlist entries from the checklist
+    // entries that share the master array. The extra `price > 0 ||
+    // quantity-empty` guard is a belt-and-suspenders defense for items
+    // explicitly tagged `kind: 'wishlist'` whose underlying data is
+    // actually checklist-shaped (zero price + a quantity string). Without
+    // it, those items render with Buy / contribute buttons that do
+    // nothing useful at $0 — symptom users reported as "tables and
+    // chairs showing wishlist UI". The legacy-data routing in
+    // _itemKind() handles the un-tagged case; this catches mis-tagged
+    // ones too.
+    final wishlistIndices = _indicesOfKind('wishlist').where((i) {
+      final item = wishlistItems[i];
+      final price = (item['price'] as num?)?.toDouble() ?? 0.0;
+      final qty = (item['quantity'] as String?) ?? '';
+      return price > 0 || qty.isEmpty;
+    }).toList();
+    final fulfilledCount = wishlistIndices.where((i) {
+      final item = wishlistItems[i];
+      final bought = item['bought'] == true;
+      final price = (item['price'] as num?)?.toDouble() ?? 0.0;
+      final contrib = (item['contributed'] as num?)?.toDouble() ?? 0.0;
+      return bought || (price > 0 && contrib >= price);
+    }).length;
+    final wishlistTotal = wishlistIndices.length;
     return SafeArea(
       // top:false so we don't double-pad below the AppBar; we only want
       // the bottom safe-area inset (gesture bar / nav buttons) folded in
@@ -2311,7 +2899,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
               ]),
               const Spacer(),
               Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                Text('$fulfilledCount of ${wishlistItems.length}', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: _isDark ? Colors.white : AppColors.dark)),
+                Text('$fulfilledCount of $wishlistTotal', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: _isDark ? Colors.white : AppColors.dark)),
                 Text('items fulfilled', style: TextStyle(fontSize: 11, color: _muted)),
               ]),
             ]),
@@ -2325,7 +2913,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(color: AppColors.greenPale, borderRadius: BorderRadius.circular(100)),
-                child: Text('$fulfilledCount/${wishlistItems.length} fulfilled', style: const TextStyle(fontSize: 12, color: AppColors.green, fontWeight: FontWeight.w600)),
+                child: Text('$fulfilledCount/$wishlistTotal fulfilled', style: const TextStyle(fontSize: 12, color: AppColors.green, fontWeight: FontWeight.w600)),
               ),
             ],
           ),
@@ -2341,16 +2929,43 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             padding: EdgeInsets.fromLTRB(16, 16, 16, _cart.isEmpty ? 16 : 88),
-            itemCount: wishlistItems.length,
+            // wishlistIndices holds the original-array indices of items
+            // whose kind is 'wishlist'. We pass that original index
+            // through to the item builder so per-item mutations
+            // (contribute, bought, claim) keep operating on the master
+            // wishlistItems array — no index translation needed at the
+            // mutation site.
+            itemCount: wishlistIndices.length,
             itemBuilder: (context, index) {
-              final itemIdx = index;
+              final itemIdx = wishlistIndices[index];
               final item = wishlistItems[itemIdx];
               final isBought = item['bought'] as bool;
               final price = item['price'] as double;
               final totalContrib = item['contributed'] as double;
               final myContrib = _myContributions[item['name'] as String] ?? 0.0;
-              final totalProgress = (totalContrib / price).clamp(0.0, 1.0);
-              final myProgress = (myContrib / price).clamp(0.0, 1.0);
+              // Guard against price <= 0 — dividing 0 contribution by
+              // 0 price gave NaN, and LinearProgressIndicator renders
+              // NaN as a fully-filled bar rather than empty. The bar
+              // should be empty until either a contribution lands or
+              // the host sets a target price. Anything > 0 still
+              // computes the normal contributed/price ratio.
+              final totalProgress = price > 0
+                  ? (totalContrib / price).clamp(0.0, 1.0)
+                  : 0.0;
+              final myProgress = price > 0
+                  ? (myContrib / price).clamp(0.0, 1.0)
+                  : 0.0;
+              // boughtBy is set by the "Bring It" flow with the
+              // buyer's uid + name. Drives the "Bringing it 🛍️"
+              // badge (vs the legacy "Bought ✓" pill) so the host
+              // can see who's covering it. `iAmBuyer` flips on the
+              // undo affordance so only the original claimer can
+              // reverse their own commitment.
+              final boughtBy = item['boughtBy'] is Map ? Map<String, dynamic>.from(item['boughtBy'] as Map) : null;
+              final hasBuyer = boughtBy != null && (boughtBy['uid'] as String?) != null;
+              final buyerName = (boughtBy?['name'] as String?) ?? '';
+              final myUid = FirebaseAuth.instance.currentUser?.uid;
+              final iAmBuyer = hasBuyer && boughtBy['uid'] == myUid;
               return Container(
                 margin: const EdgeInsets.only(bottom: 14),
                 decoration: BoxDecoration(
@@ -2371,7 +2986,17 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                               color: isBought ? _muted : (_isDark ? Colors.white : AppColors.dark),
                               decoration: isBought ? TextDecoration.lineThrough : null)),
                         ),
-                        if (isBought)
+                        if (isBought && hasBuyer)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: AppColors.purple.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(100),
+                              border: Border.all(color: AppColors.purple.withValues(alpha: 0.4)),
+                            ),
+                            child: const Text('Bringing it 🛍️', style: TextStyle(fontSize: 12, color: AppColors.purple, fontWeight: FontWeight.w800)),
+                          )
+                        else if (isBought)
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(100)),
@@ -2381,7 +3006,22 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                           Text('\$${(item['price'] as double).toStringAsFixed(2)}', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: _isDark ? Colors.white : AppColors.dark)),
                       ],
                     ),
+                    if (isBought && hasBuyer && buyerName.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          '$buyerName is bringing it',
+                          style: const TextStyle(fontSize: 12, color: AppColors.purple, fontWeight: FontWeight.w600),
+                        ),
+                      ),
                     const SizedBox(height: 10),
+                    // Progress track. Background is the theme-aware
+                    // `_border` color (medium-light grey in light mode,
+                    // medium-dark in dark mode) — was previously
+                    // `Colors.grey.shade100` (near-white), which made
+                    // an empty bar visually indistinguishable from a
+                    // fully-filled green bar at a glance. The 0% case
+                    // now reads as a clearly-empty track.
                     ClipRRect(
                       borderRadius: BorderRadius.circular(8),
                       child: SizedBox(
@@ -2391,8 +3031,8 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                             LinearProgressIndicator(
                               value: isBought ? 1.0 : totalProgress,
                               minHeight: 8,
-                              backgroundColor: Colors.grey.shade100,
-                              color: isBought ? Colors.grey.shade300 : AppColors.greenLight,
+                              backgroundColor: _border,
+                              color: isBought ? _muted : AppColors.greenLight,
                             ),
                             if (!isBought && myProgress > 0)
                               LinearProgressIndicator(
@@ -2415,55 +3055,217 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                         padding: const EdgeInsets.symmetric(vertical: 4),
                         child: Text('Payments disabled in demo', style: TextStyle(fontSize: 11, color: _muted, fontStyle: FontStyle.italic)),
                       )
-                    else
-                    Row(
-                      children: [
-                        isBought || totalProgress >= 1.0
-                            ? Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                                decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
-                                child: const Text('Bought', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.muted)),
-                              )
-                            : ElevatedButton(
-                                onPressed: _isArchived ? null : () => _toggleBuy(itemIdx),
-                                style: ElevatedButton.styleFrom(backgroundColor: _isArchived ? Colors.grey.shade300 : AppColors.green, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6)),
-                                child: const Text('Buy', style: TextStyle(fontSize: 11)),
+                    // Hide the entire Buy / Contribute / Undo row for the
+                    // event host. Hosts shouldn't be contributing to their
+                    // own wishlist — the buttons used to render disabled
+                    // when `myUid == hostId`, but the user wanted them
+                    // gone from the UI completely. Co-hosts (who help
+                    // run the event) follow the same rule. The
+                    // contribution-progress text + total-raised banner
+                    // up the tree remain visible so the host can still
+                    // see what guests have done.
+                    else if (_isHost || _isCoHost)
+                      const SizedBox.shrink()
+                    // Bought state — collapses the entire action area
+                    // to a single pill. Bringing it 🛍️ when stamped
+                    // via the Bring It flow (boughtBy present); Bought
+                    // ✓ for legacy/cart-paid items where no buyer was
+                    // recorded. When the current user is the recorded
+                    // buyer, an Undo button sits trailing the label
+                    // so they can reverse a mis-tap; other guests
+                    // (and cart-paid items) get the label alone.
+                    else if (isBought)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: hasBuyer
+                              ? AppColors.purple.withValues(alpha: 0.10)
+                              : Colors.grey.shade200,
+                          borderRadius: BorderRadius.circular(10),
+                          border: hasBuyer
+                              ? Border.all(color: AppColors.purple.withValues(alpha: 0.35))
+                              : null,
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              hasBuyer ? 'Bringing it 🛍️' : 'Bought ✓',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                                color: hasBuyer ? AppColors.purple : AppColors.muted,
                               ),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Row(
-                            children: [20, 40, 60].map((amt) {
-                              final remaining = price - totalContrib;
-                              final effectiveAmt = amt.toDouble() > remaining ? remaining : amt.toDouble();
-                              final isDisabled = _isArchived || isBought || totalProgress >= 1.0 || remaining <= 0;
-                              return Expanded(
+                            ),
+                            if (iAmBuyer) ...[
+                              const SizedBox(width: 12),
+                              InkWell(
+                                onTap: _isArchived ? null : () => _undoBuyAndBring(itemIdx),
+                                borderRadius: BorderRadius.circular(8),
                                 child: Padding(
-                                  padding: const EdgeInsets.only(right: 3),
-                                  child: OutlinedButton(
-                                    onPressed: isDisabled ? null : () {
-                                      _addToCart(item['name'] as String, effectiveAmt);
-                                      _contributeFirestore(itemIdx, amt.toDouble());
-                                    },
-                                    style: OutlinedButton.styleFrom(side: BorderSide(color: isDisabled ? Colors.grey.shade300 : AppColors.green), padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 6), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-                                    child: Text('\$${effectiveAmt.toStringAsFixed(0)}', style: TextStyle(color: isDisabled ? Colors.grey.shade400 : AppColors.green, fontSize: 11)),
-                                  ),
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                    Icon(Icons.undo, size: 13, color: AppColors.purple.withValues(alpha: 0.85)),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      'Undo',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w800,
+                                        color: AppColors.purple.withValues(alpha: 0.85),
+                                      ),
+                                    ),
+                                  ]),
                                 ),
-                              );
-                            }).toList(),
+                              ),
+                            ],
+                          ],
+                        ),
+                      )
+                    else ...[
+                      // Bring It — primary purple button on its own
+                      // row, sits ABOVE the contribute amounts. Tapping
+                      // launches the item URL externally (if any), then
+                      // shows the "Got it covered?" confirmation. Once
+                      // confirmed, the whole action area collapses to
+                      // the Bringing it 🛍️ pill above (with an Undo
+                      // affordance for the original claimer) so nobody
+                      // else double-buys.
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _isArchived ? null : () => _buyAndBring(itemIdx),
+                          icon: const Icon(Icons.shopping_bag_outlined, size: 16),
+                          label: const Text('Bring It', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _isArchived ? Colors.grey.shade300 : AppColors.purple,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            padding: const EdgeInsets.symmetric(vertical: 10),
                           ),
                         ),
-                        if (myContrib > 0) ...[
-                          const SizedBox(width: 4),
-                          GestureDetector(
-                            onTap: () {
-                              _removeFromCart(item['name'] as String);
-                              _undoContributionFirestore(itemIdx);
-                            },
-                            child: Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6), decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.undo, size: 13, color: Colors.white)),
+                      ),
+                      const SizedBox(height: 8),
+                      // Buy + preset contribute amounts + undo. Always
+                      // rendered so guests never see the action area
+                      // collapse mid-flow — buttons disable (greyed
+                      // out) when the action wouldn't apply (item
+                      // already fully funded, no remaining balance,
+                      // archived event), but they don't disappear.
+                      // Previous version replaced Buy with a "Funded"
+                      // pill at totalProgress >= 1.0 and clamped each
+                      // contribute amount to `remaining`, which made
+                      // a fully-funded item render as "$0 $0 $0" —
+                      // visually indistinguishable from missing
+                      // buttons.
+                      Row(
+                        children: [
+                          // Buy — always present. Disabled when item
+                          // is already fully funded.
+                          SizedBox(
+                            width: 56,
+                            child: ElevatedButton(
+                              onPressed: (_isArchived || totalProgress >= 1.0)
+                                  ? null
+                                  : () => _toggleBuy(itemIdx),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: AppColors.green,
+                                foregroundColor: Colors.white,
+                                disabledBackgroundColor: Colors.grey.shade200,
+                                disabledForegroundColor: Colors.grey.shade500,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                              ),
+                              child: const Text('Buy', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+                            ),
                           ),
+                          const SizedBox(width: 4),
+                          // Preset contribute amounts — dynamically
+                          // tailored so a guest can never push the
+                          // total over the item's price. Standard
+                          // presets ($5/$10/$20/$50) are filtered to
+                          // those strictly less than the remaining
+                          // balance, then a final exact-remaining
+                          // chip is appended when it's not already
+                          // in the list. Fully-funded items show the
+                          // standard presets all disabled (grey) so
+                          // the row keeps visual continuity instead
+                          // of collapsing to nothing.
+                          Expanded(
+                            child: Builder(builder: (_) {
+                              final remaining = (price - totalContrib).clamp(0.0, price);
+                              const standardPresets = <double>[5, 10, 20, 50];
+                              final allDisabled = _isArchived || totalProgress >= 1.0 || remaining <= 0;
+                              final List<double> chipAmounts;
+                              if (remaining <= 0) {
+                                chipAmounts = standardPresets;
+                              } else {
+                                final filtered = standardPresets
+                                    .where((p) => p < remaining)
+                                    .toList();
+                                if (!filtered.contains(remaining)) {
+                                  filtered.add(remaining);
+                                }
+                                chipAmounts = filtered.isEmpty
+                                    ? <double>[remaining]
+                                    : filtered;
+                              }
+                              return Row(
+                                children: chipAmounts.map((amt) {
+                                  // Whole-dollar values render without
+                                  // decimals; fractional remaining
+                                  // amounts ($42.50 left, etc.) keep
+                                  // two decimals so the displayed total
+                                  // matches the actual contribution.
+                                  final label = amt == amt.roundToDouble()
+                                      ? '\$${amt.toInt()}'
+                                      : '\$${amt.toStringAsFixed(2)}';
+                                  return Expanded(
+                                    child: Padding(
+                                      padding: const EdgeInsets.only(right: 3),
+                                      child: OutlinedButton(
+                                        onPressed: allDisabled ? null : () {
+                                          _addToCart(item['name'] as String, amt);
+                                          _contributeFirestore(itemIdx, amt);
+                                        },
+                                        style: OutlinedButton.styleFrom(
+                                          side: BorderSide(color: allDisabled ? Colors.grey.shade300 : AppColors.green),
+                                          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 6),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                        ),
+                                        child: Text(
+                                          label,
+                                          style: TextStyle(
+                                            color: allDisabled ? Colors.grey.shade400 : AppColors.green,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                }).toList(),
+                              );
+                            }),
+                          ),
+                          if (myContrib > 0) ...[
+                            const SizedBox(width: 4),
+                            GestureDetector(
+                              onTap: () {
+                                _removeFromCart(item['name'] as String);
+                                _undoContributionFirestore(itemIdx);
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                                decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(8)),
+                                child: const Icon(Icons.undo, size: 13, color: Colors.white),
+                              ),
+                            ),
+                          ],
                         ],
-                      ],
-                    ),
+                      ),
+                    ],
                     if (!isBought)
                       Padding(padding: const EdgeInsets.only(top: 6), child: Text('Unfulfilled contributions go to the host', style: TextStyle(fontSize: 11, color: _muted, fontStyle: FontStyle.italic))),
                   ],
@@ -2739,7 +3541,15 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   }
 
   Widget _buildChecklistTab() {
-    final claimedCount = wishlistItems.where((i) => (i['claimed'] as int) > 0).length;
+    // Same kind-filter pattern as _buildWishlistTab: in single-mode
+    // events _indicesOfKind returns every index, in Both mode it
+    // isolates checklist entries from wishlist entries that share the
+    // master wishlistItems array.
+    final checklistIndices = _indicesOfKind('checklist');
+    final claimedCount = checklistIndices.where(
+      (i) => ((wishlistItems[i]['claimed'] as num?)?.toInt() ?? 0) > 0,
+    ).length;
+    final checklistTotal = checklistIndices.length;
     // Wrap the whole checklist body in a scroll view so the fixed-height
     // banner + header can't overflow when the keyboard pops up to claim
     // an item. The parent Scaffold has resizeToAvoidBottomInset: true,
@@ -2780,7 +3590,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(color: AppColors.greenPale, borderRadius: BorderRadius.circular(100)),
-                child: Text('$claimedCount/${wishlistItems.length} claimed', style: const TextStyle(fontSize: 12, color: AppColors.green, fontWeight: FontWeight.w600)),
+                child: Text('$claimedCount/$checklistTotal claimed', style: const TextStyle(fontSize: 12, color: AppColors.green, fontWeight: FontWeight.w600)),
               ),
             ],
           ),
@@ -2789,12 +3599,29 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             padding: const EdgeInsets.all(16),
-            itemCount: wishlistItems.length,
-            itemBuilder: (context, index) {
+            // checklistIndices passes through the master-array index so
+            // _saveClaimToFirestore et al. continue to write to the
+            // right slot in event.wishlist without translation.
+            itemCount: checklistIndices.length,
+            itemBuilder: (context, builderIdx) {
+              final index = checklistIndices[builderIdx];
               final item = wishlistItems[index];
-              final qty = item['quantity'] as String;
+              final qty = (item['quantity'] as String?) ?? '';
               final claims = List<Map<String, dynamic>>.from(item['claims'] as List? ?? []);
               final isActive = _activeClaimIndex == index;
+              // Quantity tracking. quantityNeeded is the host-set
+              // target (int); totalClaimed is the SUM of guest claim
+              // amounts. When quantityNeeded is set, the row shows
+              // "X/Y claimed" and chips/buttons cap at the
+              // remainder. When unset (legacy items, or host didn't
+              // type a number) display falls back to the raw qty
+              // string and chips run uncapped.
+              final quantityNeeded = _itemQuantityNeeded(item);
+              final totalClaimed = _itemTotalClaimed(item);
+              final remaining = quantityNeeded != null
+                  ? (quantityNeeded - totalClaimed).clamp(0, quantityNeeded)
+                  : null;
+              final fullyClaimed = remaining != null && remaining == 0;
               return Container(
                 margin: const EdgeInsets.only(bottom: 14),
                 decoration: BoxDecoration(
@@ -2806,74 +3633,289 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Header row: name + qty pill + button
+                    // Header row: name + qty pill + (when not active) close X
                     Row(
                       children: [
                         Expanded(
-                          child: Row(
+                          child: Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            spacing: 8,
+                            runSpacing: 4,
                             children: [
-                              Expanded(child: Text(item['name'] as String, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark))),
-                              if (qty.isNotEmpty)
+                              Text(item['name'] as String, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
+                              // Quantity pill. Prefer the host-set
+                              // numeric `quantityNeeded` ("X/Y
+                              // claimed"); fall back to the legacy
+                              // free-form `quantity` String for
+                              // items written before the typed
+                              // quantity field existed.
+                              if (quantityNeeded != null)
                                 Container(
-                                  margin: const EdgeInsets.only(left: 8),
                                   padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
                                   decoration: BoxDecoration(color: AppColors.greenPale, borderRadius: BorderRadius.circular(100)),
-                                  child: Text(qty, style: const TextStyle(fontSize: 12, color: AppColors.green, fontWeight: FontWeight.w600)),
+                                  child: Text(
+                                    '$totalClaimed/$quantityNeeded claimed',
+                                    style: const TextStyle(fontSize: 12, color: AppColors.green, fontWeight: FontWeight.w600),
+                                  ),
+                                )
+                              else if (qty.isNotEmpty)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                                  decoration: BoxDecoration(color: AppColors.greenPale, borderRadius: BorderRadius.circular(100)),
+                                  child: Text('Qty: $qty', style: const TextStyle(fontSize: 12, color: AppColors.green, fontWeight: FontWeight.w600)),
                                 ),
                             ],
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        isActive
-                            ? GestureDetector(
-                                onTap: () => setState(() { _activeClaimIndex = null; _claimAmountController.clear(); }),
-                                child: Icon(Icons.close, size: 20, color: _muted),
-                              )
-                            : ElevatedButton(
-                                onPressed: () => setState(() { _activeClaimIndex = index; _claimAmountController.clear(); }),
-                                style: ElevatedButton.styleFrom(backgroundColor: AppColors.green, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10)),
-                                child: const Text("I'll bring this", style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                              ),
-                      ],
-                    ),
-                    // Inline claim input
-                    if (isActive) ...[
-                      const SizedBox(height: 14),
-                      Text('How much are you bringing?', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isDark ? Colors.white : AppColors.dark)),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _claimAmountController,
-                              autofocus: true,
-                              decoration: InputDecoration(
-                                hintText: qty.isNotEmpty ? 'e.g. $qty' : 'Enter amount',
-                                hintStyle: TextStyle(color: _muted),
-                                filled: true,
-                                fillColor: _bg,
-                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: _border)),
-                                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: _border)),
-                                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.green, width: 1.5)),
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          ElevatedButton(
-                            onPressed: _savingClaim
-                                ? null
-                                : () {
-                                    final amount = _claimAmountController.text.trim();
-                                    if (amount.isEmpty) return;
-                                    _saveClaimToFirestore(index, amount);
-                                  },
-                            style: ElevatedButton.styleFrom(backgroundColor: AppColors.green, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12)),
-                            child: _savingClaim
-                                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                                : const Text('Confirm', style: TextStyle(fontWeight: FontWeight.w600)),
+                        if (isActive) ...[
+                          const SizedBox(width: 12),
+                          GestureDetector(
+                            onTap: () => setState(() {
+                              _activeClaimIndex = null;
+                              _activeClaimQty = '1';
+                              _activeClaimManualMode = false;
+                              _claimManualCtrl.clear();
+                            }),
+                            child: Icon(Icons.close, size: 20, color: _muted),
                           ),
                         ],
+                      ],
+                    ),
+                    // Toggle between the two-button row and the
+                    // quantity-chip selector. Single if/else so they
+                    // can never both render or both vanish — previous
+                    // version used two separate conditionals which
+                    // were structurally fine but harder to reason
+                    // about during rapid taps.
+                    if (fullyClaimed) ...[
+                      // Item is fully covered — host's quantity needed
+                      // is met by the sum of guest claims. Collapses
+                      // the action area to a single pill so no one can
+                      // pile on more claims that would push the total
+                      // over.
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: AppColors.green.withValues(alpha: 0.10),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: AppColors.green.withValues(alpha: 0.35)),
+                        ),
+                        child: const Center(
+                          child: Text(
+                            'Fully claimed ✓',
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.green),
+                          ),
+                        ),
+                      ),
+                    ] else if (isActive) ...[
+                      const SizedBox(height: 14),
+                      Text(
+                        'How many are you bringing?',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isDark ? Colors.white : AppColors.dark),
+                      ),
+                      const SizedBox(height: 8),
+                      // Single chip row that includes a trailing "✏️"
+                      // Other chip. Tapping Other swaps THAT chip
+                      // (only) into a numeric TextField with the
+                      // same green-outlined-selected look as a
+                      // chosen chip, while the preset chips stay
+                      // visible. Tapping any preset clears the
+                      // manual entry and switches back to chip mode.
+                      // Both paths honor the quantityNeeded cap (chip
+                      // filter + manual-mode runtime check + server
+                      // re-validation inside the transaction).
+                      Builder(builder: (_) {
+                        final availableChips = remaining == null
+                            ? _claimQtyOptions
+                            : _claimQtyOptions
+                                .where((opt) => _claimAmountValue(opt) <= remaining)
+                                .toList();
+                        // If the active selection no longer fits the
+                        // cap (e.g. earlier chip-tap landed on '5'
+                        // but remaining is now 3), snap it back to a
+                        // valid option so Confirm can't over-claim.
+                        // Manual mode is exempt — we're not picking
+                        // a chip in that state.
+                        if (!_activeClaimManualMode
+                            && availableChips.isNotEmpty
+                            && !availableChips.contains(_activeClaimQty)) {
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted) return;
+                            setState(() => _activeClaimQty = availableChips.first);
+                          });
+                        }
+                        // Helper that builds a single preset chip.
+                        // Tapping any preset exits manual mode and
+                        // selects the preset.
+                        Widget presetChip(String opt) {
+                          final isSelected = !_activeClaimManualMode && _activeClaimQty == opt;
+                          return OutlinedButton(
+                            onPressed: () => setState(() {
+                              _activeClaimQty = opt;
+                              _activeClaimManualMode = false;
+                              _claimManualCtrl.clear();
+                            }),
+                            style: OutlinedButton.styleFrom(
+                              backgroundColor: isSelected ? AppColors.green : Colors.transparent,
+                              side: BorderSide(color: AppColors.green, width: isSelected ? 1.5 : 1),
+                              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 8),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            child: Text(
+                              opt,
+                              style: TextStyle(
+                                color: isSelected ? Colors.white : AppColors.green,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          );
+                        }
+                        // Trailing "Other" cell — either the ✏️ chip
+                        // (idle) or an inline TextField (active).
+                        // The TextField mimics the selected-chip
+                        // look: filled green background, white-on-
+                        // green text, same height as a chip so the
+                        // grid stays even.
+                        Widget otherCell() {
+                          if (_activeClaimManualMode) {
+                            return SizedBox(
+                              height: 38,
+                              child: TextField(
+                                controller: _claimManualCtrl,
+                                autofocus: true,
+                                keyboardType: TextInputType.number,
+                                textInputAction: TextInputAction.done,
+                                textAlign: TextAlign.center,
+                                onSubmitted: (_) {
+                                  if (_savingClaim) return;
+                                  final n = int.tryParse(_claimManualCtrl.text.trim());
+                                  if (n == null || n <= 0) return;
+                                  if (remaining != null && n > remaining) return;
+                                  _saveClaimToFirestore(index, n.toString());
+                                },
+                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14),
+                                cursorColor: Colors.white,
+                                decoration: InputDecoration(
+                                  isDense: true,
+                                  filled: true,
+                                  fillColor: AppColors.green,
+                                  hintText: remaining != null ? '≤ $remaining' : 'e.g. 30',
+                                  hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.6), fontWeight: FontWeight.w700, fontSize: 13),
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.green, width: 1.5)),
+                                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.green, width: 1.5)),
+                                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.green, width: 1.5)),
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+                                ),
+                              ),
+                            );
+                          }
+                          return OutlinedButton(
+                            onPressed: () => setState(() {
+                              _activeClaimManualMode = true;
+                              // Pre-seed with the current chip
+                              // selection if it's a plain integer.
+                              final asInt = int.tryParse(_activeClaimQty);
+                              _claimManualCtrl.text = asInt != null ? asInt.toString() : '';
+                            }),
+                            style: OutlinedButton.styleFrom(
+                              backgroundColor: Colors.transparent,
+                              side: const BorderSide(color: AppColors.green, width: 1),
+                              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 8),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            child: const Text(
+                              '✏️',
+                              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+                            ),
+                          );
+                        }
+                        // Build the full cell list (presets + Other),
+                        // then chunk into rows of 2. Each chip is
+                        // wrapped in Expanded so all cells are equal-
+                        // width. Orphan rows (odd cell count) get a
+                        // SizedBox.shrink() filler in the second slot
+                        // to preserve the 50% column width — without
+                        // it the lone chip would stretch full-width.
+                        final cells = <Widget>[
+                          ...availableChips.map(presetChip),
+                          otherCell(),
+                        ];
+                        final rows = <Widget>[];
+                        for (var i = 0; i < cells.length; i += 2) {
+                          if (i > 0) rows.add(const SizedBox(height: 8));
+                          final left = cells[i];
+                          final right = i + 1 < cells.length
+                              ? cells[i + 1]
+                              : const SizedBox.shrink();
+                          rows.add(Row(children: [
+                            Expanded(child: left),
+                            const SizedBox(width: 8),
+                            Expanded(child: right),
+                          ]));
+                        }
+                        return Column(children: rows);
+                      }),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: _savingClaim
+                              ? null
+                              : () {
+                                  if (_activeClaimManualMode) {
+                                    final n = int.tryParse(_claimManualCtrl.text.trim());
+                                    if (n == null || n <= 0) {
+                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                                        content: Text('Enter a number greater than 0.'),
+                                        backgroundColor: Colors.redAccent,
+                                      ));
+                                      return;
+                                    }
+                                    if (remaining != null && n > remaining) {
+                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                        content: Text('Only $remaining left to claim — try a smaller number.'),
+                                        backgroundColor: AppColors.gold,
+                                      ));
+                                      return;
+                                    }
+                                    _saveClaimToFirestore(index, n.toString());
+                                  } else {
+                                    _saveClaimToFirestore(index, _activeClaimQty);
+                                  }
+                                },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.green,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                          ),
+                          child: _savingClaim
+                              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                              : const Text('Confirm', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+                        ),
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 12),
+                      // Single full-width "I'll bring this" button.
+                      // Tapping opens the quantity-chip flow above.
+                      // The previous purple "Bring It" companion was
+                      // removed — checklist now has one path: claim,
+                      // pick a count, confirm.
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () => setState(() {
+                            _activeClaimIndex = index;
+                            _activeClaimQty = '1';
+                            _activeClaimManualMode = false;
+                            _claimManualCtrl.clear();
+                          }),
+                          style: ElevatedButton.styleFrom(backgroundColor: AppColors.green, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), padding: const EdgeInsets.symmetric(vertical: 10)),
+                          child: const Text("I'll bring this", style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                        ),
                       ),
                     ],
                     // Claims list
@@ -2881,18 +3923,61 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                       const SizedBox(height: 12),
                       const Divider(height: 1),
                       const SizedBox(height: 10),
-                      ...claims.map((c) => Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.check_circle_outline, size: 14, color: AppColors.green),
-                            const SizedBox(width: 6),
-                            Text(c['name'] as String, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isDark ? Colors.white : AppColors.dark)),
-                            Text(' · ', style: TextStyle(color: _muted)),
-                            Text(c['amount'] as String, style: TextStyle(fontSize: 13, color: _muted)),
-                          ],
-                        ),
-                      )),
+                      ...claims.map((c) {
+                        final claimUid = c['uid'] as String?;
+                        final myUid = FirebaseAuth.instance.currentUser?.uid;
+                        final isMine = claimUid != null && claimUid == myUid;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.check_circle_outline, size: 14, color: AppColors.green),
+                              const SizedBox(width: 6),
+                              Flexible(
+                                child: Text(
+                                  c['name'] as String,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isDark ? Colors.white : AppColors.dark),
+                                ),
+                              ),
+                              Text(' · ', style: TextStyle(color: _muted)),
+                              Flexible(
+                                child: Text(
+                                  c['amount'] as String,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontSize: 13, color: _muted),
+                                ),
+                              ),
+                              // Undo button — only shown on the row that
+                              // represents this user's own claim. Tapping
+                              // removes their entry from the claims array
+                              // and bumps `claimed` down. Surfaced only
+                              // for guests; the host already has admin
+                              // tools elsewhere and shouldn't have an
+                              // identity-collision-prone undo button on
+                              // someone else's claim row.
+                              if (isMine) ...[
+                                const Spacer(),
+                                InkWell(
+                                  onTap: _savingClaim ? null : () => _unclaimFromFirestore(index),
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                      Icon(Icons.undo, size: 13, color: _muted),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        'Undo',
+                                        style: TextStyle(fontSize: 12, color: _muted, fontWeight: FontWeight.w700),
+                                      ),
+                                    ]),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        );
+                      }),
                     ],
                   ],
                 ),
@@ -3002,120 +4087,6 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                     ),
         ),
       ],
-    );
-  }
-
-  /// Announcement card. Tappable for everyone now: hosts and co-hosts
-  /// jump straight into the announcement composer to send / manage,
-  /// regular guests get a bottom sheet that shows the full message in
-  /// case it was truncated by the row's ellipsis. Previously the cards
-  /// were inert chrome and the host had no in-screen path to manage.
-  Widget _announcementCard(String message, String time) {
-    final isHostMode = _isHost || _isCoHost;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: AppColors.purplePale,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.purple.withValues(alpha: 0.15)),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () {
-          if (isHostMode) {
-            Navigator.push(context, MaterialPageRoute(
-              builder: (_) => const HostNotificationsScreen(),
-            ));
-          } else {
-            _showAnnouncementDetailSheet(message, time);
-          }
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 32, height: 32,
-                decoration: BoxDecoration(color: AppColors.purple.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(10)),
-                child: const Center(child: Icon(Icons.campaign_outlined, size: 16, color: AppColors.purple)),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(message,
-                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.dark)),
-                    const SizedBox(height: 4),
-                    Text(time, style: const TextStyle(fontSize: 11, color: AppColors.muted)),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 6),
-              Icon(
-                isHostMode ? Icons.edit_outlined : Icons.chevron_right,
-                size: 16,
-                color: AppColors.purple.withValues(alpha: 0.7),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// Read-only detail sheet for guests who tap an announcement.
-  /// Hosts route to the manage screen instead — see [_announcementCard].
-  void _showAnnouncementDetailSheet(String message, String time) {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: _card,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (sheetCtx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Center(child: Container(
-                width: 40, height: 4,
-                decoration: BoxDecoration(color: _border, borderRadius: BorderRadius.circular(2)),
-              )),
-              const SizedBox(height: 18),
-              Row(children: [
-                const Icon(Icons.campaign_outlined, size: 18, color: AppColors.purple),
-                const SizedBox(width: 8),
-                Text('Announcement',
-                    style: TextStyle(fontFamily: 'FredokaOne', fontSize: 18,
-                        color: _isDark ? Colors.white : AppColors.dark)),
-                const Spacer(),
-                Text(time, style: TextStyle(fontSize: 12, color: _muted)),
-              ]),
-              const SizedBox(height: 12),
-              Text(
-                message,
-                style: TextStyle(fontSize: 15, color: _isDark ? Colors.white : AppColors.dark, height: 1.45),
-              ),
-              const SizedBox(height: 18),
-              SizedBox(
-                height: 44,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(sheetCtx),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.purple,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    elevation: 0,
-                  ),
-                  child: const Text('Close', style: TextStyle(fontWeight: FontWeight.w800)),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 
@@ -3275,7 +4246,129 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     );
   }
 
-  Future<void> _saveClaimToFirestore(int itemIndex, String amount) async {
+  Future<void> _saveClaimToFirestore(int itemIndex, String amount, {bool buying = false}) async {
+    if (widget.eventId == null) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    setState(() => _savingClaim = true);
+    final eventRef = FirebaseFirestore.instance.collection('events').doc(widget.eventId);
+    // Build the claim payload once so the transaction write and the
+    // local optimistic update can't drift. `buying: true` flips the
+    // "buying it" badge on the item card; only set when the guest
+    // tapped "Buy & Bring", otherwise we omit the field entirely so
+    // legacy items don't grow a `buying: false` shadow on every
+    // re-claim. The `amount` may be downgraded inside the
+    // transaction if a concurrent claim raised the total past the
+    // host's quantityNeeded — chip caps prevent this on the UI
+    // side, but two guests racing the same item could both see
+    // remaining = N and both confirm; the server-side guard is the
+    // last line of defense.
+    Map<String, dynamic> claim = <String, dynamic>{
+      'uid': user.uid,
+      'name': user.displayName ?? 'Guest',
+      'amount': amount,
+      if (buying) 'buying': true,
+    };
+    bool cappedByServer = false;
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final snap = await tx.get(eventRef);
+        final rawWishlist = List<Map<String, dynamic>>.from(
+          (snap.data()?['wishlist'] as List<dynamic>? ?? []).map((e) => Map<String, dynamic>.from(e as Map)),
+        );
+        final item = rawWishlist[itemIndex];
+        final claims = List<Map<String, dynamic>>.from(
+          item['claims'] as List<dynamic>? ?? [],
+        );
+        // Quantity guard: if the host set a quantityNeeded, sum
+        // every other guest's claim and cap the new claim's amount
+        // to whatever's left. If nothing's left, abort outright so
+        // we don't write a 0-amount claim that just clutters the
+        // claims list.
+        final cap = _itemQuantityNeeded(item);
+        if (cap != null) {
+          final othersTotal = claims
+              .where((c) => c['uid'] != user.uid)
+              .fold<int>(0, (s, c) => s + _claimAmountValue((c as Map?)?['amount'] as String?));
+          final remaining = (cap - othersTotal).clamp(0, cap);
+          if (remaining <= 0) {
+            throw StateError('fully-claimed');
+          }
+          final requested = _claimAmountValue(amount);
+          if (requested > remaining) {
+            // Snap to the largest preset that fits. '6+' (=6) only
+            // gets to land if remaining >= 6; otherwise the largest
+            // single-digit preset that fits.
+            final downgraded = remaining >= 6 ? '6+' : remaining.toString();
+            claim = <String, dynamic>{
+              ...claim,
+              'amount': downgraded,
+            };
+            cappedByServer = true;
+          }
+        }
+        claims.removeWhere((c) => c['uid'] == user.uid);
+        claims.add(claim);
+        rawWishlist[itemIndex]['claims'] = claims;
+        rawWishlist[itemIndex]['claimed'] = claims.length;
+        tx.update(eventRef, {'wishlist': rawWishlist});
+      });
+
+      if (mounted) {
+        setState(() {
+          final claims = List<Map<String, dynamic>>.from(wishlistItems[itemIndex]['claims'] as List);
+          claims.removeWhere((c) => c['uid'] == user.uid);
+          claims.add(claim);
+          wishlistItems[itemIndex]['claims'] = claims;
+          wishlistItems[itemIndex]['claimed'] = claims.length;
+          _activeClaimIndex = null;
+          _activeClaimQty = '1';
+          _activeClaimManualMode = false;
+          _claimManualCtrl.clear();
+        });
+        if (cappedByServer) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Claim adjusted to ${claim['amount']} — only that many were left.'),
+            backgroundColor: AppColors.gold,
+          ));
+        }
+      }
+    } catch (e) {
+      if (e is StateError && e.message == 'fully-claimed') {
+        if (mounted) {
+          setState(() {
+            _activeClaimIndex = null;
+            _activeClaimQty = '1';
+            _activeClaimManualMode = false;
+            _claimManualCtrl.clear();
+          });
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Someone else just claimed the last one.'),
+            backgroundColor: Colors.redAccent,
+          ));
+        }
+        return;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not save: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _savingClaim = false);
+    }
+  }
+
+  /// Removes the current user's claim from the item at [itemIndex].
+  /// Mirror of _saveClaimToFirestore but it strips the entry rather
+  /// than upserting it, then bumps `claimed` down to the new claims
+  /// length. No-op when the user has no claim on the item (anyone
+  /// else's claim row doesn't surface the Undo button — the UI
+  /// gates on uid match — so this should only ever be invoked when
+  /// the row exists).
+  Future<void> _unclaimFromFirestore(int itemIndex) async {
     if (widget.eventId == null) return;
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -3293,7 +4386,6 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           rawWishlist[itemIndex]['claims'] as List<dynamic>? ?? [],
         );
         claims.removeWhere((c) => c['uid'] == user.uid);
-        claims.add({'uid': user.uid, 'name': user.displayName ?? 'Guest', 'amount': amount});
         rawWishlist[itemIndex]['claims'] = claims;
         rawWishlist[itemIndex]['claimed'] = claims.length;
         tx.update(eventRef, {'wishlist': rawWishlist});
@@ -3303,17 +4395,14 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         setState(() {
           final claims = List<Map<String, dynamic>>.from(wishlistItems[itemIndex]['claims'] as List);
           claims.removeWhere((c) => c['uid'] == user.uid);
-          claims.add({'uid': user.uid, 'name': user.displayName ?? 'Guest', 'amount': amount});
           wishlistItems[itemIndex]['claims'] = claims;
           wishlistItems[itemIndex]['claimed'] = claims.length;
-          _activeClaimIndex = null;
-          _claimAmountController.clear();
         });
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not save: $e'), backgroundColor: Colors.redAccent),
+          SnackBar(content: Text('Could not undo claim: $e'), backgroundColor: Colors.redAccent),
         );
       }
     } finally {

@@ -110,7 +110,7 @@ class AppColors {
 /// destroyed when this is false: events whose `listType` is already
 /// `'Wishlist'` simply render as if it were `'No List'` until the
 /// host edits them or the flag flips back on.
-const bool kWishlistEnabled = false;
+const bool kWishlistEnabled = true;
 
 /// Hides every user-visible entry point to ordering printed stickers
 /// or invitations during beta. Set to true to re-expose the merch
@@ -176,6 +176,29 @@ const List<EventType> eventTypes = [
 ];
 
 // ─── HELPERS ──────────────────────────────────────────────────
+
+/// Returns a version of [base] guaranteed to read against a dark
+/// surface. Several event-type primaries (Corporate, Graduation,
+/// Holiday, Divorce Party) are dark navies / forests / aubergines —
+/// they look great as accents on a white card but disappear when
+/// rendered on the dark-mode card (#383B56). When [isDark] is true,
+/// the helper lifts the lightness above 0.55 so the color stays
+/// recognisable AND visible against the dark surface. In light mode
+/// it returns the color unchanged.
+///
+/// Use this anywhere you'd otherwise paint event-type-tinted text or
+/// icons on top of the theme's card surface — date labels in event
+/// rows, status chips, shop chip accents, etc.
+Color onDarkSurface(Color base, {required bool isDark}) {
+  if (!isDark) return base;
+  final hsl = HSLColor.fromColor(base);
+  final lifted = hsl.lightness < 0.55 ? 0.72 : hsl.lightness;
+  return hsl
+      .withLightness(lifted.clamp(0.0, 1.0))
+      .withSaturation((hsl.saturation * 0.85).clamp(0.0, 1.0))
+      .toColor();
+}
+
 void showComingSoon(BuildContext context, String feature) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$feature coming soon!'), backgroundColor: AppColors.green, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))));
 }

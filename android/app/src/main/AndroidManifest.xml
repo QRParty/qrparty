@@ -13,6 +13,17 @@
         <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="AIzaSyAHONfmej_Ifpv8ui9nbCnCnQcweDzpqIc"/>
+        <!-- Default Firebase Messaging notification channel id. Used by
+             the FCM SDK when an incoming notification message doesn't
+             specify android.notification.channel_id explicitly. Must
+             match the channel registered in main.dart's
+             NotificationBridge so background notifications land in the
+             same channel as foreground ones (consistent importance,
+             sound, etc.). Required since Android 8 — without it,
+             system tray notifications silently no-op. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="qrparty_default"/>
         <activity
             android:name=".MainActivity"
             android:exported="true"

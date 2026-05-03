@@ -9,6 +9,8 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
 import 'package:app_links/app_links.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'utils.dart';
 import 'screens/welcome_screen.dart';
 import 'screens/guest_event_screen.dart';
@@ -65,7 +67,99 @@ void main() async {
   // before the first frame, so the handler has a `pending` URL ready when
   // the post-auth UI mounts and asks for it.
   await WishlistShareHandler.instance.init();
+  // Provision the Android notification channel + initialize the local-
+  // notifications plugin BEFORE runApp so the foreground onMessage
+  // handler (registered later in QRPartyApp) has a ready channel to
+  // post into. Without this, FCM data messages arrived but the system
+  // tray silently dropped them on Android 8+.
+  await NotificationBridge.instance.init();
   runApp(const QRPartyApp());
+}
+
+/// Bridges FCM messages to the device's notification tray. Firebase
+/// Messaging on Android only auto-displays system notifications when
+/// the app is BACKGROUNDED — foreground messages need to be posted via
+/// flutter_local_notifications, and every notification on Android 8+
+/// must reference a registered NotificationChannel by id. Both pieces
+/// are wired here.
+///
+/// The channel id (`qrparty_default`) must match the value declared in
+/// AndroidManifest.xml under
+/// `com.google.firebase.messaging.default_notification_channel_id` so
+/// background notifications (delivered directly by the FCM SDK without
+/// our code in the loop) also land in this channel. The Cloud Function
+/// payload sets `android.notification.channel_id: 'qrparty_default'`
+/// to be doubly explicit.
+class NotificationBridge {
+  NotificationBridge._();
+  static final NotificationBridge instance = NotificationBridge._();
+
+  static const String channelId = 'qrparty_default';
+  static const String channelName = 'QR Party Notifications';
+  static const String channelDescription = 'Event RSVPs, host announcements, and reminders.';
+
+  final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
+  bool _initialized = false;
+
+  Future<void> init() async {
+    if (_initialized) return;
+    _initialized = true;
+
+    const initSettings = InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      iOS: DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
+      ),
+    );
+    await _plugin.initialize(initSettings);
+
+    // Register the notification channel on Android 8+. Idempotent — the
+    // OS no-ops re-registration of a channel that already exists.
+    final androidImpl = _plugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    await androidImpl?.createNotificationChannel(const AndroidNotificationChannel(
+      channelId,
+      channelName,
+      description: channelDescription,
+      importance: Importance.high,
+      playSound: true,
+    ));
+    debugPrint('[NotificationBridge] channel `$channelId` ready');
+
+    // Foreground messages — the OS does NOT auto-display these.
+    // Convert the FCM payload to a local notification so the user sees
+    // the same tray entry whether the app is open or not.
+    FirebaseMessaging.onMessage.listen((RemoteMessage msg) {
+      debugPrint('[FCM] foreground message id=${msg.messageId} title=${msg.notification?.title}');
+      final n = msg.notification;
+      final title = n?.title ?? msg.data['title'] as String? ?? 'QR Party';
+      final body  = n?.body  ?? msg.data['body']  as String? ?? '';
+      if (title.isEmpty && body.isEmpty) return;
+      _plugin.show(
+        msg.hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            channelId,
+            channelName,
+            channelDescription: channelDescription,
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: msg.data['eventId'] as String?,
+      );
+    });
+  }
 }
 
 final _navigatorKey = GlobalKey<NavigatorState>();
@@ -379,6 +473,27 @@ class _QRPartyAppState extends State<QRPartyApp> {
     } catch (_) {}
   }
 
+  /// Builds the app-wide TextTheme: Inter for body / labels / small
+  /// titles (the default reading font) and DM Sans for display /
+  /// headline / titleLarge (the larger display font). Any widget that
+  /// renders Text without overriding fontFamily picks these up via
+  /// the active Theme — no per-widget changes needed. Hardcoded
+  /// `fontFamily: 'FredokaOne'` / `'Nunito'` references in existing
+  /// widgets continue to work; they're not bundled assets, so Flutter
+  /// already falls back to the platform default for those, and this
+  /// theme replaces that fallback with the Google Fonts pair.
+  static TextTheme _appTextTheme(TextTheme base) {
+    return GoogleFonts.interTextTheme(base).copyWith(
+      displayLarge:   GoogleFonts.dmSans(textStyle: base.displayLarge),
+      displayMedium:  GoogleFonts.dmSans(textStyle: base.displayMedium),
+      displaySmall:   GoogleFonts.dmSans(textStyle: base.displaySmall),
+      headlineLarge:  GoogleFonts.dmSans(textStyle: base.headlineLarge),
+      headlineMedium: GoogleFonts.dmSans(textStyle: base.headlineMedium),
+      headlineSmall:  GoogleFonts.dmSans(textStyle: base.headlineSmall),
+      titleLarge:     GoogleFonts.dmSans(textStyle: base.titleLarge),
+    );
+  }
+
   static final _lightTheme = ThemeData(
     colorScheme: ColorScheme.fromSeed(
       seedColor: const Color(0xFF52796F),
@@ -387,6 +502,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
     ),
     scaffoldBackgroundColor: const Color(0xFFF8F7FC),
     useMaterial3: true,
+    textTheme: _appTextTheme(ThemeData.light().textTheme),
     cardTheme: CardThemeData(
       elevation: 0,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -410,6 +526,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
     ),
     scaffoldBackgroundColor: const Color(0xFF2D3047),
     useMaterial3: true,
+    textTheme: _appTextTheme(ThemeData.dark().textTheme),
     cardTheme: CardThemeData(
       elevation: 0,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),

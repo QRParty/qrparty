@@ -30,17 +30,36 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
     await _controller.stop();
 
     final raw = barcode!.rawValue!;
+    debugPrint('[QRScanner] scanned raw="$raw"');
+
+    // Pull the lookup token out of the URL. QR Party encodes events
+    // as `https://partywithqr.com/event/{shortCode}` — the segment
+    // after `/event/` is a 4–8 char uppercase shortCode (NOT a
+    // Firestore doc id, which is much longer). The legacy form
+    // `?id={docId}` is also accepted so older printed QR codes
+    // still work. Bare scanned text (no scheme) is treated as the
+    // lookup token directly — handy for QR codes someone made by
+    // typing just the shortCode.
     final uri = Uri.tryParse(raw);
-    String? eventId;
+    String? lookup;
     if (uri != null) {
-      final segments = uri.pathSegments;
-      final idx = segments.indexOf('event');
-      if (idx != -1 && idx + 1 < segments.length) {
-        eventId = segments[idx + 1];
+      final segs = uri.pathSegments;
+      final eventIdx = segs.indexOf('event');
+      if (eventIdx != -1 && eventIdx + 1 < segs.length) {
+        lookup = segs[eventIdx + 1];
+      } else {
+        lookup = uri.queryParameters['id'];
       }
     }
+    // No URL match — fall back to treating the raw scan as a
+    // shortCode if it looks like one.
+    if ((lookup == null || lookup.isEmpty)
+        && RegExp(r'^[A-Za-z0-9]{4,8}$').hasMatch(raw.trim())) {
+      lookup = raw.trim();
+    }
+    debugPrint('[QRScanner] parsed lookup="$lookup"');
 
-    if (eventId == null || eventId.isEmpty) {
+    if (lookup == null || lookup.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Not a valid QR Party code'), backgroundColor: Colors.redAccent),
@@ -51,9 +70,37 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
     }
 
     try {
-      final doc = await FirebaseFirestore.instance.collection('events').doc(eventId).get();
+      // Mirror main.dart's _resolveAndPushEvent: short tokens that
+      // look like shortCodes are resolved via a where() query against
+      // the indexed `shortCode` field; longer tokens (or shortCode
+      // misses) fall through to a literal doc.get(). Without this,
+      // every scanned URL was treated as a doc id and rejected with
+      // "event not found" because shortCodes are NOT doc ids.
+      final upper = lookup.toUpperCase();
+      final looksLikeShortCode = RegExp(r'^[A-Z0-9]{4,8}$').hasMatch(upper);
+      debugPrint('[QRScanner] looksLikeShortCode=$looksLikeShortCode '
+          '(upper="$upper")');
+
+      DocumentSnapshot? resolved;
+      if (looksLikeShortCode) {
+        final qs = await FirebaseFirestore.instance
+            .collection('events')
+            .where('shortCode', isEqualTo: upper)
+            .limit(1)
+            .get();
+        debugPrint('[QRScanner] shortCode query → ${qs.docs.length} hit(s)');
+        if (qs.docs.isNotEmpty) resolved = qs.docs.first;
+      }
+      // Doc-id fallback — handles the case where the QR encodes the
+      // doc id directly (legacy print files / non-shortCode tokens).
+      resolved ??= await FirebaseFirestore.instance
+          .collection('events')
+          .doc(lookup)
+          .get();
+
       if (!mounted) return;
-      if (!doc.exists) {
+      if (!resolved.exists) {
+        debugPrint('[QRScanner] no event for lookup="$lookup"');
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Event not found'), backgroundColor: Colors.redAccent),
         );
@@ -61,13 +108,18 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
         await _controller.start();
         return;
       }
+      debugPrint('[QRScanner] resolved → eventId=${resolved.id}');
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (_) => GuestEventScreen(eventId: eventId, eventData: doc.data()),
+          builder: (_) => GuestEventScreen(
+            eventId: resolved!.id,
+            eventData: resolved.data() as Map<String, dynamic>,
+          ),
         ),
       );
     } catch (e) {
+      debugPrint('[QRScanner] lookup failed for "$lookup": $e');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error looking up event: $e'), backgroundColor: Colors.redAccent),

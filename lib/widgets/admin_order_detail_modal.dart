@@ -22,9 +22,34 @@ class AdminOrderDetailModal extends StatefulWidget {
 
 class _AdminOrderDetailModalState extends State<AdminOrderDetailModal> {
   late final TextEditingController _notes = TextEditingController(text: widget.order.adminNotes);
+  // Resolved short code for the QR preview's data URL. Order docs
+  // don't carry the shortCode directly — we look it up from the
+  // event doc when the modal opens. Null until loaded; legacy events
+  // without a shortCode stay null and the preview falls back to the
+  // query-param URL.
+  String? _shortCode;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolveShortCode();
+  }
 
   @override
   void dispose() { _notes.dispose(); super.dispose(); }
+
+  Future<void> _resolveShortCode() async {
+    final eventId = widget.order.eventId;
+    if (eventId.isEmpty) return;
+    try {
+      final snap = await FirebaseFirestore.instance.collection('events').doc(eventId).get();
+      if (!mounted) return;
+      final code = snap.data()?['shortCode'] as String?;
+      if (code != null && code.isNotEmpty) {
+        setState(() => _shortCode = code);
+      }
+    } catch (_) {/* preview falls back to query-param URL — non-fatal */}
+  }
 
   // Live-watch the order doc so the modal reflects status updates from
   // the row buttons without requiring a re-open.
@@ -149,7 +174,13 @@ class _AdminOrderDetailModalState extends State<AdminOrderDetailModal> {
               width: 110, height: 110, padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
               child: QrImageView(
-                data: 'https://partywithqr.com/event?id=${order.eventId}',
+                // Prefer the shortCode path form when _resolveShortCode
+                // has loaded one. Legacy events without a shortCode
+                // fall back to the query-param URL — both route through
+                // the same event.html resolveEvent flow.
+                data: (_shortCode != null && _shortCode!.isNotEmpty)
+                    ? 'https://partywithqr.com/event/$_shortCode'
+                    : 'https://partywithqr.com/event?id=${order.eventId}',
                 backgroundColor: Colors.white,
               ),
             ),

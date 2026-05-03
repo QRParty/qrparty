@@ -4,10 +4,18 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../models/merch_order.dart';
 import '../utils.dart';
 
-/// Canonical RSVP URL — matches the format used in generate_qr_screen.dart,
-/// order_merch_screen.dart, admin_order_detail_modal.dart, and the
-/// `eventQrCode` field stamped on order docs by createMerchOrder.js.
-String _eventQrUrl(String eventId) => 'https://partywithqr.com/event?id=$eventId';
+/// Canonical RSVP URL. Prefers the path-based shortCode form
+/// (`/event/{XXXXXX}`) which both the in-app scanner and the
+/// public web resolver handle natively. Falls back to the legacy
+/// query-param form (`/event?id={docId}`) for events that haven't
+/// been migrated to a shortCode yet — both formats route through
+/// the same resolveEvent flow on event.html so nothing breaks.
+String _eventQrUrl(String eventId, {String? shortCode}) {
+  if (shortCode != null && shortCode.isNotEmpty) {
+    return 'https://partywithqr.com/event/$shortCode';
+  }
+  return 'https://partywithqr.com/event?id=$eventId';
+}
 
 /// Phase 1 Kids-birthday theme set. Each value resolves to a distinct
 /// Flutter-rendered card (gradient + decorative shapes drawn from
@@ -149,7 +157,7 @@ class InvitationPreviewSheet extends StatelessWidget {
           if (kidsTheme != null)
             KidsBirthdayInvitationCard(
               theme: kidsTheme,
-              qrData: _eventQrUrl(eventId),
+              qrData: _eventQrUrl(eventId, shortCode: shortCode),
               shortCode: shortCode,
               eventName: eventName,
               eventDate: eventDate,
@@ -160,7 +168,7 @@ class InvitationPreviewSheet extends StatelessWidget {
           else
             _Card4x6(
               variant: variant,
-              qrData: _eventQrUrl(eventId),
+              qrData: _eventQrUrl(eventId, shortCode: shortCode),
               shortCode: shortCode,
               eventName: eventName,
               eventDate: eventDate,

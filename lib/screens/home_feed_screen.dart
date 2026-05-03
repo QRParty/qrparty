@@ -375,6 +375,11 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final chromeColor = isDark ? const Color(0xFF383B56) : Colors.white;
     final brandColor  = isDark ? Colors.white : AppColors.dark;
+    // Theme-aware default for AppBar icons that don't carry their own
+    // semantic color (notifications, settings). The previous hardcoded
+    // AppColors.dark made them invisible against the dark chrome bar
+    // — both icon and chrome are nearly the same navy.
+    final iconColor = isDark ? Colors.white : AppColors.dark;
     return Scaffold(
       appBar: AppBar(
         backgroundColor: chromeColor,
@@ -403,11 +408,11 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
             onPressed: () => _showStorageBottomSheet(_pastCount),
           ),
           IconButton(
-            icon: const Icon(Icons.notifications_outlined, color: AppColors.dark),
+            icon: Icon(Icons.notifications_outlined, color: iconColor),
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HostNotificationsScreen())),
           ),
           IconButton(
-            icon: const Icon(Icons.settings_outlined, color: AppColors.dark),
+            icon: Icon(Icons.settings_outlined, color: iconColor),
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
           ),
           const SizedBox(width: 8),
@@ -619,7 +624,17 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
   }
 
   Widget _buildExploreCard(BuildContext context, Map<String, dynamic> event) {
-    final Color color = event['color'] as Color;
+    final Color rawColor = event['color'] as Color;
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+    // Mirror _buildEventCard's dark-mode treatment so Explore cards
+    // for events whose type primary is dark (Corporate, Holiday, etc.)
+    // stay readable on the dark surface.
+    final Color color = onDarkSurface(rawColor, isDark: isDark);
+    final Color cardBg = isDark ? const Color(0xFF383B56) : Colors.white;
+    final Color cardBorder = isDark
+        ? const Color(0xFF4A4E6B)
+        : Colors.black.withValues(alpha: 0.05);
+    final Color titleColor = isDark ? Colors.white : AppColors.dark;
     final DateTime date = event['date'] as DateTime;
     final location = event['location'] as String;
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -636,9 +651,9 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
       child: Container(
         margin: const EdgeInsets.only(bottom: 14),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: cardBg,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
+          border: Border.all(color: cardBorder),
         ),
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -647,7 +662,7 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
               Container(
                 width: 48,
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
-                decoration: BoxDecoration(color: color.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(12)),
+                decoration: BoxDecoration(color: color.withValues(alpha: isDark ? 0.18 : 0.1), borderRadius: BorderRadius.circular(12)),
                 child: Column(children: [
                   Text(months[date.month - 1].toUpperCase(), style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: color)),
                   Text('${date.day}', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: color)),
@@ -659,7 +674,7 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
                   Row(children: [
                     Text(event['emoji'] as String, style: const TextStyle(fontSize: 15)),
                     const SizedBox(width: 6),
-                    Expanded(child: Text(event['title'] as String, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.dark), overflow: TextOverflow.ellipsis)),
+                    Expanded(child: Text(event['title'] as String, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: titleColor), overflow: TextOverflow.ellipsis)),
                   ]),
                   const SizedBox(height: 3),
                   Text('by ${event['host']}', style: const TextStyle(fontSize: 12, color: AppColors.muted)),
@@ -978,7 +993,18 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
     final bool isPast = event['isPast'] as bool;
     final bool isDraft = event['isDraft'] as bool;
     final DateTime date = event['date'] as DateTime;
-    final Color color = event['color'] as Color;
+    final Color rawColor = event['color'] as Color;
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+    // Dark-mode-safe accent. Several event-type primaries (Corporate,
+    // Graduation, Holiday) are nearly black — on the dark card surface
+    // they vanished. `onDarkSurface` lifts those to a readable shade
+    // and is a no-op in light mode.
+    final Color color = onDarkSurface(rawColor, isDark: isDark);
+    final Color cardBg = isDark ? const Color(0xFF383B56) : Colors.white;
+    final Color cardBorder = isDark
+        ? const Color(0xFF4A4E6B)
+        : Colors.black.withValues(alpha: 0.05);
+    final Color titleColor = isDark ? Colors.white : AppColors.dark;
     final int rsvpTotal = ((event['yes'] as int? ?? 0) + (event['maybe'] as int? ?? 0) + (event['no'] as int? ?? 0));
     final bool canDelete = isPast || rsvpTotal == 0;
     final months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -988,7 +1014,7 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
 
     final card = Container(
       margin: const EdgeInsets.only(bottom: 16),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.black.withOpacity(0.05))),
+      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(20), border: Border.all(color: cardBorder)),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -999,7 +1025,7 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                   decoration: BoxDecoration(
-                    color: isDraft ? const Color(0xFFFFF3E0) : isPast ? const Color(0xFFF0F0F0) : color.withValues(alpha: 0.1),
+                    color: isDraft ? const Color(0xFFFFF3E0) : isPast ? const Color(0xFFF0F0F0) : color.withValues(alpha: isDark ? 0.18 : 0.1),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: isDraft
@@ -1021,7 +1047,7 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
                       Row(children: [
                         Text(event['emoji'] as String, style: const TextStyle(fontSize: 15)),
                         const SizedBox(width: 6),
-                        Expanded(child: Text(event['title'] as String, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.dark))),
+                        Expanded(child: Text(event['title'] as String, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: titleColor))),
                       ]),
                       const SizedBox(height: 3),
                       isDraft

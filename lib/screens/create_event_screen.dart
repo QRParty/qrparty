@@ -61,9 +61,9 @@ const _gold        = Color(0xFFC8922A);
 // the GCP key restriction if you opt for Android-restricted access
 // — only works for the SDK call paths, not the HTTP path above):
 //   25:74:13:2F:C9:02:D8:E1:4B:1A:69:12:62:F3:56:2C:3B:44:07:B0:AD:2E:05:F4:DE:34:02:33:84:1B:D8:14
-//   6A:7A:31:13:37:73:9F:7E:4C:B8:D5:C4:37:DC:2F:5C:07:6A:6F:9F:83:A2:68:0A:91:0A:97:01:48:C1:08:F6
-// (Source: public/.well-known/assetlinks.json — same key Google Play
-// signs the prod APK with.)
+//   90:B0:43:AD:12:E8:82:F0:13:B7:02:40:54:D6:0E:D6:EA:AF:30:F7:5E:14:E1:DC:8B:93:8E:0D:AB:46:E1:A6
+// (Source: public/.well-known/assetlinks.json — second fingerprint is
+// the Play App Signing key Google re-signs the prod release with.)
 const _placesApiKey = 'AIzaSyAHONfmej_Ifpv8ui9nbCnCnQcweDzpqIc';
 
 class CreateEventScreen extends StatefulWidget {
@@ -171,6 +171,10 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     return 'wishlist';
   }
   bool _isPublic = false;
+  // Outdoor flag — when true, the guest screen renders the weather
+  // widget. Defaults to false so indoor events (most parties) don't
+  // surface a weather pill that's irrelevant to them.
+  bool _isOutdoor = false;
   DateTime? _rsvpDeadline;
   bool _isBusiness = false;
   // Full raw accountType from users/{uid}.accountType ('personal' | 'business' |
@@ -213,6 +217,14 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   // field, AND after the WebView returns from [_openShop].
   final _itemNameFocusNode = FocusNode();         // wishlist section
   final _checklistNameFocusNode = FocusNode();    // checklist section
+  // Focus targets for the secondary fields on the inline add row.
+  // The name field's textInputAction is .next, which routes the
+  // keyboard's Next button to whichever of these is relevant for
+  // the current section (qty for checklist, price for wishlist) so
+  // the host can rip through a long list without re-tapping each
+  // field manually.
+  final _checklistQtyFocusNode = FocusNode();
+  final _wishlistPriceFocusNode = FocusNode();
 
   bool _isRecurring = false;
   String _recurrenceFrequency = 'weekly';
@@ -279,6 +291,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       final rawList = d['wishlist'] as List<dynamic>? ?? [];
       wishlistItems = rawList.map((e) => Map<String, dynamic>.from(e as Map)).toList();
       _isPublic = (d['isPublic'] as bool?) ?? false;
+      _isOutdoor = (d['isOutdoor'] as bool?) ?? false;
       final deadlineTs = d['rsvpDeadline'] as Timestamp?;
       if (deadlineTs != null) _rsvpDeadline = deadlineTs.toDate();
       _zipCode = (d['zipCode'] as String?) ?? '';
@@ -388,7 +401,18 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   }
 
   Future<void> _saveDraftNow() async {
-    if (_draftId == null) return;
+    // First-write path: no draft doc exists yet. Skip entirely if the
+    // title is still empty — there's no point creating a Firestore
+    // doc for a host who hasn't typed anything meaningful. When a
+    // title IS present, allocate the doc via _createDraft, which
+    // populates _draftId before falling through to the update path
+    // below (so the very first save also lands the rest of the
+    // form's state in one shot).
+    if (_draftId == null) {
+      if (titleController.text.trim().isEmpty) return;
+      await _createDraft();
+      if (_draftId == null) return; // create failed — bail.
+    }
     try {
       await FirebaseFirestore.instance.collection('events').doc(_draftId).update({
         'accountType': _accountType ?? 'personal',
@@ -401,6 +425,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         'eventEmoji': selectedEventType?.emoji,
         'listType': listType,
         'isPublic': _isPublic,
+        'isOutdoor': _isOutdoor,
         'rsvpDeadline': _rsvpDeadline != null ? Timestamp.fromDate(_rsvpDeadline!) : null,
         'zipCode': _zipCode,
         'coHosts': _coHosts.map((c) => c['uid'] as String).toList(),
@@ -414,11 +439,44 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         'allowPlusOnes': _allowPlusOnes,
         'maxPlusOnes': _allowPlusOnes ? _maxPlusOnes : null,
         'allowWaitlist': _persistedCapacity != null && _allowWaitlist,
-        'wishlist': wishlistItems.map((item) => listType == 'Checklist'
-            ? {'name': item['name'], 'quantity': item['quantity'], 'claimed': 0}
-            : {'name': item['name'], 'price': item['price'], 'contributed': 0.0, 'bought': false}).toList(),
+        // Persist the in-memory items wholesale so per-item discriminators
+        // (`kind`, `quantityNeeded`, etc.) and progress fields (`claims`,
+        // `claimed`, `contributed`, `bought`) land on Firestore. The
+        // earlier shape stripped everything except name+quantity / price,
+        // so legacy events lost `kind` (broke Both-mode routing) and
+        // never gained `quantityNeeded` (broke claim caps on the guest
+        // screen).
+        'wishlist': wishlistItems.map(_serializeItemForSave).toList(),
       });
     } catch (_) {}
+  }
+
+  /// Normalises an in-memory wishlist item for Firestore persistence.
+  /// Wraps the raw map so we can default missing optional fields and
+  /// drop transient UI-only entries (none today, but the helper keeps
+  /// future additions cleanly scoped).
+  Map<String, dynamic> _serializeItemForSave(Map<String, dynamic> item) {
+    final kind = (item['kind'] as String?) ??
+        (listType == 'Checklist' ? 'checklist' : 'wishlist');
+    final out = <String, dynamic>{
+      'name': item['name'],
+      'kind': kind,
+    };
+    if (kind == 'checklist') {
+      out['quantity'] = item['quantity'] ?? '';
+      if (item['quantityNeeded'] is num) {
+        out['quantityNeeded'] = (item['quantityNeeded'] as num).toInt();
+      }
+      out['claimed'] = item['claimed'] ?? 0;
+      out['claims']  = (item['claims'] as List?) ?? const [];
+    } else {
+      out['price']       = item['price']       ?? 0.0;
+      out['contributed'] = item['contributed'] ?? 0.0;
+      out['bought']      = item['bought']      ?? false;
+      if (item['imageUrl'] is String) out['imageUrl'] = item['imageUrl'];
+      if (item['url']      is String) out['url']      = item['url'];
+    }
+    return out;
   }
 
   Map<String, dynamic> _buildRecurrenceRule() {
@@ -445,6 +503,8 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     _locationFocusNode.dispose();
     _itemNameFocusNode.dispose();
     _checklistNameFocusNode.dispose();
+    _checklistQtyFocusNode.dispose();
+    _wishlistPriceFocusNode.dispose();
     newItemNameController.dispose();
     newItemPriceController.dispose();
     newItemQtyController.dispose();
@@ -649,23 +709,33 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       ),
     );
     if (!mounted || result == null) return;
+    // Use the extracted price when the WebView managed to parse one,
+    // otherwise default to 0 so the host can fill it in. The result's
+    // price field is already cleaned (currency / commas stripped),
+    // so a single double.tryParse is enough here.
+    final extractedPrice = double.tryParse(result.price) ?? 0.0;
     setState(() {
       wishlistItems.add({
         'name': result.name,
-        // Default price 0 — the WebView extraction can't reliably
-        // parse a price across retailers; the host edits it inline
-        // after we refocus the name field below.
-        'price': 0.0,
+        'price': extractedPrice,
         'contributed': 0.0,
         'bought': false,
         'kind': 'wishlist',
         if (result.imageUrl.isNotEmpty) 'imageUrl': result.imageUrl,
         if (result.url.isNotEmpty) 'url': result.url,
       });
-      // Pre-fill the inline name field too so the host sees the
-      // extracted title in the editor and can tweak it before it
-      // gets persisted via _scheduleDraftSave.
-      newItemNameController.text = result.name;
+      // Clear the inline form fields after adding so the host sees
+      // the form is ready for the next item. The earlier flow
+      // pre-filled name + price with the extracted values for
+      // post-add editing, but that caused duplicate adds — a host
+      // who tapped + (thinking they hadn't added yet) would push a
+      // second copy of the same item. The just-added card is
+      // already visible in the items list below, so no editing
+      // affordance is lost; the host can long-press / delete the
+      // card to redo it instead.
+      newItemNameController.clear();
+      newItemPriceController.clear();
+      newItemQtyController.clear();
     });
     _scheduleDraftSave();
     // Defer focus until after the popped route's transition finishes
@@ -685,10 +755,19 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     if (newItemNameController.text.trim().isEmpty) return;
     setState(() {
       if (kind == 'checklist') {
-        if (newItemQtyController.text.trim().isEmpty) return;
+        final qtyStr = newItemQtyController.text.trim();
+        if (qtyStr.isEmpty) return;
+        // Parse the qty input as an integer count needed. Stored as
+        // `quantityNeeded` so the guest screen can cap claims and
+        // chip choices to the unclaimed remainder. The original
+        // `quantity` String is kept for back-compat (legacy rendering
+        // paths that show "Qty: <free-form>") so existing items
+        // don't lose their human label.
+        final qtyNeeded = int.tryParse(qtyStr.replaceAll(RegExp(r'[^0-9]'), ''));
         wishlistItems.add({
           'name': newItemNameController.text.trim(),
-          'quantity': newItemQtyController.text.trim(),
+          'quantity': qtyStr,
+          if (qtyNeeded != null && qtyNeeded > 0) 'quantityNeeded': qtyNeeded,
           'claimed': 0,
           'claims': <Map<String, dynamic>>[],
           'kind': 'checklist',
@@ -874,6 +953,14 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             itemBuilder: (context, index) {
               final type = eventTypes[index];
               final isSelected = selectedEventType?.name == type.name;
+              // Dark-mode-safe accent. Several event-type primaries
+              // (Corporate, Graduation, Holiday, Divorce) are nearly
+              // black and disappeared against the dark card surface
+              // — Corporate especially. `onDarkSurface` lifts those
+              // to a readable shade in dark mode and is a no-op in
+              // light mode, so the original brand colors are
+              // preserved on light backgrounds.
+              final accent = onDarkSurface(type.primary, isDark: _isDark);
               return GestureDetector(
                 onTap: () => setState(() {
                   selectedEventType = type;
@@ -889,10 +976,10 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 200),
                   decoration: BoxDecoration(
-                    color: isSelected ? type.primary.withValues(alpha: 0.18) : _card,
+                    color: isSelected ? accent.withValues(alpha: 0.18) : _card,
                     borderRadius: BorderRadius.circular(18),
                     border: Border.all(
-                      color: isSelected ? type.primary : _border,
+                      color: isSelected ? accent : _border,
                       width: isSelected ? 2 : 1,
                     ),
                   ),
@@ -902,17 +989,24 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                       Container(
                         height: 48,
                         decoration: BoxDecoration(
-                          color: type.primary,
+                          color: accent,
                           borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
                         ),
                         child: Center(child: Text(type.emoji, style: const TextStyle(fontSize: 26))),
                       ),
                       const SizedBox(height: 8),
-                      Text(type.name, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: isSelected ? type.primary : _fg)),
+                      // Label always uses the theme foreground (white
+                      // in dark, AppColors.dark in light) regardless
+                      // of selected state. The previous selected-state
+                      // override painted the label in `type.primary`,
+                      // which on dark mode was a near-black-on-near-
+                      // black render and made the label invisible the
+                      // moment a card was tapped.
+                      Text(type.name, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _fg)),
                       if (isSelected)
                         Padding(
                           padding: const EdgeInsets.only(top: 4),
-                          child: Icon(Icons.check_circle, color: type.primary, size: 16),
+                          child: Icon(Icons.check_circle, color: accent, size: 16),
                         ),
                     ],
                   ),
@@ -1069,6 +1163,55 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
               ),
             ),
             const SizedBox(height: 10),
+            // Outdoor toggle — drives the weather widget on the guest
+            // screen. Off by default (most parties are indoor) so the
+            // weather pill stays out of the way unless the host opts
+            // in. A purple accent matches the public toggle above.
+            Container(
+              decoration: BoxDecoration(
+                color: _card,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: _isOutdoor ? _purple : _border, width: _isOutdoor ? 1.5 : 1),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(children: [
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      Icon(Icons.wb_sunny_outlined, size: 16, color: _isOutdoor ? _purple : _muted),
+                      const SizedBox(width: 6),
+                      Text('Outdoor event', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _isOutdoor ? _purple : _fg)),
+                    ]),
+                    const SizedBox(height: 2),
+                    Text('Shows the weather forecast on the event page', style: TextStyle(fontSize: 11, color: _muted)),
+                  ]),
+                ),
+                Switch(
+                  value: _isOutdoor,
+                  onChanged: (v) { setState(() => _isOutdoor = v); _scheduleDraftSave(); },
+                  activeTrackColor: _purple,
+                  activeThumbColor: Colors.white,
+                ),
+              ]),
+            ),
+            const SizedBox(height: 10),
+            // Event-date reference, shown only when the host has
+            // already picked an event date. Gives them context when
+            // setting an RSVP deadline so they're not picking a date
+            // in the abstract — they can see "Event is on May 20"
+            // right above the deadline tile.
+            if (selectedDate != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6, left: 4),
+                child: Row(children: [
+                  Icon(Icons.event, size: 13, color: _muted),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Event is on ${const ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][selectedDate!.month - 1]} ${selectedDate!.day}',
+                    style: TextStyle(fontSize: 12, color: _muted, fontWeight: FontWeight.w600),
+                  ),
+                ]),
+              ),
             GestureDetector(
               onTap: _pickRsvpDeadline,
               child: Container(
@@ -1144,127 +1287,162 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   Widget _buildStep2() {
     final type = selectedEventType!;
 
+    // Step 3 layout — banner + scrollable middle + pinned generate
+    // button. Earlier the middle was an `Expanded > ListView` and the
+    // Lists toggles + BROWSE STORES sections were SIBLINGS of that
+    // Expanded inside the outer Column. When the keyboard opened, the
+    // fixed-height children (banner ~60 + toggles ~140 + browse ~120
+    // + button ~88 = ~408) overran the keyboard-shrunken viewport and
+    // Expanded got squeezed to negative — RenderFlex overflowed by
+    // ~78px. Pulling everything-but-banner-and-button into one SCV
+    // makes the whole middle scroll as one unit, so the keyboard can
+    // never push the layout below zero remaining space.
     return Column(
       children: [
-        // Mini themed banner
+        // Themed banner — emoji-only now. Title text was removed
+        // because the parent Scaffold's AppBar already shows the
+        // step name ("Wishlist"), and the duplicated event name made
+        // the top of Step 3 feel busy. Banner kept (still useful as
+        // a colored accent that ties the step to the chosen event
+        // type) but slimmed from 60→36 to suit the trimmed content.
         Container(
-          height: 60,
+          height: 36,
           color: type.primary,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(type.emoji, style: const TextStyle(fontSize: 22)),
-              const SizedBox(width: 10),
-              Text(titleController.text.isEmpty ? type.name : titleController.text,
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 16)),
-            ],
+          child: Center(
+            child: Text(type.emoji, style: const TextStyle(fontSize: 20)),
           ),
         ),
-        // Lists section — two independent toggles. A host can enable
-        // wishlist (gift contributions), checklist (potluck "I'll bring
-        // X" claims), neither, or both. Internally this maps to
-        // listType ∈ {No List, Wishlist, Checklist, Both} so legacy
-        // readers (templates, analytics) still get a stable string.
-        _glowWrap(Container(
-          color: _card,
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Lists', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _fg)),
-              const SizedBox(height: 4),
-              Text(
-                'Enable either, both, or neither — guests see whichever you turn on.',
-                style: TextStyle(fontSize: 11.5, color: _muted, height: 1.35),
-              ),
-              const SizedBox(height: 8),
-              if (kWishlistEnabled)
-                _listTypeToggle(
-                  type: type,
-                  icon: Icons.card_giftcard_outlined,
-                  label: 'Wishlist',
-                  description: 'Guests contribute money or buy items',
-                  value: _hasWishlist,
-                  onChanged: _setHasWishlist,
-                ),
-              _listTypeToggle(
-                type: type,
-                icon: Icons.checklist_outlined,
-                label: 'Checklist',
-                description: "Guests claim items they'll bring (great for potlucks)",
-                value: _hasChecklist,
-                onChanged: _setHasChecklist,
-              ),
-            ],
-          ),
-        )),
-        // Retailer chips — wishlist mode only. Tap a chip to open the
-        // store's native app (or the web fallback in a Chrome Custom Tab),
-        // shop, then come back and add manually below — or use the
-        // system share sheet → "Add to QR Party" to drop a shared
-        // product into the wishlist subcollection live during creation.
-        if (listType == 'Wishlist')
-          Container(
-            color: _card,
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        Expanded(
+          child: SingleChildScrollView(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Text(
-                    'BROWSE STORES',
-                    style: TextStyle(
-                      fontFamily: 'Nunito', fontSize: 11, fontWeight: FontWeight.w800,
-                      letterSpacing: 1.4, color: _muted,
+                // Lists section — two independent toggles. A host can enable
+                // wishlist (gift contributions), checklist (potluck "I'll bring
+                // X" claims), neither, or both. Internally this maps to
+                // listType ∈ {No List, Wishlist, Checklist, Both} so legacy
+                // readers (templates, analytics) still get a stable string.
+                _glowWrap(Container(
+                  color: _card,
+                  // Slightly tighter than the prior 16/14/16/14: less
+                  // bottom padding so the gap to the retailer chip
+                  // row below feels like a continuation of the same
+                  // section rather than a separate one.
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Lists', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _fg)),
+                      const SizedBox(height: 4),
+                      // Subtitle removed — the toggle labels and
+                      // descriptions inside _listTypeToggle make the
+                      // intent self-explanatory.
+                      if (kWishlistEnabled)
+                        _listTypeToggle(
+                          type: type,
+                          icon: Icons.card_giftcard_outlined,
+                          label: 'Wishlist',
+                          description: 'Guests contribute money or buy items',
+                          value: _hasWishlist,
+                          onChanged: _setHasWishlist,
+                        ),
+                      _listTypeToggle(
+                        type: type,
+                        icon: Icons.checklist_outlined,
+                        label: 'Checklist',
+                        description: "Guests claim items they'll bring (great for potlucks)",
+                        value: _hasChecklist,
+                        onChanged: _setHasChecklist,
+                      ),
+                    ],
+                  ),
+                )),
+                // Retailer chips — wishlist mode only. Stripped down
+                // from the prior layout: dropped the BROWSE STORES
+                // label and the multi-line instruction text below, and
+                // tightened the chip padding. Chips are self-explanatory
+                // and the instruction text was paraphrasing what the
+                // chips already imply. Saves ~85px of fixed-height
+                // content per show, which on its own clears the
+                // earlier 78px keyboard overflow on most phones.
+                // Show chips whenever Wishlist is enabled, regardless
+                // of whether Checklist is also on. Earlier this gated
+                // on listType=='Wishlist' which excluded the 'Both'
+                // mode — chips disappeared the moment the host turned
+                // on Checklist alongside Wishlist.
+                if (_hasWishlist)
+                  Container(
+                    color: _card,
+                    padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Tells the host what the chips actually do —
+                        // tapping one opens the retailer in the in-app
+                        // browser and lets them add items via the
+                        // share sheet. Without context the icons just
+                        // looked like decorative branding.
+                        Padding(
+                          padding: const EdgeInsets.only(left: 4, bottom: 6),
+                          child: Text(
+                            'Browse stores to add items:',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: _muted,
+                              letterSpacing: 0.3,
+                            ),
+                          ),
+                        ),
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(children: [
+                            for (final s in _shopChips) ...[
+                              _shopChip(s),
+                              const SizedBox(width: 6),
+                            ],
+                          ]),
+                        ),
+                      ],
                     ),
                   ),
-                ),
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(children: [
-                    for (final s in _shopChips) ...[
-                      _shopChip(s),
-                      const SizedBox(width: 8),
-                    ],
-                  ]),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Tap a store, find an item, then use the share menu → "Add to QR Party" — or add manually below.',
-                  style: TextStyle(fontSize: 11, color: _muted, height: 1.4),
-                ),
-                const SizedBox(height: 4),
+                // Items area. When listType=='No List' show an empty-
+                // state with a fixed minimum height so it doesn't
+                // collapse to zero inside the SCV. Otherwise stack
+                // one or both kind sections directly — the outer SCV
+                // owns scrolling now, so this no longer needs its own
+                // ListView.
+                if (listType == 'No List')
+                  SizedBox(
+                    height: 240,
+                    child: Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text('🚫', style: TextStyle(fontSize: 48)),
+                          const SizedBox(height: 12),
+                          Text('No list for this event', style: TextStyle(fontSize: 16, color: _muted)),
+                          const SizedBox(height: 4),
+                          Text('Both tabs will be hidden from guests', style: TextStyle(fontSize: 13, color: _muted)),
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (_hasWishlist) _buildKindSection('wishlist', type),
+                        if (_hasWishlist && _hasChecklist) const SizedBox(height: 18),
+                        if (_hasChecklist) _buildKindSection('checklist', type),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
-        // Items area. When listType=='No List' show an empty-state.
-        // Otherwise stack one or both kind sections inside a scroll
-        // view — each section owns its own input row + items list,
-        // filtered by `kind`. Single-list mode renders just the active
-        // section so the layout matches the prior behavior.
-        Expanded(
-          child: listType == 'No List'
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Text('🚫', style: TextStyle(fontSize: 48)),
-                      const SizedBox(height: 12),
-                      Text('No list for this event', style: TextStyle(fontSize: 16, color: _muted)),
-                      const SizedBox(height: 4),
-                      Text('Both tabs will be hidden from guests', style: TextStyle(fontSize: 13, color: _muted)),
-                    ],
-                  ),
-                )
-              : ListView(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                  children: [
-                    if (_hasWishlist) _buildKindSection('wishlist', type),
-                    if (_hasWishlist && _hasChecklist) const SizedBox(height: 18),
-                    if (_hasChecklist) _buildKindSection('checklist', type),
-                  ],
-                ),
         ),
         Padding(
           padding: const EdgeInsets.all(16),
@@ -1315,9 +1493,12 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                   final seriesId = isRecurring
                       ? FirebaseFirestore.instance.collection('recurringEvents').doc().id
                       : null;
-                  final wishlistData = wishlistItems.map((item) => listType == 'Checklist'
-                      ? {'name': item['name'], 'quantity': item['quantity'], 'claimed': 0}
-                      : {'name': item['name'], 'price': item['price'], 'contributed': 0.0, 'bought': false}).toList();
+                  // Mirrors the draft-save serializer so fields like
+                  // `kind`, `quantityNeeded`, `claims`, etc. survive
+                  // the create write. Earlier the shape was stripped
+                  // down to name+quantity / price and dropped every
+                  // discriminator; now both paths use the same helper.
+                  final wishlistData = wishlistItems.map(_serializeItemForSave).toList();
                   final finalData = {
                     'accountType': _accountType ?? 'personal',
                     'title': titleController.text,
@@ -1335,6 +1516,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     'maybe': 0,
                     'no': 0,
                     'isPublic': _isPublic,
+                    'isOutdoor': _isOutdoor,
                     'rsvpDeadline': _rsvpDeadline != null ? Timestamp.fromDate(_rsvpDeadline!) : null,
                     'coHosts': _coHosts.map((c) => c['uid'] as String).toList(),
                     'zipCode': _zipCode,
@@ -1590,37 +1772,55 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     required bool value,
     required void Function(bool) onChanged,
   }) {
+    // Settings-style row: small leading icon (no colored tile),
+    // single-line label with description as a quiet trailing tail
+    // on the same line, compact Switch. Total row height ~32 —
+    // about half the previous 56. The colored emphasis comes from
+    // the Switch when on; no separate tile needed.
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 1),
       child: Row(
         children: [
-          Container(
-            width: 40, height: 40,
-            decoration: BoxDecoration(
-              color: value ? type.primary : _border,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            alignment: Alignment.center,
-            child: Icon(icon, size: 20, color: value ? Colors.white : _muted),
+          Icon(
+            icon,
+            size: 18,
+            color: value ? type.primary : _muted,
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 10),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: _fg)),
-                const SizedBox(height: 2),
-                Text(description, style: TextStyle(fontSize: 11.5, color: _muted, height: 1.3)),
-              ],
+            child: RichText(
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              text: TextSpan(
+                style: TextStyle(
+                  fontFamily: 'Nunito', fontSize: 13.5,
+                  fontWeight: FontWeight.w700, color: _fg,
+                ),
+                children: [
+                  TextSpan(text: label),
+                  TextSpan(
+                    text: '  ·  $description',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w500,
+                      fontSize: 12,
+                      color: _muted,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
-          Switch(
-            value: value,
-            onChanged: onChanged,
-            activeThumbColor: Colors.white,
-            activeTrackColor: type.primary,
-            inactiveThumbColor: _muted,
-            inactiveTrackColor: _border,
+          Transform.scale(
+            scale: 0.85,
+            child: Switch(
+              value: value,
+              onChanged: onChanged,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              activeThumbColor: Colors.white,
+              activeTrackColor: type.primary,
+              inactiveThumbColor: _muted,
+              inactiveTrackColor: _border,
+            ),
           ),
         ],
       ),
@@ -1630,21 +1830,25 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   Widget _shopChip(({String label, String emoji, String url}) s) {
     return InkWell(
       onTap: () => _openShop(s.url),
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(18),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        // Compacter padding (12/8 vs the original 14/10) and a tighter
+        // emoji ↔ label gap (6 vs 8). Roughly 18% smaller per chip,
+        // which adds up across 6 chips and helps Step 3 feel less
+        // crowded under the toggle list.
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: _bg,
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(18),
           border: Border.all(color: _border),
         ),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Text(s.emoji, style: const TextStyle(fontSize: 16)),
-          const SizedBox(width: 8),
+          Text(s.emoji, style: const TextStyle(fontSize: 15)),
+          const SizedBox(width: 6),
           Text(
             s.label,
             style: TextStyle(
-              fontFamily: 'Nunito', fontSize: 13, fontWeight: FontWeight.w800,
+              fontFamily: 'Nunito', fontSize: 12.5, fontWeight: FontWeight.w800,
               color: _fg,
             ),
           ),
@@ -1692,27 +1896,42 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
           // Input row — price for wishlist, quantity for checklist.
           // Controllers are shared across both sections; each Add
           // button clears them so jumping between sections is clean.
+          // The name field's textInputAction is .next so tapping the
+          // keyboard's Next button advances to the secondary field
+          // (qty for checklist, price for wishlist) instead of
+          // dismissing the keyboard.
           Row(children: [
             Expanded(
               child: TextField(
                 controller: newItemNameController,
                 focusNode: isChecklist ? _checklistNameFocusNode : _itemNameFocusNode,
                 style: TextStyle(color: _fg),
+                textInputAction: TextInputAction.next,
+                onSubmitted: (_) => (isChecklist ? _checklistQtyFocusNode : _wishlistPriceFocusNode).requestFocus(),
                 decoration: _inputDecoration(isChecklist ? 'Item to bring' : 'Item name'),
               ),
             ),
             const SizedBox(width: 8),
             SizedBox(
-              width: 90,
+              width: 80,
               child: isChecklist
                   ? TextField(
                       controller: newItemQtyController,
+                      focusNode: _checklistQtyFocusNode,
+                      keyboardType: TextInputType.number,
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => _addItemOfKind(kind),
                       style: TextStyle(color: _fg),
-                      decoration: _inputDecoration('e.g. 2 bags'),
+                      // Hint shows × N convention so the host knows
+                      // it's a count, not a free-form descriptor.
+                      decoration: _inputDecoration('× 12'),
                     )
                   : TextField(
                       controller: newItemPriceController,
+                      focusNode: _wishlistPriceFocusNode,
                       keyboardType: TextInputType.number,
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => _addItemOfKind(kind),
                       style: TextStyle(color: _fg),
                       decoration: _inputDecoration('\$ Price'),
                     ),

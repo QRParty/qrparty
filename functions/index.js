@@ -183,16 +183,38 @@ exports.getStripeRevenue = onCall(
 exports.processNotificationQueue = onDocumentCreated(
   "notificationQueue/{docId}",
   async (event) => {
+    const docId = event.params.docId;
+    const log = (msg, extra) =>
+      console.log(`[processNotificationQueue ${docId}] ${msg}`, extra || "");
+
     const snap = event.data;
-    if (!snap) return;
+    if (!snap) {
+      log("no snapshot — function fired with empty event");
+      return;
+    }
 
     const data = snap.data();
     const tokens = data.tokens;
     const title = data.title;
     const body = data.body;
+    const eventId = data.eventId || "";
+
+    log("invoke", {
+      tokenCount: Array.isArray(tokens) ? tokens.length : 0,
+      title, body, eventId,
+    });
 
     if (!Array.isArray(tokens) || tokens.length === 0 || !title || !body) {
-      await snap.ref.update({ sent: true, skipped: true, processedAt: FieldValue.serverTimestamp() });
+      log("skipped — missing tokens/title/body");
+      await snap.ref.update({
+        sent: true,
+        skipped: true,
+        skipReason: !Array.isArray(tokens) ? "tokens-not-array"
+          : tokens.length === 0 ? "tokens-empty"
+          : !title ? "title-missing"
+          : "body-missing",
+        processedAt: FieldValue.serverTimestamp(),
+      });
       return;
     }
 
@@ -200,36 +222,133 @@ exports.processNotificationQueue = onDocumentCreated(
     const db = getFirestore();
 
     const chunkSize = 500;
-    const results = [];
+    let totalSuccess = 0;
+    let totalFailure = 0;
+    // Per-token failure detail collected across all chunks. Stamped
+    // back onto the queue doc so a host (or admin) inspecting Firestore
+    // can see exactly which tokens failed and why. Also drives the
+    // dead-token cleanup pass at the end.
+    const failures = []; // [{token, code, message}]
 
     for (let i = 0; i < tokens.length; i += chunkSize) {
       const chunk = tokens.slice(i, i + chunkSize);
-      const response = await messaging.sendEachForMulticast({
-        tokens: chunk,
-        notification: { title, body },
-        data: { eventId: data.eventId || '' },
-        android: {
-          notification: { sound: "default", priority: "high" },
-        },
-        apns: {
-          payload: { aps: { sound: "default", badge: 1 } },
-        },
-      });
-      results.push({
+      log(`sending chunk ${i / chunkSize + 1} of ${Math.ceil(tokens.length / chunkSize)} (${chunk.length} tokens)`);
+      let response;
+      try {
+        response = await messaging.sendEachForMulticast({
+          tokens: chunk,
+          notification: { title, body },
+          // FCM `data` payload values must all be strings. eventId is
+          // already a string; coerce defensively in case a future
+          // caller hands us a non-string.
+          data: { eventId: String(eventId) },
+          android: {
+            // channel_id must match the channel created in
+            // lib/main.dart's NotificationBridge AND the manifest
+            // meta-data `com.google.firebase.messaging.default_
+            // notification_channel_id`. Required on Android 8+ —
+            // notifications without a registered channel are silently
+            // dropped by the system tray.
+            notification: { sound: "default", priority: "high", channel_id: "qrparty_default" },
+          },
+          apns: {
+            payload: { aps: { sound: "default", badge: 1 } },
+          },
+        });
+      } catch (err) {
+        // sendEachForMulticast itself rarely throws — per-token
+        // failures land in response.responses. A throw here is a
+        // top-level FCM auth/config issue (e.g. missing APNs key,
+        // wrong project). Log it loudly and bail.
+        log("FCM send threw — likely config issue", {
+          code: err.code, message: err.message,
+        });
+        await snap.ref.update({
+          sent: true,
+          error: true,
+          errorCode: err.code || "unknown",
+          errorMessage: err.message || String(err),
+          processedAt: FieldValue.serverTimestamp(),
+        });
+        return;
+      }
+
+      totalSuccess += response.successCount;
+      totalFailure += response.failureCount;
+      log(`chunk result`, {
         successCount: response.successCount,
         failureCount: response.failureCount,
       });
+
+      // Walk per-token responses to surface why each one failed.
+      // response.responses is parallel to the input tokens array.
+      response.responses.forEach((r, idx) => {
+        if (!r.success && r.error) {
+          failures.push({
+            token: chunk[idx],
+            code: r.error.code || "unknown",
+            message: r.error.message || "",
+          });
+        }
+      });
     }
 
-    const totalSuccess = results.reduce((s, r) => s + r.successCount, 0);
-    const totalFailure = results.reduce((s, r) => s + r.failureCount, 0);
+    log("totals", { totalSuccess, totalFailure, failureCount: failures.length });
 
-    await db.collection("notificationQueue").doc(event.params.docId).update({
+    // Surface every distinct failure code so a quick log scan tells
+    // us if it's all stale tokens vs. a different class of problem.
+    const codeCounts = {};
+    for (const f of failures) {
+      codeCounts[f.code] = (codeCounts[f.code] || 0) + 1;
+    }
+    if (Object.keys(codeCounts).length > 0) {
+      log("failure breakdown by error code", codeCounts);
+    }
+
+    // Dead-token cleanup. FCM returns these codes when a token is no
+    // longer valid (user uninstalled, reinstalled with a new token,
+    // OS revoked it). Leaving stale tokens on user docs causes every
+    // future notification to log an avoidable failure — flush them
+    // out when we see the error. Looked up by query because the
+    // queue payload stores raw tokens (no uid back-pointer).
+    const deadCodes = new Set([
+      "messaging/registration-token-not-registered",
+      "messaging/invalid-registration-token",
+      "messaging/invalid-argument",
+    ]);
+    const deadTokens = failures
+      .filter((f) => deadCodes.has(f.code))
+      .map((f) => f.token);
+    if (deadTokens.length > 0) {
+      log(`scrubbing ${deadTokens.length} dead token(s) from user docs`);
+      for (const dt of deadTokens) {
+        try {
+          const usersWithToken = await db.collection("users")
+            .where("fcmToken", "==", dt)
+            .get();
+          for (const userDoc of usersWithToken.docs) {
+            await userDoc.ref.update({ fcmToken: FieldValue.delete() });
+            log(`cleared dead token from users/${userDoc.id}`);
+          }
+        } catch (err) {
+          log(`dead-token cleanup failed for token ending …${dt.slice(-8)}`, {
+            code: err.code, message: err.message,
+          });
+        }
+      }
+    }
+
+    await db.collection("notificationQueue").doc(docId).update({
       sent: true,
       successCount: totalSuccess,
       failureCount: totalFailure,
+      // Cap inline failures to avoid blowing up the doc on a giant
+      // batch; full detail is in the function logs.
+      failures: failures.slice(0, 25),
+      failureCodes: codeCounts,
       processedAt: FieldValue.serverTimestamp(),
     });
+    log("done");
   }
 );
 
@@ -237,6 +356,40 @@ exports.processNotificationQueue = onDocumentCreated(
 // Scheduled every 30 minutes: for each ended recurring event that hasn't yet
 // spawned its next occurrence, compute the next date from the series rule,
 // clone the series template into a new event, and push-notify previous Yes RSVPs.
+
+// Mirrors the Dart-side `_shortCodeAlphabet` / `_generateShortCode` /
+// `_allocateUniqueShortCode` in lib/screens/create_event_screen.dart.
+// 6-char uppercase alphanumeric, deliberately omitting the ambiguous
+// 0/O and 1/I pairs so codes can be typed off a printed invitation
+// without confusion. 32^6 ≈ 1B keyspace — collision math is negligible
+// for any realistic event volume. Each spawned recurring occurrence
+// needs its own unique code so partywithqr.com/event/{shortCode} URLs
+// resolve to the right doc; sharing one shortCode across an entire
+// series would let any guest scan into the wrong week's event.
+const SHORT_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function generateShortCode() {
+  let out = "";
+  for (let i = 0; i < 6; i++) {
+    out += SHORT_CODE_ALPHABET.charAt(Math.floor(Math.random() * SHORT_CODE_ALPHABET.length));
+  }
+  return out;
+}
+
+async function allocateUniqueShortCode(db) {
+  for (let i = 0; i < 5; i++) {
+    const code = generateShortCode();
+    const dup = await db.collection("events")
+      .where("shortCode", "==", code)
+      .limit(1)
+      .get();
+    if (dup.empty) return code;
+  }
+  // Extremely unlikely; fall through with a fresh code rather than throw.
+  // Worst case the host gets a duplicate and the secondary lookup returns
+  // the first match — still functional.
+  return generateShortCode();
+}
 
 function computeNextRecurringDate(prevDate, rule) {
   const d = new Date(prevDate.getTime());
@@ -303,11 +456,18 @@ exports.createNextRecurringEvent = onSchedule(
       }
 
       const template = series.eventTemplate || {};
+      // Mint a fresh shortCode for this occurrence. The template
+      // shouldn't carry one (the Dart-side recurring-series writer
+      // intentionally omits it) but the explicit assignment after
+      // the spread guarantees uniqueness even if a stale template
+      // somehow has the prior occurrence's code.
+      const shortCode = await allocateUniqueShortCode(db);
       const newEventData = {
         ...template,
         hostId:   data.hostId,
         hostName: data.hostName,
         date:     Timestamp.fromDate(nextDate),
+        shortCode,
         recurringSeriesId: seriesId,
         recurrenceRule:    rule,
         isRecurring: true,
@@ -324,7 +484,7 @@ exports.createNextRecurringEvent = onSchedule(
         latestEventId:   newRef.id,
         latestEventDate: Timestamp.fromDate(nextDate),
       });
-      console.log(`[createNextRecurringEvent] series ${seriesId}: ${doc.id} → ${newRef.id} @ ${nextDate.toISOString()}`);
+      console.log(`[createNextRecurringEvent] series ${seriesId}: ${doc.id} → ${newRef.id} (shortCode=${shortCode}) @ ${nextDate.toISOString()}`);
 
       // Notify previous Yes RSVPs
       try {
@@ -349,7 +509,7 @@ exports.createNextRecurringEvent = onSchedule(
               body:  `It's back on ${when}. Tap to RSVP.`,
             },
             data: { eventId: newRef.id },
-            android: { notification: { sound: "default", priority: "high" } },
+            android: { notification: { sound: "default", priority: "high", channel_id: "qrparty_default" } },
             apns:    { payload: { aps: { sound: "default", badge: 1 } } },
           });
         }

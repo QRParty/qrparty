@@ -10,7 +10,29 @@ const { getStorage } = require("firebase-admin/storage");
 //   1. puppeteer + HTML/CSS template (easiest layout, ~250MB cold start)
 //   2. sharp + qrcode + SVG composite (lightweight, more layout code)
 // Inputs already wired: theme, themeVariant, productType, packSize,
-// eventQrCode, eventName, eventDate, hostName, accountTier, customDesignUrl.
+// eventQrCode, eventShortCode, eventId, eventName, eventDate, hostName,
+// accountTier, customDesignUrl.
+
+// Build the canonical event URL the print file should encode. Mirrors
+// the resolver order used in invitation_preview.dart and event.html:
+//   1. shortCode → `/event/{XXXXXX}` (preferred, all new events)
+//   2. caller-supplied eventQrCode → trust it as-is (already a URL)
+//   3. eventId → legacy `/event?id={docId}` fallback
+// Returns null when none of the above are usable so callers can no-op
+// the QR layer instead of stamping a broken URL.
+function resolveEventUrl({ eventQrCode, eventShortCode, eventId }) {
+  if (typeof eventShortCode === "string" && eventShortCode.length > 0) {
+    return `https://partywithqr.com/event/${eventShortCode}`;
+  }
+  if (typeof eventQrCode === "string" && eventQrCode.length > 0) {
+    return eventQrCode;
+  }
+  if (typeof eventId === "string" && eventId.length > 0) {
+    return `https://partywithqr.com/event?id=${eventId}`;
+  }
+  return null;
+}
+
 async function generatePrintFile({
   orderId,
   theme,
@@ -18,12 +40,19 @@ async function generatePrintFile({
   productType,
   packSize,
   eventQrCode,
+  eventShortCode,
+  eventId,
   eventName,
   eventDate,
   hostName,
   accountTier,
   customDesignUrl,
 }) {
+  // Single source of truth for the URL that will be rendered into the
+  // print-file QR. The placeholder SVG below doesn't actually use it
+  // yet, but resolving it here keeps the input-shape contract honest
+  // for the real renderer swap.
+  const printQrUrl = resolveEventUrl({ eventQrCode, eventShortCode, eventId });
   const safeName = (eventName || "").replace(/[<>&"']/g, "").slice(0, 80);
   const variantLabel = customDesignUrl ? "CUSTOM UPLOAD" : `${theme || "classic"} · v${themeVariant ?? 0}`;
   const productLabel = productType === "invitation" ? "INVITATION" : "STICKER";
@@ -72,8 +101,8 @@ async function generatePrintFile({
   });
 
   // Side-effects intentionally explicit so future SVG→PNG swap is one return.
-  void hostName; void eventQrCode; void eventDate;
+  void hostName; void eventQrCode; void eventDate; void printQrUrl;
   return { url: signed, isPlaceholder: true };
 }
 
-module.exports = { generatePrintFile };
+module.exports = { generatePrintFile, resolveEventUrl };
