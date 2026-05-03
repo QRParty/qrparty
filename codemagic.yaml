@@ -4,7 +4,7 @@ workflows:
     max_build_duration: 120
     environment:
       flutter: 3.41.7
-      xcode: 16.4
+      xcode: 26
       cocoapods: default
       groups:
         - ios_signing
