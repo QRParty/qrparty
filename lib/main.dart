@@ -17,20 +17,21 @@ import 'screens/guest_event_screen.dart';
 import 'screens/home_router.dart';
 import 'services/wishlist_share_handler.dart';
 import 'widgets/share_to_wishlist_sheet.dart';
+import 'firebase_options.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
     if (Firebase.apps.isEmpty) {
+      // Platform-specific options from `flutterfire configure`. The
+      // previous hardcoded `:web:` appId crashed the iOS Firebase SDK
+      // in `+[FIRApp addAppToAppDictionary:]` because the platform
+      // marker in the appId didn't match the running runtime.
+      // DefaultFirebaseOptions.currentPlatform returns the correct
+      // appId per platform: web→…:web:…, android→…:android:…,
+      // ios→…:ios:… (registered in Firebase project qrparty-6e648).
       await Firebase.initializeApp(
-        options: const FirebaseOptions(
-          apiKey: "AIzaSyDI8j_7H9VoIFMCwGdJzEij406ap_tRlcA",
-          authDomain: "qrparty-6e648.firebaseapp.com",
-          projectId: "qrparty-6e648",
-          storageBucket: "qrparty-6e648.firebasestorage.app",
-          messagingSenderId: "478022847809",
-          appId: "1:478022847809:web:a75dfa45ddb28d043565c0",
-        ),
+        options: DefaultFirebaseOptions.currentPlatform,
       );
     }
   } catch (e) {
