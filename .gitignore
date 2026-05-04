@@ -122,6 +122,14 @@ local.properties
 **/ios/ServiceDefinitions.json
 **/ios/Runner/GeneratedPluginRegistrant.*
 
+# iOS signing files
+*.p12
+*.mobileprovision
+*.p8
+profile.txt
+cert.txt
+AuthKey_*.p8
+
 # macOS
 **/Flutter/ephemeral/
 **/Pods/
