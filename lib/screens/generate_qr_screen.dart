@@ -33,8 +33,19 @@ class GenerateQRCodeScreen extends StatefulWidget {
 
 class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
   final GlobalKey _qrKey = GlobalKey();
+  // Anchor for the share-sheet popover on iPad / iOS. Without a non-
+  // zero source rect, share_plus throws PlatformException with the
+  // {{0,0},{0,0}} message Jennifer hit on her iPhone — UIActivity
+  // ViewController requires the popover origin to live inside the
+  // source view's coordinate space.
+  final GlobalKey _shareKey = GlobalKey();
   bool _busy = false;
   String? _shortCode;
+  // Cached host display name for the share-sheet invite text. Populated
+  // from the same event-doc fetch as _shortCode so the share button
+  // never has to round-trip on its own. Defaulted to 'Host' so the
+  // invite text reads cleanly even when the field is missing.
+  String _hostName = 'Host';
 
   @override
   void initState() {
@@ -47,10 +58,19 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
       final snap = await FirebaseFirestore.instance
           .collection('events').doc(widget.eventId).get();
       if (!mounted) return;
-      final code = snap.data()?['shortCode'] as String?;
-      debugPrint('[GenerateQR] eventId=${widget.eventId} loaded shortCode=$code');
+      final data = snap.data();
+      final code = data?['shortCode'] as String?;
+      // Pull hostName from the same fetch — share-sheet text reads it
+      // and the screen has no other source for the host's display name.
+      final host = (data?['hostName'] as String?) ?? 'Host';
+      debugPrint('[GenerateQR] eventId=${widget.eventId} loaded shortCode=$code host=$host');
+      setState(() {
+        _hostName = host.isEmpty ? 'Host' : host;
+        if (code != null && code.isNotEmpty) {
+          _shortCode = code;
+        }
+      });
       if (code != null && code.isNotEmpty) {
-        setState(() => _shortCode = code);
         debugPrint('[GenerateQR] QR will encode: ${_qrUrl(code)}');
       } else {
         debugPrint('[GenerateQR] WARNING: shortCode missing on events/${widget.eventId} — QR will stay in loading state');
@@ -163,21 +183,31 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
       await file.writeAsBytes(bytes);
       // Include the typeable URL in the share text so guests tapping
       // the link inside Messages / WhatsApp / etc. land directly on
-      // the event page — no app install required. The QR image still
-      // tags along for guests sharing the screenshot in print/photo
-      // contexts. If the shortCode hasn't resolved yet (rare — the
-      // share button is gated on QR render which depends on the same
-      // load), we fall back to a code-less invite line so the share
-      // sheet doesn't surface a half-formed URL.
-      final shareText = (_shortCode == null || _shortCode!.isEmpty)
-          ? "You're invited to ${widget.eventTitle}! RSVP here: partywithqr.com\n"
-              "No app needed — just tap the link!"
-          : "You're invited to ${widget.eventTitle}! "
-              "RSVP here: partywithqr.com/event/${_shortCode!}\n"
-              "No app needed — just tap the link!";
+      // the event page. The QR image still tags along for guests
+      // sharing the screenshot in print/photo contexts. If the
+      // shortCode hasn't resolved yet (rare — the share button is
+      // gated on QR render which depends on the same load), we fall
+      // back to the bare domain so the share sheet doesn't surface a
+      // half-formed URL.
+      final rsvpUrl = (_shortCode == null || _shortCode!.isEmpty)
+          ? 'partywithqr.com'
+          : 'partywithqr.com/event/${_shortCode!}';
+      final shareText =
+          "You're invited to ${widget.eventTitle} hosted by $_hostName! "
+          "RSVP here: $rsvpUrl\n"
+          "Download the app here: partywithqr.com/download";
+      // iOS requires sharePositionOrigin pointing at the share button's
+      // global rect; without it the share sheet has nowhere to anchor
+      // its popover and share_plus throws. Harmless on Android — the
+      // platform channel ignores the field.
+      final box = _shareKey.currentContext?.findRenderObject() as RenderBox?;
+      final origin = box == null
+          ? null
+          : box.localToGlobal(Offset.zero) & box.size;
       await Share.shareXFiles(
         [XFile(file.path, mimeType: 'image/png')],
         text: shareText,
+        sharePositionOrigin: origin,
       );
     } catch (e) {
       if (mounted) {
@@ -348,6 +378,7 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
                     const SizedBox(width: 10),
                     Expanded(
                       child: ElevatedButton.icon(
+                        key: _shareKey,
                         onPressed: _busy ? null : _shareQr,
                         icon: const Icon(Icons.share_outlined, size: 18),
                         label: const Text('Share', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),

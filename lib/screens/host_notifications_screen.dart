@@ -28,7 +28,6 @@ class _HostNotificationsScreenState extends State<HostNotificationsScreen> {
   String? _selectedEventTitle;
   String? _selectedEventEmoji;
   bool _loadingEvents = true;
-  bool _sending = false;
   final List<Map<String, dynamic>> _sentHistory = [];
 
   final List<String> templates = [
@@ -89,7 +88,6 @@ class _HostNotificationsScreenState extends State<HostNotificationsScreen> {
     final msg = _messageController.text.trim();
     final eventId = _selectedEventId;
     if (msg.isEmpty || eventId == null) return;
-    setState(() => _sending = true);
     try {
       // Fetch all Yes/Maybe RSVPs for the selected event
       final rsvpSnap = await FirebaseFirestore.instance
@@ -229,8 +227,6 @@ class _HostNotificationsScreenState extends State<HostNotificationsScreen> {
           behavior: SnackBarBehavior.floating,
         ));
       }
-    } finally {
-      if (mounted) setState(() => _sending = false);
     }
   }
 

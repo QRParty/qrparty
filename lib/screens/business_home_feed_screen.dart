@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import '../utils.dart';
 import '../widgets/rsvp_live_counts.dart';
 import 'create_event_screen.dart';
@@ -48,13 +49,31 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
   Map<String, Map<String, dynamic>> _hostRaw = {};
   Map<String, Map<String, dynamic>> _coHostRaw = {};
 
+  // Contacts tab — one rsvps subscription per host event, reconciled
+  // whenever _hostRaw changes. Inner map is keyed by lowercased email
+  // so the same person who RSVPed via both web and app collapses to
+  // one contact entry across the whole tab.
+  final Map<String, StreamSubscription<QuerySnapshot>> _rsvpSubs = {};
+  final Map<String, Map<String, Map<String, dynamic>>> _rsvpsByEvent = {};
+  String _contactsSearch = '';
+  final TextEditingController _contactsSearchCtrl = TextEditingController();
+
   // Organization banner state — businessPlus owners see their org card; business
   // accounts see an upgrade nudge; only fetched once per session.
   StreamSubscription<DocumentSnapshot>? _userSub;
   StreamSubscription<QuerySnapshot>? _orgSub;
   String? _accountType;
+  String? _userName;
   String? _orgId;
   Map<String, dynamic>? _org;
+
+  // Pending HQ→Business link invite. Subscription is reconciled when
+  // _orgId changes; banner only shows when status==pending AND the
+  // Business isn't already linked to a parent HQ.
+  StreamSubscription<QuerySnapshot>? _invitesSub;
+  String? _invitesSubscribedFor;
+  Map<String, dynamic>? _pendingInvite;
+  bool _processingInvite = false;
 
   // Theme-aware colors — resolve light vs dark variant from the current Theme.
   bool  get _isDark => Theme.of(context).brightness == Brightness.dark;
@@ -85,6 +104,10 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     _coHostEventsSub?.cancel();
     _userSub?.cancel();
     _orgSub?.cancel();
+    _invitesSub?.cancel();
+    for (final sub in _rsvpSubs.values) { sub.cancel(); }
+    _rsvpSubs.clear();
+    _contactsSearchCtrl.dispose();
     super.dispose();
   }
 
@@ -93,7 +116,10 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     if (user == null) return;
     _userSub = FirebaseFirestore.instance.collection('users').doc(user.uid).snapshots().listen((snap) {
       if (!mounted) return;
-      setState(() => _accountType = snap.data()?['accountType'] as String?);
+      setState(() {
+        _accountType = snap.data()?['accountType'] as String?;
+        _userName    = snap.data()?['name']        as String?;
+      });
     });
     _orgSub = FirebaseFirestore.instance
         .collection('organizations')
@@ -107,7 +133,183 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
       } else {
         setState(() { _orgId = snap.docs.first.id; _org = snap.docs.first.data(); });
       }
+      _reconcileInvitesSub();
     });
+  }
+
+  // Swap the invites listener when the user's org doc id changes
+  // (org created → id assigned, or org cleared on signout). Idempotent
+  // when called with the same orgId — early-returns without resubscribing.
+  void _reconcileInvitesSub() {
+    if (_orgId == _invitesSubscribedFor) return;
+    _invitesSub?.cancel();
+    _invitesSub = null;
+    _invitesSubscribedFor = _orgId;
+    if (_orgId == null) {
+      if (_pendingInvite != null && mounted) {
+        setState(() => _pendingInvite = null);
+      }
+      return;
+    }
+    _invitesSub = FirebaseFirestore.instance
+        .collection('organizations').doc(_orgId)
+        .collection('invites')
+        .where('status', isEqualTo: 'pending')
+        .snapshots()
+        .listen((snap) {
+      if (!mounted) return;
+      if (snap.docs.isEmpty) {
+        setState(() => _pendingInvite = null);
+        return;
+      }
+      // Phase 1 schema keys the invite doc by hqOrgId, so the doc id
+      // IS the HQ org id. Stash it under '_id' for the action handlers.
+      final doc = snap.docs.first;
+      final data = Map<String, dynamic>.from(doc.data() as Map);
+      data['_id'] = doc.id;
+      setState(() => _pendingInvite = data);
+    }, onError: (_) {});
+  }
+
+  Future<void> _acceptInvite(String hqOrgId, String hqName) async {
+    if (_processingInvite) return;
+    setState(() => _processingInvite = true);
+    try {
+      final callable = FirebaseFunctions.instance.httpsCallable('acceptOrgInvite');
+      await callable.call({'hqOrgId': hqOrgId});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Linked to $hqName'),
+        backgroundColor: AppColors.green,
+        behavior: SnackBarBehavior.floating,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+      ));
+    } on FirebaseFunctionsException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.message ?? 'Could not accept invite.'),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Could not accept invite: $e'),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+      ));
+    } finally {
+      if (mounted) setState(() => _processingInvite = false);
+    }
+  }
+
+  Future<void> _declineInvite(String hqOrgId) async {
+    if (_processingInvite || _orgId == null) return;
+    setState(() => _processingInvite = true);
+    try {
+      await FirebaseFirestore.instance
+          .collection('organizations').doc(_orgId)
+          .collection('invites').doc(hqOrgId)
+          .update({
+        'status':      'declined',
+        'respondedAt': FieldValue.serverTimestamp(),
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('Invite declined'),
+        backgroundColor: AppColors.green,
+        behavior: SnackBarBehavior.floating,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Could not decline: $e'),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+      ));
+    } finally {
+      if (mounted) setState(() => _processingInvite = false);
+    }
+  }
+
+  Widget _buildInviteBanner() {
+    // Already linked to a parent HQ → don't show new invites; the user
+    // must unlink first via a future flow before linking elsewhere.
+    if (_org?['parentOrgId'] != null) return const SizedBox.shrink();
+    final invite = _pendingInvite;
+    if (invite == null) return const SizedBox.shrink();
+    final fg = _isDark ? Colors.white : AppColors.dark;
+    final hqOrgId = invite['_id'] as String;
+    final hqNameRaw = (invite['hqOrgName'] as String?)?.trim();
+    final hqName = (hqNameRaw != null && hqNameRaw.isNotEmpty) ? hqNameRaw : 'a Headquarters';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+        decoration: BoxDecoration(
+          color: _card,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: _purple.withValues(alpha: 0.55), width: 1.5),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Container(
+              width: 36, height: 36,
+              decoration: BoxDecoration(color: _purple.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(10)),
+              child: const Center(child: Text('🤝', style: TextStyle(fontSize: 18))),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                'Invited to link under $hqName',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: fg),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                "Your events will appear on their Headquarters' org page.",
+                style: TextStyle(fontSize: 12, color: _muted, height: 1.35),
+              ),
+            ])),
+          ]),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _processingInvite ? null : () => _declineInvite(hqOrgId),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: _muted,
+                  side: BorderSide(color: _border),
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+                child: const Text('Decline', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _processingInvite ? null : () => _acceptInvite(hqOrgId, hqName),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _purple,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+                child: _processingInvite
+                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                    : const Text('Accept', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+              ),
+            ),
+          ]),
+        ]),
+      ),
+    );
   }
 
   void _subscribeToEvents() {
@@ -124,6 +326,7 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
         .snapshots()
         .listen((snap) {
       _hostRaw = { for (final doc in snap.docs) doc.id: doc.data() };
+      _reconcileRsvpSubs();
       _rebuild(hostLoaded: true);
     }, onError: (_) { if (mounted) setState(() => _loading = false); });
 
@@ -135,6 +338,40 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
       _coHostRaw = { for (final doc in snap.docs) doc.id: doc.data() };
       _rebuild();
     }, onError: (_) {});
+  }
+
+  // Tear down rsvp subscriptions for events the host no longer owns
+  // (deleted, ownership transferred), and start subscriptions for any
+  // newly-host events. Idempotent — can be called on every host-events
+  // snapshot without leaking or duplicating listeners.
+  void _reconcileRsvpSubs() {
+    final wanted = _hostRaw.keys.toSet();
+    final existing = _rsvpSubs.keys.toSet();
+    for (final id in existing.difference(wanted)) {
+      _rsvpSubs[id]?.cancel();
+      _rsvpSubs.remove(id);
+      _rsvpsByEvent.remove(id);
+    }
+    for (final id in wanted.difference(existing)) {
+      _rsvpSubs[id] = FirebaseFirestore.instance
+          .collection('events').doc(id).collection('rsvps')
+          .snapshots()
+          .listen((snap) {
+        if (!mounted) return;
+        final byEmail = <String, Map<String, dynamic>>{};
+        for (final d in snap.docs) {
+          final data = d.data();
+          final emailRaw = data['email'] as String?;
+          if (emailRaw == null) continue;
+          final email = emailRaw.trim().toLowerCase();
+          if (email.isEmpty) continue;
+          // Last-write-wins within an event (web vs app for same email)
+          // — outer dedupe across events happens in _contacts getter.
+          byEmail[email] = data;
+        }
+        setState(() => _rsvpsByEvent[id] = byEmail);
+      }, onError: (_) {});
+    }
   }
 
   /// Combines the `date` Timestamp (midnight on the picked calendar
@@ -185,7 +422,7 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
       final sortDate = calendarDate ?? DateTime(2099);
       final isDraft = (data['isDraft'] as bool?) ?? false;
       final isPast = !isDraft && eventStart.isBefore(now);
-      final typeName = (data['eventType'] as String?) ?? '';
+      final typeName = migrateEventTypeName(data['eventType'] as String?);
       final matchedType = eventTypes.firstWhere((t) => t.name == typeName, orElse: () => eventTypes.last);
       final wishlist = (data['wishlist'] as List<dynamic>? ?? []);
       final wishlistTotal = wishlist.fold<double>(0.0, (s, item) =>
@@ -246,16 +483,53 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
   }
   int get _activeGuests => _upcoming.fold<int>(0, (s, e) => s + (e['yes'] as int) + (e['maybe'] as int));
 
+  String get _orgName {
+    final n = (_org?['name'] as String?)?.trim();
+    if (n != null && n.isNotEmpty) return n;
+    final un = _userName?.trim();
+    if (un != null && un.isNotEmpty) return un;
+    return _accountType == 'businessPlus' ? 'Your Headquarters' : 'Your Business';
+  }
+
+  // Unique contacts across every host event, deduped by lowercased
+  // email and filtered by the current search query. Re-derived on
+  // every build — cheap for typical event counts and keeps the data
+  // path stateless.
+  List<Map<String, dynamic>> get _contacts {
+    final byEmail = <String, Map<String, dynamic>>{};
+    for (final entry in _rsvpsByEvent.entries) {
+      final eventId = entry.key;
+      for (final emailEntry in entry.value.entries) {
+        final email = emailEntry.key;
+        final data  = emailEntry.value;
+        final rawName = (data['name'] as String?)?.trim() ?? '';
+        final name = rawName.isNotEmpty ? rawName : 'Guest';
+        final existing = byEmail[email];
+        if (existing == null) {
+          byEmail[email] = {'name': name, 'email': email, 'eventIds': <String>{eventId}};
+        } else {
+          (existing['eventIds'] as Set<String>).add(eventId);
+          if (existing['name'] == 'Guest' && name != 'Guest') existing['name'] = name;
+        }
+      }
+    }
+    final query = _contactsSearch.trim().toLowerCase();
+    final filtered = byEmail.values.where((c) {
+      if (query.isEmpty) return true;
+      final n = (c['name']  as String).toLowerCase();
+      final e = (c['email'] as String).toLowerCase();
+      return n.contains(query) || e.contains(query);
+    }).toList();
+    filtered.sort((a, b) =>
+        (a['name'] as String).toLowerCase().compareTo((b['name'] as String).toLowerCase()));
+    return filtered;
+  }
+
   @override
   Widget build(BuildContext context) {
     final fg = _isDark ? Colors.white : AppColors.dark;
-    // Tier-aware AppBar wordmark: Headquarters accounts get the
-    // "QR Party" + HEADQUARTERS pill; Business accounts keep the
-    // "QR Party Business" + PRO pill they had before. Without this
-    // gate, Headquarters users were seeing "Business" + "PRO" side
-    // by side and reading it as "Business Pro" — wrong tier name.
     final isHeadquarters = _accountType == 'businessPlus';
-    final wordmark = isHeadquarters ? 'QR Party' : 'QR Party Business';
+    final wordmark = _orgName;
     final badgeText = isHeadquarters ? 'HEADQUARTERS' : 'PRO';
     return Scaffold(
       backgroundColor: _bg,
@@ -283,6 +557,11 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
         ]),
         actions: [
           IconButton(
+            icon: Icon(Icons.bar_chart_outlined, color: fg),
+            tooltip: 'Analytics',
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AnalyticsScreen())),
+          ),
+          IconButton(
             icon: Icon(Icons.notifications_outlined, color: fg),
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HostNotificationsScreen())),
           ),
@@ -296,7 +575,15 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
       body: Stack(
         children: [
           Column(children: [
+            _buildInviteBanner(),
             _buildStatsRow(),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(children: [
+                _buildOrgBanner(),
+                _buildBusinessQrCard(),
+              ]),
+            ),
             Container(
               decoration: BoxDecoration(border: Border(bottom: BorderSide(color: _border))),
               child: TabBar(
@@ -307,13 +594,13 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
                 unselectedLabelColor: _muted,
                 labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                 unselectedLabelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                tabs: const [Tab(text: 'Upcoming'), Tab(text: 'Past'), Tab(text: 'Templates'), Tab(text: 'Analytics')],
+                tabs: const [Tab(text: 'Upcoming'), Tab(text: 'Past'), Tab(text: 'Templates'), Tab(text: 'Contacts')],
               ),
             ),
             Expanded(
               child: TabBarView(
                 controller: _tabController,
-                children: [_buildUpcomingTab(), _buildPastTab(), _buildTemplatesTab(), _buildAnalyticsTab()],
+                children: [_buildUpcomingTab(), _buildPastTab(), _buildTemplatesTab(), _buildContactsTab()],
               ),
             ),
           ]),
@@ -372,20 +659,23 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     final fg = _isDark ? Colors.white : AppColors.dark;
     final drafts   = _drafts;
     final upcoming = _upcoming;
-    if (drafts.isEmpty && upcoming.isEmpty) {
-      return Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-        const Text('📅', style: TextStyle(fontSize: 48)),
-        const SizedBox(height: 12),
-        Text('No upcoming events', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: fg)),
-        const SizedBox(height: 6),
-        Text('Tap + to create your first business event', style: TextStyle(fontSize: 14, color: _muted)),
-      ]));
-    }
+    final hasNoEvents = drafts.isEmpty && upcoming.isEmpty;
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
       children: [
-        _buildOrgBanner(),
-        _buildBusinessQrCard(),
+        if (hasNoEvents)
+          Padding(
+            padding: const EdgeInsets.only(top: 48),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Text('📅', style: TextStyle(fontSize: 48)),
+              const SizedBox(height: 12),
+              Text('No upcoming events', textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: fg)),
+              const SizedBox(height: 6),
+              Text('Tap + to create your first business event', textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, color: _muted)),
+            ]),
+          ),
         if (drafts.isNotEmpty) ...[
           _draftsSectionHeader(drafts.length),
           ...drafts.map(_buildDraftCard),
@@ -401,47 +691,12 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
   Widget _buildOrgBanner() {
     if (_accountType == null) return const SizedBox.shrink();
     final fg = _isDark ? Colors.white : AppColors.dark;
-    final isPlus = _accountType == 'businessPlus';
+    final canCreateOrg = _accountType == 'business' || _accountType == 'businessPlus';
     final hasOrg = _orgId != null;
 
-    if (!isPlus) {
-      // Business (non-Plus) accounts get an upgrade nudge.
-      return Container(
-        margin: const EdgeInsets.only(bottom: 14),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: _card,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: _purple.withValues(alpha: 0.4)),
-        ),
-        child: Row(children: [
-          Container(
-            width: 44, height: 44,
-            decoration: BoxDecoration(color: _purple.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(12)),
-            child: const Center(child: Text('🏢', style: TextStyle(fontSize: 22))),
-          ),
-          const SizedBox(width: 12),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('Organization Page', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: fg)),
-            const SizedBox(height: 2),
-            Text('Publish all your events behind one branded QR code — Headquarters.',
-                style: TextStyle(fontSize: 12, color: _muted, height: 1.35)),
-          ])),
-          const SizedBox(width: 8),
-          ElevatedButton(
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const OrganizationScreen())),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _purple, foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('Upgrade', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
-          ),
-        ]),
-      );
-    }
+    if (!canCreateOrg) return const SizedBox.shrink();
 
-    // BusinessPlus — either show the org card or a "Create Organization" CTA.
+    // Business and Headquarters: either show the org card or a "Create Organization" CTA.
     if (!hasOrg) {
       return Container(
         margin: const EdgeInsets.only(bottom: 14),
@@ -1061,7 +1316,7 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
   }
 
   Widget _buildTemplateCard(Map<String, dynamic> t, String templateId, String uid) {
-    final typeName = (t['eventType'] as String?) ?? '';
+    final typeName = migrateEventTypeName(t['eventType'] as String?);
     final matchedType = eventTypes.firstWhere((e) => e.name == typeName, orElse: () => eventTypes.last);
     final listType = (t['listType'] as String?) ?? 'No List';
     final offsetDays = (t['rsvpDeadlineOffsetDays'] as int?) ?? 0;
@@ -1229,33 +1484,347 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     }
   }
 
-  Widget _buildAnalyticsTab() {
+  void _showNotifySheet() {
+    final count = _contacts.length;
+    if (count == 0) return;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _card,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (_) => _NotifyAllSheet(recipientCount: count),
+    );
+  }
+
+  Widget _buildContactsTab() {
+    if (_loading) return const Center(child: CircularProgressIndicator(color: _purple));
     final fg = _isDark ? Colors.white : AppColors.dark;
-    return Center(child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 32),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        const Text('📊', style: TextStyle(fontSize: 56)),
-        const SizedBox(height: 16),
-        Text('Analytics', style: TextStyle(fontFamily: 'FredokaOne', fontSize: 28, color: fg)),
-        const SizedBox(height: 10),
-        Text(
-          'View detailed insights across all your events — RSVPs, attendance trends, and guest activity.',
-          textAlign: TextAlign.center,
-          style: TextStyle(fontFamily: 'Nunito', fontSize: 15, color: _muted, height: 1.5),
-        ),
-        const SizedBox(height: 28),
-        ElevatedButton.icon(
-          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AnalyticsScreen())),
-          icon: const Icon(Icons.bar_chart_outlined),
-          label: const Text('Open Analytics', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: _purple,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    final contacts = _contacts;
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        child: Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _contactsSearchCtrl,
+              onChanged: (v) => setState(() => _contactsSearch = v),
+              style: TextStyle(color: fg, fontSize: 14),
+              cursorColor: _purple,
+              decoration: InputDecoration(
+                hintText: 'Search by name or email',
+                hintStyle: TextStyle(color: _muted, fontSize: 14),
+                prefixIcon: Icon(Icons.search, color: _muted, size: 20),
+                isDense: true,
+                filled: true,
+                fillColor: _card,
+                border:        OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _purple, width: 1.5)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          // Notify-all CTA — disabled until at least one contact has
+          // accumulated, so we never push the modal with a "Send to 0
+          // guests" button. Tapping fans out to every guest who's
+          // RSVPed to ANY of the host's events (web RSVPs without a
+          // uid are skipped server-side — no FCM token to target).
+          SizedBox(
+            height: 44,
+            child: ElevatedButton.icon(
+              onPressed: contacts.isEmpty ? null : _showNotifySheet,
+              icon: const Icon(Icons.campaign_outlined, size: 16),
+              label: const Text('Notify All', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _purple,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: _border,
+                disabledForegroundColor: _muted,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+          ),
+        ]),
+      ),
+      Expanded(
+        child: contacts.isEmpty
+            ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Text('👥', style: TextStyle(fontSize: 48)),
+                const SizedBox(height: 12),
+                Text(
+                  _contactsSearch.trim().isEmpty ? 'No contacts yet' : 'No matches',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: fg),
+                ),
+              ]))
+            : ListView.builder(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                itemCount: contacts.length,
+                itemBuilder: (_, i) => _buildContactRow(contacts[i]),
+              ),
+      ),
+    ]);
+  }
+
+  // ── _NotifyAllSheet wrapper widget defined at end of file ────
+  // (extracted as a StatefulWidget so its TextEditingControllers /
+  //  FocusNodes can dispose in State.dispose() — the
+  //  showModalBottomSheet + StatefulBuilder + whenComplete pattern
+  //  triggered the _dependents.isEmpty assertion earlier in the
+  //  Headquarters invite flow; this avoids the same trap.)
+
+  Widget _buildContactRow(Map<String, dynamic> contact) {
+    final fg = _isDark ? Colors.white : AppColors.dark;
+    final name  = contact['name']  as String;
+    final email = contact['email'] as String;
+    final eventCount = (contact['eventIds'] as Set<String>).length;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _border),
+      ),
+      child: Row(children: [
+        Container(
+          width: 38, height: 38,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: _purple.withValues(alpha: 0.18),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Text(
+            name.isNotEmpty ? name.substring(0, 1).toUpperCase() : '?',
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: _purple),
           ),
         ),
+        const SizedBox(width: 12),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(name,  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: fg), maxLines: 1, overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 2),
+          Text(email, style: TextStyle(fontSize: 12, color: _muted),                          maxLines: 1, overflow: TextOverflow.ellipsis),
+        ])),
+        const SizedBox(width: 8),
+        Text(
+          '$eventCount ${eventCount == 1 ? 'event' : 'events'}',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _muted),
+        ),
       ]),
-    ));
+    );
+  }
+}
+
+/// Bottom-sheet body for the Contacts tab's "Notify All" CTA.
+/// Extracted as a StatefulWidget so its controllers + focus nodes
+/// dispose in State.dispose() instead of `whenComplete` on the modal
+/// — the latter races the widget-tree teardown and trips the
+/// `_dependents.isEmpty` assertion (same fix pattern as the
+/// Headquarters invite sheet earlier in this codebase).
+class _NotifyAllSheet extends StatefulWidget {
+  final int recipientCount;
+  const _NotifyAllSheet({required this.recipientCount});
+
+  @override
+  State<_NotifyAllSheet> createState() => _NotifyAllSheetState();
+}
+
+class _NotifyAllSheetState extends State<_NotifyAllSheet> {
+  final TextEditingController _titleCtrl = TextEditingController();
+  final TextEditingController _bodyCtrl  = TextEditingController();
+  final FocusNode _titleFocus = FocusNode();
+  final FocusNode _bodyFocus  = FocusNode();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _bodyCtrl.dispose();
+    _titleFocus.dispose();
+    _bodyFocus.dispose();
+    super.dispose();
+  }
+
+  bool  get _isDark => Theme.of(context).brightness == Brightness.dark;
+  Color get _bg     => _isDark ? _bgDark     : _bgLight;
+  Color get _card   => _isDark ? _cardDark   : _cardLight;
+  Color get _border => _isDark ? _borderDark : _borderLight;
+  Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
+  Color get _fg     => _isDark ? Colors.white : AppColors.dark;
+
+  Future<void> _send() async {
+    final title = _titleCtrl.text.trim();
+    final body  = _bodyCtrl.text.trim();
+    if (title.isEmpty) { setState(() => _error = 'Title is required');   return; }
+    if (body.isEmpty)  { setState(() => _error = 'Message is required'); return; }
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null)   { setState(() => _error = 'Sign in to send notifications'); return; }
+    setState(() { _busy = true; _error = null; });
+    try {
+      final callable = FirebaseFunctions.instance.httpsCallable('sendMassNotification');
+      final res = await callable.call({
+        'title':   title,
+        'body':    body,
+        'hostUid': uid,
+      });
+      final data = res.data as Map?;
+      final sent = (data?['sent'] as num?)?.toInt() ?? 0;
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('🔔 Notification sent to $sent guest${sent == 1 ? '' : 's'}'),
+        backgroundColor: AppColors.green,
+        behavior: SnackBarBehavior.floating,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+      ));
+    } on FirebaseFunctionsException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = e.message ?? 'Could not send notification.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = 'Send failed: $e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+        decoration: BoxDecoration(
+          color: _card,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40, height: 4,
+                margin: const EdgeInsets.only(bottom: 14),
+                decoration: BoxDecoration(color: _border, borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            Row(children: [
+              Expanded(
+                child: Text('Send Notification',
+                    style: TextStyle(fontFamily: 'FredokaOne', fontSize: 22, color: _fg)),
+              ),
+              GestureDetector(
+                onTap: _busy ? null : () => Navigator.of(context).pop(),
+                child: Icon(Icons.close, size: 22, color: _muted),
+              ),
+            ]),
+            const SizedBox(height: 4),
+            Text(
+              'Sending to ${widget.recipientCount} contact${widget.recipientCount == 1 ? '' : 's'} via push.',
+              style: TextStyle(fontSize: 12.5, color: _muted),
+            ),
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text('TITLE',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: _muted, letterSpacing: 1.2)),
+            ),
+            TextField(
+              controller: _titleCtrl,
+              focusNode: _titleFocus,
+              enabled: !_busy,
+              maxLength: 60,
+              maxLines: 1,
+              textInputAction: TextInputAction.next,
+              onSubmitted: (_) => _bodyFocus.requestFocus(),
+              onChanged: (_) => setState(() {}),
+              style: TextStyle(color: _fg, fontSize: 15),
+              cursorColor: _purple,
+              decoration: InputDecoration(
+                hintText: 'e.g. Reminder: tomorrow at 6pm',
+                hintStyle: TextStyle(color: _muted, fontSize: 14),
+                filled: true,
+                fillColor: _bg,
+                counterStyle: TextStyle(color: _muted, fontSize: 11),
+                border:        OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _purple, width: 1.5)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text('MESSAGE',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: _muted, letterSpacing: 1.2)),
+            ),
+            TextField(
+              controller: _bodyCtrl,
+              focusNode: _bodyFocus,
+              enabled: !_busy,
+              maxLength: 160,
+              maxLines: 4,
+              minLines: 3,
+              onChanged: (_) => setState(() {}),
+              style: TextStyle(color: _fg, fontSize: 15),
+              cursorColor: _purple,
+              decoration: InputDecoration(
+                hintText: 'What do you want to tell them?',
+                hintStyle: TextStyle(color: _muted, fontSize: 14),
+                filled: true,
+                fillColor: _bg,
+                counterStyle: TextStyle(color: _muted, fontSize: 11),
+                border:        OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _purple, width: 1.5)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 4),
+              Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+            ],
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _busy ? null : _send,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _purple,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: _border,
+                  disabledForegroundColor: _muted,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: _busy
+                    ? const SizedBox(
+                        width: 18, height: 18,
+                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                      )
+                    : Text(
+                        'Send to ${widget.recipientCount} guest${widget.recipientCount == 1 ? '' : 's'}',
+                        style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14),
+                      ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Center(
+              child: TextButton(
+                onPressed: _busy ? null : () => Navigator.of(context).pop(),
+                child: Text('Cancel', style: TextStyle(color: _muted, fontSize: 13)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

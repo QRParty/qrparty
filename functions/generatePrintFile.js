@@ -12,6 +12,35 @@ const { getStorage } = require("firebase-admin/storage");
 // Inputs already wired: theme, themeVariant, productType, packSize,
 // eventQrCode, eventShortCode, eventId, eventName, eventDate, hostName,
 // accountTier, customDesignUrl.
+//
+// ── PARITY CONTRACT (future renderer) ──────────────────────────────────
+// The host approves a card visually via lib/widgets/invitation_preview.dart
+// before the order is placed. Whatever the print render produces MUST
+// match what the host saw, or every shipment is a UX surprise. When
+// swapping this placeholder for the real PNG renderer, the new code
+// must satisfy ALL of:
+//   • Fonts: FredokaOne (display) + Nunito (body), same weights as
+//     the preview. Embed via google_fonts metadata or ship the font
+//     files in the function bundle — system font fallback drifts.
+//   • QR URL: pass through resolveEventUrl(...) below — same shortCode-
+//     first / legacy-id-fallback order the preview uses via
+//     invitation_preview.dart's _eventQrUrl helper.
+//   • QR size: ≥1.0 inch on the printed long side at 300 DPI for
+//     general-population scan reliability. The preview now sizes its
+//     QR container at 104px / 540px card-height (~19.3%), targeting
+//     ~1.16" on a 6"-tall card. Match that proportion or exceed it.
+//   • Kids vs generic padding: Kids overlay uses fromLTRB(20, 64, 20,
+//     52) — the asymmetric 64-pt top reserves space for themed border
+//     art that sits OUTSIDE the content column. Generic _Card4x6 uses
+//     fromLTRB(20, 18, 20, 12). Mirror the asymmetry per theme; uniform
+//     padding will collide eyebrow text with Kids border art.
+//   • Brand strip per accountTier (see _BrandStrip in the preview):
+//       'businessPlus' → orgLogoUrl image (fallback: QR PARTY wordmark)
+//       'business'     → "Hosted by {hostName}" line
+//       else (personal) → QR PARTY wordmark
+//   • DO NOT draw the _PreviewWatermark layer the preview overlays.
+//     That widget exists ONLY to mark the in-app preview surface; it
+//     must be excluded from any shipped print artwork.
 
 // Build the canonical event URL the print file should encode. Mirrors
 // the resolver order used in invitation_preview.dart and event.html:

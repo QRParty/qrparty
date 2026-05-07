@@ -3,12 +3,15 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:gal/gal.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
+import '../models/merch_order.dart';
 import '../utils.dart';
 import '../services/business_qr_service.dart';
+import 'order_merch_screen.dart';
 
 // ── Theme palette ──────────────────────────────────────────────
 const _bgDark      = Color(0xFF2D3047);
@@ -317,6 +320,51 @@ class _BusinessQRScreenState extends State<BusinessQRScreen> {
             ),
           ],
         ),
+        if (kMerchOrderingEnabled) ...[
+          const SizedBox(height: 10),
+          // Order Stickers — sends the host into the merch flow with
+          // the business slug as a stand-in for `eventId` (path (a)
+          // from the audit). The order doc carries the slug as its
+          // eventId; fulfillment vendor switches on doc shape. The
+          // confirmation step's QR reads `partywithqr.com/event/$slug`
+          // which is cosmetically wrong for a business-merch confirm
+          // — accepted as a v1 trade-off until OrderMerchScreen grows
+          // a business-merch branch.
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: !loaded ? null : () {
+                final user = FirebaseAuth.instance.currentUser;
+                final orgName = (user?.displayName?.trim().isNotEmpty == true)
+                    ? user!.displayName!.trim()
+                    : 'Business';
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    fullscreenDialog: true,
+                    builder: (_) => OrderMerchScreen(
+                      eventId:        _result!.slug,
+                      eventTitle:     orgName,
+                      hostName:       orgName,
+                      shortCode:      _result!.slug,
+                      initialProduct: MerchProduct.sticker,
+                    ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.local_shipping_outlined, size: 18),
+              label: const Text('Order Stickers', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _purple,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: _border,
+                disabledForegroundColor: _muted,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 24),
         Container(
           width: double.infinity,

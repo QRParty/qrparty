@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../utils.dart';
 import 'qr_scanner_screen.dart';
@@ -16,6 +17,7 @@ const _borderDark  = Color(0xFF4A4E6B);
 const _borderLight = Color(0xFFE0E8E0);
 const _mutedDark   = Color(0xFFA9A6B8);
 const _mutedLight  = Color(0xFF8892A4);
+const _gold        = Color(0xFFC8922A);
 
 // ─── SCREEN 1 — WELCOME ──────────────────────────────────────
 class WelcomeScreen extends StatelessWidget {
@@ -157,10 +159,12 @@ class _SignUpScreenState extends State<SignUpScreen> {
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
   final _zipController = TextEditingController();
+  final _orgNameCtrl = TextEditingController();
   bool _isLoading = false;
   bool _obscurePassword = true;
   bool _obscureConfirm = true;
   String? _error;
+  String _accountType = 'personal';
 
   // Theme-aware color getters — resolve light vs dark variant from the current Theme.
   bool  get _isDark => Theme.of(context).brightness == Brightness.dark;
@@ -170,8 +174,25 @@ class _SignUpScreenState extends State<SignUpScreen> {
   Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
   Color get _fg     => _isDark ? Colors.white : AppColors.dark;
 
+  @override
+  void dispose() {
+    _firstNameController.dispose();
+    _lastNameController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    _zipController.dispose();
+    _orgNameCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _signUp() async {
-    if (_firstNameController.text.isEmpty || _lastNameController.text.isEmpty || _emailController.text.isEmpty || _passwordController.text.isEmpty || _zipController.text.isEmpty) {
+    final isPersonal = _accountType == 'personal';
+    final nameOk = isPersonal
+        ? (_firstNameController.text.trim().isNotEmpty &&
+           _lastNameController.text.trim().isNotEmpty)
+        : _orgNameCtrl.text.trim().isNotEmpty;
+    if (!nameOk || _emailController.text.isEmpty || _passwordController.text.isEmpty || _zipController.text.isEmpty) {
       setState(() => _error = 'Please fill in all fields');
       return;
     }
@@ -189,9 +210,9 @@ class _SignUpScreenState extends State<SignUpScreen> {
       if (newUser == null) {
         throw FirebaseAuthException(code: 'user-null', message: 'Could not create user. Please try again.');
       }
-      final firstName = _firstNameController.text.trim();
-      final lastName  = _lastNameController.text.trim();
-      final fullName  = '$firstName $lastName';
+      final firstName = isPersonal ? _firstNameController.text.trim() : '';
+      final lastName  = isPersonal ? _lastNameController.text.trim()  : '';
+      final fullName  = isPersonal ? '$firstName $lastName' : _orgNameCtrl.text.trim();
       await newUser.updateDisplayName(fullName);
       // merge: true so re-running this code path can't wipe fields
       // already on the doc — e.g. an admin manually promoted to
@@ -204,9 +225,30 @@ class _SignUpScreenState extends State<SignUpScreen> {
         'name':        fullName,
         'email':       _emailController.text.trim(),
         'zipCode':     _zipController.text.trim(),
-        'accountType': 'personal',
+        'accountType': _accountType,
         'createdAt':   FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
+      // Auto-provision the org doc for Business / Headquarters tiers
+      // so downstream flows (HQ-link request, Add Location, org QR)
+      // have a businessOrgId from day one. Best-effort — a failure
+      // here doesn't block signup; the user can retry from
+      // OrganizationScreen later.
+      if (_accountType == 'business' || _accountType == 'businessPlus') {
+        try {
+          final orgRef = FirebaseFirestore.instance.collection('organizations').doc();
+          await orgRef.set({
+            'name':        _orgNameCtrl.text.trim(),
+            'description': '',
+            'logoUrl':     '',
+            'ownerId':     newUser.uid,
+            'memberIds':   [newUser.uid],
+            'orgQrCode':   'https://partywithqr.com/org/${orgRef.id}',
+            'createdAt':   FieldValue.serverTimestamp(),
+          });
+        } catch (e) {
+          debugPrint('[SignUp] org auto-create failed: $e');
+        }
+      }
       try {
         await newUser.sendEmailVerification();
       } catch (e) {
@@ -214,6 +256,14 @@ class _SignUpScreenState extends State<SignUpScreen> {
       }
       await FirebaseAuth.instance.authStateChanges().firstWhere((u) => u != null);
       if (!mounted) return;
+      // Business-tier only: offer the optional HQ-link request before
+      // routing to email verification. Personal accounts skip; HQ-tier
+      // accounts (businessPlus) skip because they ARE the linkable
+      // entity — they don't link upward.
+      if (_accountType == 'business') {
+        await _showHqLinkDialog();
+        if (!mounted) return;
+      }
       Navigator.of(context).pushAndRemoveUntil(
         MaterialPageRoute(builder: (_) => const EmailVerificationScreen()),
         (_) => false,
@@ -254,17 +304,41 @@ class _SignUpScreenState extends State<SignUpScreen> {
                 ),
                 const SizedBox(height: 16),
               ],
+              _fieldLabel('What are you using this for?'),
               Row(children: [
-                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  _fieldLabel('First Name'),
-                  _inputField(_firstNameController, 'Sarah', Icons.person_outline, textInputAction: TextInputAction.next, onEditingComplete: () => FocusScope.of(context).nextFocus(), textCapitalization: TextCapitalization.words),
-                ])),
-                const SizedBox(width: 12),
-                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  _fieldLabel('Last Name'),
-                  _inputField(_lastNameController, 'Chen', Icons.person_outline, textInputAction: TextInputAction.next, onEditingComplete: () => FocusScope.of(context).nextFocus(), textCapitalization: TextCapitalization.words),
-                ])),
+                Expanded(child: _typeChip('Personal',     'personal')),
+                const SizedBox(width: 8),
+                Expanded(child: _typeChip('Business',     'business')),
+                const SizedBox(width: 8),
+                Expanded(child: _typeChip('Headquarters', 'businessPlus')),
               ]),
+              const SizedBox(height: 8),
+              Text('Headquarters: for districts, councils, and multi-location orgs',
+                  style: TextStyle(fontSize: 12, color: _muted)),
+              const SizedBox(height: 24),
+              if (_accountType == 'personal') ...[
+                Row(children: [
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    _fieldLabel('First Name'),
+                    _inputField(_firstNameController, 'Sarah', Icons.person_outline, textInputAction: TextInputAction.next, onEditingComplete: () => FocusScope.of(context).nextFocus(), textCapitalization: TextCapitalization.words),
+                  ])),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    _fieldLabel('Last Name'),
+                    _inputField(_lastNameController, 'Chen', Icons.person_outline, textInputAction: TextInputAction.next, onEditingComplete: () => FocusScope.of(context).nextFocus(), textCapitalization: TextCapitalization.words),
+                  ])),
+                ]),
+              ] else ...[
+                _fieldLabel(_accountType == 'business' ? 'Business Name' : 'Organization Name'),
+                _inputField(
+                  _orgNameCtrl,
+                  _accountType == 'business' ? 'e.g. Alvarado Street Brewery' : 'e.g. PGUSD District PTA',
+                  Icons.business_outlined,
+                  textInputAction: TextInputAction.next,
+                  onEditingComplete: () => FocusScope.of(context).nextFocus(),
+                  textCapitalization: TextCapitalization.words,
+                ),
+              ],
               const SizedBox(height: 20),
               _fieldLabel('Email'),
               _inputField(_emailController, 'you@example.com', Icons.email_outlined, keyboardType: TextInputType.emailAddress, textInputAction: TextInputAction.next, onEditingComplete: () => FocusScope.of(context).nextFocus()),
@@ -317,10 +391,81 @@ class _SignUpScreenState extends State<SignUpScreen> {
     );
   }
 
+  Future<void> _showHqLinkDialog() async {
+    // Dialog pops with the resolved HQ org name on success, null on
+    // skip / error. Snackbar fires on the parent SignUp scaffold's
+    // ScaffoldMessenger AFTER the dialog tears down — same disposal-
+    // safe pattern as _showSendInviteSheet on the HQ home feed.
+    final hqOrgName = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _HqLinkDialog(),
+    );
+    if (hqOrgName == null || hqOrgName.isEmpty || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(
+        'Request sent to $hqOrgName — they can invite you via Add Location to complete the link.',
+      ),
+      backgroundColor: AppColors.green,
+      behavior: SnackBarBehavior.floating,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+      duration: const Duration(seconds: 6),
+    ));
+  }
+
   Widget _fieldLabel(String label) => Padding(
         padding: const EdgeInsets.only(bottom: 8),
         child: Text(label, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _fg)),
       );
+
+  void _selectAccountType(String value) {
+    if (value == _accountType) return;
+    final wasPersonal   = _accountType == 'personal';
+    final goingPersonal = value == 'personal';
+    setState(() {
+      _accountType = value;
+      if (goingPersonal) {
+        _orgNameCtrl.clear();
+        _firstNameController.clear();
+        _lastNameController.clear();
+      } else if (wasPersonal) {
+        _firstNameController.clear();
+        _lastNameController.clear();
+      }
+    });
+  }
+
+  Widget _typeChip(String label, String value) {
+    final selected = _accountType == value;
+    final tierColor = switch (value) {
+      'business'     => AppColors.purple,
+      'businessPlus' => _gold,
+      _              => AppColors.green,
+    };
+    return GestureDetector(
+      onTap: () => _selectAccountType(value),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? tierColor : _card,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected ? tierColor : _border,
+            width: 1.5,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13.5,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+            color: selected ? Colors.white : _muted,
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _inputField(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, TextInputAction? textInputAction, VoidCallback? onEditingComplete, TextCapitalization textCapitalization = TextCapitalization.none}) => TextField(
         controller: controller,
@@ -814,6 +959,154 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Post-signup dialog for Business-tier accounts. Optional — the user
+/// can skip and ship the request manually later from the home feed.
+///
+/// Extracted as a StatefulWidget so the email controller + focus node
+/// dispose in State.dispose() instead of after the dialog pops. Same
+/// disposal-safety pattern as `_InviteSheet` / `_NotifyAllSheet`
+/// elsewhere in the codebase.
+///
+/// On send: calls the `requestHqLink` Cloud Function (uses admin SDK
+/// to bypass the firestore.rules HQ-only invite-create restriction).
+/// On success: pops the dialog and shows a green snackbar telling the
+/// user the HQ can complete the link via Add Location. On error:
+/// surfaces the message inline so the user can edit + retry without
+/// losing what they typed.
+class _HqLinkDialog extends StatefulWidget {
+  const _HqLinkDialog();
+
+  @override
+  State<_HqLinkDialog> createState() => _HqLinkDialogState();
+}
+
+class _HqLinkDialogState extends State<_HqLinkDialog> {
+  final TextEditingController _emailCtrl = TextEditingController();
+  final FocusNode _emailFocus = FocusNode();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _emailCtrl.dispose();
+    _emailFocus.dispose();
+    super.dispose();
+  }
+
+  bool  get _isDark => Theme.of(context).brightness == Brightness.dark;
+  Color get _card   => _isDark ? _cardDark   : _cardLight;
+  Color get _border => _isDark ? _borderDark : _borderLight;
+  Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
+  Color get _fg     => _isDark ? Colors.white : AppColors.dark;
+
+  Future<void> _send() async {
+    final email = _emailCtrl.text.trim();
+    if (email.isEmpty) {
+      setState(() => _error = "Enter the Headquarters' email");
+      return;
+    }
+    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(email)) {
+      setState(() => _error = 'That email address looks invalid');
+      return;
+    }
+    setState(() { _busy = true; _error = null; });
+    try {
+      final callable = FirebaseFunctions.instance.httpsCallable('requestHqLink');
+      final res = await callable.call({'hqOrgEmail': email});
+      final data = res.data as Map?;
+      final hqOrgName = (data?['hqOrgName'] as String?)?.trim();
+      final displayName = (hqOrgName != null && hqOrgName.isNotEmpty) ? hqOrgName : 'the Headquarters';
+      if (!mounted) return;
+      // Pop with the resolved name so the caller can fire the success
+      // snackbar on the parent scaffold post-teardown — see
+      // _showHqLinkDialog. Avoids using this State's BuildContext
+      // across the async gap.
+      Navigator.of(context).pop(displayName);
+    } on FirebaseFunctionsException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = e.message ?? 'Could not send the request.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = 'Send failed: $e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: _card,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      contentPadding: const EdgeInsets.fromLTRB(22, 22, 22, 8),
+      titlePadding: const EdgeInsets.fromLTRB(22, 22, 22, 8),
+      title: Text(
+        'Link to a Headquarters?',
+        style: TextStyle(fontFamily: 'FredokaOne', fontSize: 20, color: _fg),
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            "Part of a district or council? Enter their email to send a link request.",
+            style: TextStyle(fontSize: 14, color: _muted, height: 1.45),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _emailCtrl,
+            focusNode: _emailFocus,
+            enabled: !_busy,
+            keyboardType: TextInputType.emailAddress,
+            textInputAction: TextInputAction.send,
+            onSubmitted: (_) => _send(),
+            style: TextStyle(color: _fg, fontSize: 15),
+            cursorColor: AppColors.green,
+            decoration: InputDecoration(
+              hintText: 'hq@example.org',
+              hintStyle: TextStyle(color: _muted),
+              prefixIcon: Icon(Icons.email_outlined, size: 18, color: _muted),
+              filled: true,
+              fillColor: _card,
+              border:        OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.green, width: 1.5)),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+          ],
+        ],
+      ),
+      actionsPadding: const EdgeInsets.fromLTRB(14, 4, 14, 12),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          child: Text('Skip for now', style: TextStyle(color: _muted, fontWeight: FontWeight.w700)),
+        ),
+        ElevatedButton(
+          onPressed: _busy ? null : _send,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.green,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+          child: _busy
+              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+              : const Text('Send Request', style: TextStyle(fontWeight: FontWeight.w800)),
+        ),
+      ],
     );
   }
 }

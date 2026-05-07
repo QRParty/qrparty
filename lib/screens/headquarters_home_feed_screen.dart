@@ -1,7 +1,12 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:gal/gal.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../utils.dart';
 import '../widgets/rsvp_live_counts.dart';
 import 'create_event_screen.dart';
@@ -9,6 +14,8 @@ import 'host_notifications_screen.dart';
 import 'settings_screen.dart';
 import 'guest_event_screen.dart';
 import 'business_qr_screen.dart';
+import 'organization_screen.dart';
+import '../services/event_delete_helper.dart';
 
 // ── Theme palette ───────────────────────────────────────────────
 // Same const palette as the Business / Personal feeds; centralised
@@ -57,6 +64,21 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
 
   Map<String, dynamic>? _org;
   String? _orgId;
+  String? _userName;
+
+  // Linked Business orgs (Phase 4 fan-out). Populated by a `where
+  // documentId in linkedBusinessOrgIds` listener that re-subscribes
+  // whenever the HQ org doc's array changes. Used to render per-
+  // location entries in [_locations] and to map event.hostId →
+  // location id via [_uidToOrgId].
+  StreamSubscription<QuerySnapshot>? _linkedOrgsSub;
+  Map<String, Map<String, dynamic>> _linkedOrgs = {};
+
+  // Reconciliation guards — track which uid/orgId set each subscription
+  // is currently filtering on, so we don't tear down + re-listen on
+  // unrelated org-doc updates (e.g. logo change).
+  List<String> _eventsSubscribedFor = const [];
+  List<String> _linkedOrgsSubscribedFor = const [];
   // Raw event docs hosted by the current user. Used to compute the
   // overview stats (RSVPs total, events this month) and to detect
   // upcoming events with zero RSVPs for the smart alert.
@@ -108,6 +130,7 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
     _userSub?.cancel();
     _orgSub?.cancel();
     _eventsSub?.cancel();
+    _linkedOrgsSub?.cancel();
     _publicEventsSub?.cancel();
     super.dispose();
   }
@@ -142,13 +165,18 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
   void _subscribeAll() {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-    // User doc stream just kept alive so a tier flip flushes us out
-    // of this screen via HomeRouter without a manual reload.
+    // User doc stream serves two purposes: a tier flip flushes us out
+    // of this screen via HomeRouter without a manual reload, AND we
+    // capture `name` here so the AppBar wordmark falls back to the
+    // user's signup name (e.g. "PGMS PTA") when no org doc exists yet.
     _userSub = FirebaseFirestore.instance
         .collection('users')
         .doc(user.uid)
         .snapshots()
-        .listen((_) {});
+        .listen((snap) {
+      if (!mounted) return;
+      setState(() => _userName = snap.data()?['name'] as String?);
+    });
     _orgSub = FirebaseFirestore.instance
         .collection('organizations')
         .where('ownerId', isEqualTo: user.uid)
@@ -158,14 +186,42 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
       if (!mounted) return;
       if (snap.docs.isEmpty) {
         setState(() { _orgId = null; _org = null; });
-        return;
+      } else {
+        final doc = snap.docs.first;
+        setState(() { _orgId = doc.id; _org = doc.data(); });
       }
-      final doc = snap.docs.first;
-      setState(() { _orgId = doc.id; _org = doc.data(); });
+      // Re-evaluate both fan-out subscriptions whenever the HQ org doc
+      // changes — the linked arrays may have grown (new accept) or
+      // shrunk (future unlink). Idempotent when nothing material moved.
+      _reconcileEventsSub();
+      _reconcileLinkedOrgsSub();
     });
+    // Initial events subscription before the org doc lands — covers
+    // just the HQ owner's own events. Reconcile fires again when the
+    // org doc arrives and may widen the query to include linked uids.
+    _reconcileEventsSub();
+  }
+
+  // Same set of strings, ignoring order. Used to skip no-op
+  // resubscribes when an unrelated org-doc field changes.
+  bool _sameSet(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    return a.toSet().containsAll(b);
+  }
+
+  void _reconcileEventsSub() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final linkedUids = (_org?['linkedBusinessOwnerUids'] as List?)?.cast<String>() ?? const [];
+    // HQ owner is always slot 0. Phase 1 caps linked uids at 29 so
+    // allUids.length stays ≤ 30 — Firestore whereIn's hard limit.
+    final allUids = [user.uid, ...linkedUids];
+    if (_sameSet(allUids, _eventsSubscribedFor)) return;
+    _eventsSub?.cancel();
+    _eventsSubscribedFor = allUids;
     _eventsSub = FirebaseFirestore.instance
         .collection('events')
-        .where('hostId', isEqualTo: user.uid)
+        .where('hostId', whereIn: allUids)
         .snapshots()
         .listen((snap) {
       if (!mounted) return;
@@ -182,11 +238,39 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
     });
   }
 
+  void _reconcileLinkedOrgsSub() {
+    final orgIds = (_org?['linkedBusinessOrgIds'] as List?)?.cast<String>() ?? const [];
+    if (_sameSet(orgIds, _linkedOrgsSubscribedFor)) return;
+    _linkedOrgsSub?.cancel();
+    _linkedOrgsSubscribedFor = orgIds;
+    if (orgIds.isEmpty) {
+      if (_linkedOrgs.isNotEmpty && mounted) {
+        setState(() => _linkedOrgs = {});
+      }
+      return;
+    }
+    // documentId-based whereIn — same 30-value cap as the events query.
+    _linkedOrgsSub = FirebaseFirestore.instance
+        .collection('organizations')
+        .where(FieldPath.documentId, whereIn: orgIds)
+        .snapshots()
+        .listen((snap) {
+      if (!mounted) return;
+      setState(() {
+        _linkedOrgs = {
+          for (final d in snap.docs) d.id: Map<String, dynamic>.from(d.data() as Map),
+        };
+      });
+    }, onError: (Object e) {
+      debugPrint('[Headquarters] linked orgs stream error: $e');
+    });
+  }
+
   // ── Derived stats ─────────────────────────────────────────────
-  /// Total locations under this Headquarters. Counts the HQ owner
-  /// itself as 1 plus any linked Business accounts (none yet — that
-  /// integration is Coming Soon, so the list is always [you]).
-  int get _totalLocations => 1;
+  /// Total locations under this Headquarters. The HQ itself counts as
+  /// slot 0; linked Businesses populate the rest of the list once
+  /// their org docs land.
+  int get _totalLocations => _locations.length;
 
   /// Sum of yes + maybe + no counters across every event this user
   /// hosts. Reads cached parent-doc counters (kept in sync now that
@@ -234,9 +318,13 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
     return null;
   }
 
-  String get _orgName => (_org?['name'] as String?)?.trim().isNotEmpty == true
-      ? (_org!['name'] as String)
-      : 'Your Organization';
+  String get _orgName {
+    final n = (_org?['name'] as String?)?.trim();
+    if (n != null && n.isNotEmpty) return n;
+    final un = _userName?.trim();
+    if (un != null && un.isNotEmpty) return un;
+    return 'Your Organization';
+  }
 
   // ── Build ─────────────────────────────────────────────────────
   @override
@@ -280,7 +368,6 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
         _buildLocationsList(),
         const SizedBox(height: 18),
         ..._buildHostedEventsSection(),
-        _buildOrgPageBanner(),
         const SizedBox(height: 18),
         _buildQuickActions(),
       ],
@@ -362,10 +449,98 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
         ]),
       );
 
+  /// True when the current user can delete this event. Mirrors the
+  /// firestore.rules: the host can always delete, and the org owner
+  /// can delete events linked to their org. Linked-Business events
+  /// shown on the HQ feed have `hostId == businessOwnerUid` and
+  /// `orgId == businessOrgId`, neither of which match the HQ owner —
+  /// so the affordance is hidden for those rows. The Business owner
+  /// deletes their own events from BusinessHomeFeedScreen instead.
+  bool _canDeleteEvent(Map<String, dynamic> event) {
+    return EventDeleteHelper.canDelete(
+      hostId:        event['hostId']  as String?,
+      eventOrgId:    event['orgId']   as String?,
+      myUid:         FirebaseAuth.instance.currentUser?.uid,
+      myOwnedOrgId:  _orgId,
+    );
+  }
+
+  /// Opens a popup menu near [position] with a single Delete entry.
+  /// Used both by the long-press gesture (passes the touch position)
+  /// and by the 3-dot icon button (passes its own widget rect's
+  /// top-left). Early-returns when the user can't delete this event,
+  /// so the menu never appears for linked-Business rows.
+  Future<void> _openEventMenu(Map<String, dynamic> event, Offset position) async {
+    if (!_canDeleteEvent(event)) return;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final eventTitle = (event['title'] as String?) ?? 'this event';
+    final eventId = event['_id'] as String;
+    final picked = await showMenu<String>(
+      context: context,
+      color: _card,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(position.dx, position.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: const [
+        PopupMenuItem<String>(
+          value: 'delete',
+          child: Row(children: [
+            Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
+            SizedBox(width: 10),
+            Text('Delete event',
+                style: TextStyle(
+                  fontFamily: 'Nunito', color: Colors.redAccent,
+                  fontWeight: FontWeight.w800, fontSize: 14,
+                )),
+          ]),
+        ),
+      ],
+    );
+    if (picked == 'delete' && mounted) {
+      await EventDeleteHelper.confirmAndDelete(
+        context, eventId: eventId, eventTitle: eventTitle,
+      );
+      // _eventsSub auto-rebuilds the feed; no manual refresh needed.
+    }
+  }
+
+  /// Compact 3-dot icon button shown in the top-left of every card
+  /// the user can delete. Hidden completely when the user can't —
+  /// no inert affordance, no permission-denied 403s.
+  Widget _buildOverflowMenuButton(Map<String, dynamic> event) {
+    if (!_canDeleteEvent(event)) return const SizedBox.shrink();
+    return Builder(builder: (ctx) => Material(
+      color: Colors.transparent,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () {
+          final box = ctx.findRenderObject() as RenderBox?;
+          final origin = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+          _openEventMenu(event, origin + const Offset(20, 30));
+        },
+        child: Container(
+          width: 32, height: 32,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: _card.withValues(alpha: 0.85),
+            shape: BoxShape.circle,
+            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 6, offset: const Offset(0, 2))],
+          ),
+          child: Icon(Icons.more_vert, color: _muted, size: 18),
+        ),
+      ),
+    ));
+  }
+
   /// Per-event card — same chrome as business_home_feed_screen.dart's
   /// `_buildUpcomingCard`: 16-radius `_card` background, emoji tile +
   /// title + date stack, optional location row, live RSVP totals via
   /// [RsvpLiveCounts] with a progress bar. Tap opens GuestEventScreen.
+  /// Long-press (and the top-left 3-dot icon) opens the delete menu
+  /// for events the current user can delete.
   Widget _buildHostedEventCard(Map<String, dynamic> event) {
     final ts = event['date'] as Timestamp;
     final date = ts.toDate();
@@ -382,24 +557,27 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
     final initialMaybe = ((event['maybe'] as num?)?.toInt()) ?? 0;
     final initialNo    = ((event['no']    as num?)?.toInt()) ?? 0;
 
-    return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => GuestEventScreen(
-            eventId: eventId,
-            eventData: Map<String, dynamic>.from(event),
+    return Stack(children: [
+      GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => GuestEventScreen(
+              eventId: eventId,
+              eventData: Map<String, dynamic>.from(event),
+            ),
           ),
         ),
-      ),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        decoration: BoxDecoration(
-          color: _card,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        padding: const EdgeInsets.all(16),
-        child: Column(
+        onLongPressStart: (d) => _openEventMenu(event, d.globalPosition),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+            color: _card,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          padding: const EdgeInsets.all(16),
+          child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(children: [
@@ -479,7 +657,9 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
           ],
         ),
       ),
-    );
+      ),
+      Positioned(top: 4, left: 4, child: _buildOverflowMenuButton(event)),
+    ]);
   }
 
   // ── Bottom nav ────────────────────────────────────────────────
@@ -546,7 +726,7 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
       title: Row(children: [
         Flexible(
           child: Text(
-            'QR Party',
+            _orgName,
             style: TextStyle(fontFamily: 'FredokaOne', fontSize: 20, color: _fg),
             overflow: TextOverflow.ellipsis,
           ),
@@ -594,75 +774,90 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
 
   // ── Org overview card ─────────────────────────────────────────
   Widget _buildOrgOverviewCard() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFF3B2F68), Color(0xFF2B2A4E), Color(0xFF252641)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: _purple.withValues(alpha: 0.35)),
-        boxShadow: [
-          BoxShadow(
-            color: _purple.withValues(alpha: 0.22),
-            blurRadius: 24,
-            offset: const Offset(0, 10),
+    return GestureDetector(
+      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const OrganizationScreen())),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF3B2F68), Color(0xFF2B2A4E), Color(0xFF252641)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
           ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: AppColors.green.withValues(alpha: 0.22),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: AppColors.green.withValues(alpha: 0.55)),
-              ),
-              child: const Text(
-                'HEADQUARTERS',
-                style: TextStyle(
-                  fontFamily: 'Nunito', fontSize: 9, fontWeight: FontWeight.w900,
-                  color: AppColors.greenLight, letterSpacing: 1.1,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: _purple.withValues(alpha: 0.35)),
+          boxShadow: [
+            BoxShadow(
+              color: _purple.withValues(alpha: 0.22),
+              blurRadius: 24,
+              offset: const Offset(0, 10),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: AppColors.green.withValues(alpha: 0.22),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: AppColors.green.withValues(alpha: 0.55)),
+                ),
+                child: const Text(
+                  'HEADQUARTERS',
+                  style: TextStyle(
+                    fontFamily: 'Nunito', fontSize: 9, fontWeight: FontWeight.w900,
+                    color: AppColors.greenLight, letterSpacing: 1.1,
+                  ),
                 ),
               ),
+              const Spacer(),
+              const Icon(Icons.business_outlined, size: 18, color: _gold),
+            ]),
+            const SizedBox(height: 10),
+            Text(
+              _orgName,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontFamily: 'FredokaOne', fontSize: 24,
+                color: Colors.white, height: 1.1, letterSpacing: 0.2,
+              ),
             ),
-            const Spacer(),
-            const Icon(Icons.business_outlined, size: 18, color: _gold),
-          ]),
-          const SizedBox(height: 10),
-          Text(
-            _orgName,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontFamily: 'FredokaOne', fontSize: 24,
-              color: Colors.white, height: 1.1, letterSpacing: 0.2,
+            const SizedBox(height: 4),
+            Text(
+              _orgId == null
+                  ? 'Your command center for every linked location.'
+                  : 'partywithqr.com/org/${_orgId!}',
+              maxLines: 1, overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontFamily: 'Nunito', fontSize: 12, color: Colors.white70,
+              ),
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            _orgId == null
-                ? 'Your command center for every linked location.'
-                : 'partywithqr.com/org/${_orgId!}',
-            maxLines: 1, overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontFamily: 'Nunito', fontSize: 12, color: Colors.white70,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(children: [
-            Expanded(child: _statTile('$_totalLocations', 'Locations')),
-            Container(width: 1, height: 32, color: Colors.white.withValues(alpha: 0.10)),
-            Expanded(child: _statTile('$_totalRsvpsAllLocations', 'Total RSVPs')),
-            Container(width: 1, height: 32, color: Colors.white.withValues(alpha: 0.10)),
-            Expanded(child: _statTile('$_eventsThisMonth', 'This month')),
-          ]),
-        ],
+            const SizedBox(height: 16),
+            Row(children: [
+              Expanded(child: _statTile('$_totalLocations', 'Locations')),
+              Container(width: 1, height: 32, color: Colors.white.withValues(alpha: 0.10)),
+              Expanded(child: _statTile('$_totalRsvpsAllLocations', 'Total RSVPs')),
+              Container(width: 1, height: 32, color: Colors.white.withValues(alpha: 0.10)),
+              Expanded(child: _statTile('$_eventsThisMonth', 'This month')),
+            ]),
+            const SizedBox(height: 14),
+            Row(children: [
+              Text(
+                _org == null ? 'Set up your organization' : 'Manage Organization',
+                style: const TextStyle(
+                  fontFamily: 'Nunito', fontSize: 12, fontWeight: FontWeight.w700,
+                  color: Colors.white, letterSpacing: 0.3,
+                ),
+              ),
+              const SizedBox(width: 4),
+              const Icon(Icons.chevron_right, size: 16, color: Colors.white),
+            ]),
+          ],
+        ),
       ),
     );
   }
@@ -758,7 +953,7 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
         ),
         const Spacer(),
         TextButton.icon(
-          onPressed: () => _showAddLocationComingSoon(),
+          onPressed: () => _showSendInviteSheet(),
           icon: const Icon(Icons.add_circle_outline, size: 16, color: _purple),
           label: const Text(
             'Add Location',
@@ -776,342 +971,365 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
     );
   }
 
-  void _showAddLocationComingSoon() {
-    showModalBottomSheet<void>(
+  /// Modal bottom sheet for sending a link invite to a Business
+  /// account. Single-stage form: email field + Send button. Error
+  /// messages appear inline below the field; success closes the
+  /// sheet and surfaces a snackbar on the host scaffold.
+  ///
+  /// All Firestore work is done in [_sendInvite] which throws a
+  /// human-readable [String] for any validation failure (caught
+  /// here and shown in the inline slot). The actual write target
+  /// is `/organizations/{businessOrgId}/invites/{hqOrgId}` keyed by
+  /// the sender's HQ orgId so re-sends overwrite a prior pending
+  /// invite (idempotent — see Phase 1 schema decision).
+  void _showSendInviteSheet() {
+    if (_orgId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('Set up your Headquarters organization first.'),
+        backgroundColor: Colors.redAccent,
+      ));
+      return;
+    }
+    showModalBottomSheet<String>(
       context: context,
       backgroundColor: _card,
+      isScrollControlled: true, // keyboard pushes the sheet up cleanly
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (sheetCtx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Center(child: Container(
-                width: 40, height: 4,
-                decoration: BoxDecoration(color: _border, borderRadius: BorderRadius.circular(2)),
-              )),
-              const SizedBox(height: 18),
-              Text(
-                'Linked Locations · Coming Soon',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontFamily: 'FredokaOne', fontSize: 22, color: _fg,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Soon you\'ll be able to invite Business accounts under your Headquarters and manage every linked location\'s events, RSVPs and stickers from this screen.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontFamily: 'Nunito', fontSize: 14, color: _muted, height: 1.5,
-                ),
-              ),
-              const SizedBox(height: 22),
-              SizedBox(
-                height: 48,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(sheetCtx),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _purple,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                    elevation: 0,
-                  ),
-                  child: const Text(
-                    'Got it',
-                    style: TextStyle(fontFamily: 'Nunito', fontSize: 15, fontWeight: FontWeight.w800),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// Currently a single placeholder card explaining linked Business
-  /// accounts are not yet available, plus a dashed "+ Add Location"
-  /// tile inviting the user to come back. When the linking feature
-  /// ships, this section will render real per-location cards using
-  /// the [_buildLocationCard] helper below.
-  Widget _buildLocationsList() {
-    if (!_eventsLoaded) return _buildLocationsShimmer();
-
-    return Column(children: [
-      // Placeholder card for the user's own HQ — shown so the section
-      // doesn't feel empty before linked locations roll out. Uses a
-      // purple accent border to set the visual pattern that real
-      // location cards will follow.
-      _buildLocationCard(
-        accent: _purple,
-        emoji: '🏢',
-        name: _orgName,
-        address: _org?['description'] as String? ?? 'Your Headquarters',
-        statusLabel: 'Active',
-        statusColor: AppColors.green,
-        rsvps: _totalRsvpsAllLocations,
-        events: _events.where((e) => (e['isDraft'] as bool?) != true).length,
-        upcoming: _events.where((e) {
-          if ((e['isDraft'] as bool?) ?? false) return false;
-          final ts = e['date'] as Timestamp?;
-          if (ts == null) return false;
-          return !ts.toDate().isBefore(DateTime.now());
-        }).length,
-        nextEvent: _nextUpcoming,
-      ),
-      const SizedBox(height: 10),
-      _buildAddLocationTile(),
-    ]);
-  }
-
-  Map<String, dynamic>? get _nextUpcoming {
-    final now = DateTime.now();
-    final upcoming = _events.where((e) {
-      if ((e['isDraft'] as bool?) ?? false) return false;
-      final ts = e['date'] as Timestamp?;
-      if (ts == null) return false;
-      return !ts.toDate().isBefore(now);
-    }).toList();
-    if (upcoming.isEmpty) return null;
-    upcoming.sort((a, b) {
-      final ad = (a['date'] as Timestamp).toDate();
-      final bd = (b['date'] as Timestamp).toDate();
-      return ad.compareTo(bd);
+      builder: (_) => _InviteSheet(onSubmit: _sendInvite),
+    ).then((targetName) {
+      // Sheet dismissed via Cancel / swipe → null. Successful send →
+      // the sheet pops with the target org name. Snackbar fires on
+      // the parent scaffold context, NOT the sheet's (the sheet is
+      // already torn down). The mounted check guards against the
+      // user backing out of the HQ screen mid-flight.
+      if (targetName == null || !mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Invite sent to $targetName'),
+        backgroundColor: AppColors.green,
+        behavior: SnackBarBehavior.floating,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+        duration: const Duration(seconds: 4),
+      ));
     });
-    return upcoming.first;
   }
 
-  Widget _buildLocationCard({
-    required Color accent,
-    required String emoji,
-    required String name,
-    required String address,
-    required String statusLabel,
-    required Color statusColor,
-    required int rsvps,
-    required int events,
-    required int upcoming,
-    Map<String, dynamic>? nextEvent,
-  }) {
-    final months = const ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    String? nextLine;
-    Map<String, dynamic>? tappable;
-    if (nextEvent != null) {
-      final title = (nextEvent['title'] as String?) ?? 'Next event';
-      final ts = nextEvent['date'] as Timestamp?;
-      final d = ts?.toDate();
-      final dateStr = d != null ? '${months[d.month - 1]} ${d.day}' : '';
-      nextLine = '$title${dateStr.isEmpty ? '' : ' · $dateStr'}';
-      tappable = nextEvent;
+  /// Walks the 8-step validation pipeline from Phase 3 sub-item 2,
+  /// then writes the invite doc. Returns the target Business org's
+  /// display name for the success snackbar. Throws a human-readable
+  /// `String` on any validation failure (caller shows it inline).
+  ///
+  /// Email lookup assumes user docs store email lowercased — verified
+  /// against welcome_screen.dart's signup writer. Trims + lowercases
+  /// the input before querying.
+  Future<String> _sendInvite(String rawEmail) async {
+    final email = rawEmail.trim().toLowerCase();
+    final emailRegex = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$');
+    if (email.isEmpty || !emailRegex.hasMatch(email)) {
+      throw 'Enter a valid email address.';
     }
 
-    return Container(
-      decoration: BoxDecoration(
-        color: _card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _border),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(width: 5, color: accent),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(children: [
-                    Container(
-                      width: 44, height: 44,
-                      decoration: BoxDecoration(
-                        color: accent.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Center(child: Text(emoji, style: const TextStyle(fontSize: 22))),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            name,
-                            maxLines: 1, overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontFamily: 'Nunito', fontSize: 15, fontWeight: FontWeight.w800,
-                              color: _fg,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            address,
-                            maxLines: 1, overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontFamily: 'Nunito', fontSize: 12, color: _muted,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: statusColor.withValues(alpha: 0.16),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        statusLabel,
-                        style: TextStyle(
-                          fontFamily: 'Nunito', fontSize: 10.5, fontWeight: FontWeight.w800,
-                          color: statusColor, letterSpacing: 0.4,
-                        ),
-                      ),
-                    ),
-                  ]),
-                  const SizedBox(height: 12),
-                  Row(children: [
-                    _miniMetric('$rsvps', 'RSVPs'),
-                    Container(width: 1, height: 24, color: _border),
-                    _miniMetric('$events', 'Events'),
-                    Container(width: 1, height: 24, color: _border),
-                    _miniMetric('$upcoming', 'Upcoming'),
-                  ]),
-                  if (nextLine != null) ...[
-                    const SizedBox(height: 12),
-                    InkWell(
-                      onTap: tappable == null
-                          ? null
-                          : () => Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => GuestEventScreen(
-                                    eventId: tappable!['_id'] as String,
-                                    eventData: Map<String, dynamic>.from(tappable),
-                                  ),
-                                ),
-                              ),
-                      borderRadius: BorderRadius.circular(10),
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-                        child: Row(children: [
-                          Icon(Icons.event_outlined, size: 14, color: accent),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              nextLine,
-                              maxLines: 1, overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontFamily: 'Nunito', fontSize: 12, fontWeight: FontWeight.w700,
-                                color: _fg,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            'View →',
-                            style: TextStyle(
-                              fontFamily: 'Nunito', fontSize: 12, fontWeight: FontWeight.w800,
-                              color: accent,
-                            ),
-                          ),
-                        ]),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
+    final myUid = FirebaseAuth.instance.currentUser?.uid;
+    final myEmail = FirebaseAuth.instance.currentUser?.email?.trim().toLowerCase();
+    final hqOrgId = _orgId;
+    if (myUid == null || hqOrgId == null) {
+      throw 'Set up your Headquarters organization first.';
+    }
+    if (myEmail != null && myEmail == email) {
+      throw "That's your own email — you can't invite yourself.";
+    }
+
+    // Step 4 — locate the target user by email.
+    final userQuery = await FirebaseFirestore.instance
+        .collection('users')
+        .where('email', isEqualTo: email)
+        .limit(1)
+        .get();
+    if (userQuery.docs.isEmpty) {
+      throw 'No Business account found for this email.';
+    }
+    final targetUserDoc = userQuery.docs.first;
+    final targetUid = targetUserDoc.id;
+    final targetAcct = targetUserDoc.data()['accountType'] as String?;
+
+    // Step 5 — verify accountType is exactly 'business' (not 'businessPlus'
+    // or 'personal'). HQ-under-HQ links aren't supported.
+    if (targetAcct != 'business') {
+      throw 'That account is not on the Business tier.';
+    }
+
+    // Step 6 — find their Business org doc.
+    final orgQuery = await FirebaseFirestore.instance
+        .collection('organizations')
+        .where('ownerId', isEqualTo: targetUid)
+        .limit(1)
+        .get();
+    if (orgQuery.docs.isEmpty) {
+      throw "That account doesn't have an organization set up yet — ask them to create one first.";
+    }
+    final targetOrgDoc = orgQuery.docs.first;
+    final targetOrgId = targetOrgDoc.id;
+    final targetOrgData = targetOrgDoc.data();
+    final targetOrgName = (targetOrgData['name'] as String?)?.trim().isNotEmpty == true
+        ? targetOrgData['name'] as String
+        : 'Business';
+
+    // Step 7 — pre-existing-link check. Distinguish "already linked to
+    // YOU" (idempotent / friendly) from "linked to someone else".
+    final existingParent = targetOrgData['parentOrgId'] as String?;
+    if (existingParent == hqOrgId) {
+      throw 'That Business is already linked to your Headquarters.';
+    }
+    if (existingParent != null && existingParent.isNotEmpty) {
+      throw 'That Business is already linked to a different Headquarters.';
+    }
+
+    // Step 8 — write the invite. set() (not add()) so re-sends
+    // overwrite a prior pending invite from the same HQ.
+    await FirebaseFirestore.instance
+        .collection('organizations').doc(targetOrgId)
+        .collection('invites').doc(hqOrgId)
+        .set({
+      'hqOrgId':    hqOrgId,
+      'hqOwnerUid': myUid,
+      'hqOrgName':  _orgName,
+      'status':     'pending',
+      'sentAt':     FieldValue.serverTimestamp(),
+      'sentByUid':  myUid,
+    });
+
+    return targetOrgName;
+  }
+
+  /// Per-linked-Business row list. Each row is a name + QR chip + view
+  /// chip. Loading state shows a shimmer; empty state shows a muted
+  /// "no linked locations" message pointing at the header Add button.
+  Widget _buildLocationsList() {
+    if (_org == null) return _buildLocationsShimmer();
+    final orgIds = (_org?['linkedBusinessOrgIds'] as List?)?.cast<String>() ?? const [];
+    final cards = <Widget>[];
+    for (final id in orgIds) {
+      final data = _linkedOrgs[id];
+      if (data == null) continue; // doc not yet loaded — skip until it lands
+      if (cards.isNotEmpty) cards.add(const SizedBox(height: 8));
+      cards.add(_buildLinkedBusinessRow(id, data));
+    }
+    if (cards.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 22),
+        decoration: BoxDecoration(
+          color: _card,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: _border),
+        ),
+        child: Center(
+          child: Text(
+            'No linked locations yet — tap Add Location to invite a Business',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontFamily: 'Nunito', fontSize: 13, color: _muted, height: 1.4,
             ),
           ),
-        ],
+        ),
+      );
+    }
+    return Column(children: cards);
+  }
+
+  Widget _buildLinkedBusinessRow(String orgId, Map<String, dynamic> data) {
+    final raw = (data['name'] as String?)?.trim() ?? '';
+    final name = raw.isNotEmpty ? raw : 'Linked location';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _border),
+      ),
+      child: Row(children: [
+        Expanded(
+          child: Text(
+            name,
+            maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontFamily: 'Nunito', fontSize: 15, fontWeight: FontWeight.w800, color: _fg,
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        _locationActionChip(
+          bg: _purple,
+          icon: Icons.qr_code_2,
+          onTap: () => _showLinkedQrDialog(orgId, name),
+        ),
+        const SizedBox(width: 8),
+        _locationActionChip(
+          bg: _gold,
+          icon: Icons.visibility_outlined,
+          onTap: () => _openLinkedUrl(orgId),
+        ),
+      ]),
+    );
+  }
+
+  Widget _locationActionChip({required Color bg, required IconData icon, required VoidCallback onTap}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        width: 38, height: 38,
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(10),
+          boxShadow: [BoxShadow(color: bg.withValues(alpha: 0.30), blurRadius: 6, offset: const Offset(0, 2))],
+        ),
+        child: Icon(icon, color: Colors.white, size: 20),
       ),
     );
   }
 
-  Widget _miniMetric(String value, String label) => Expanded(
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: Column(
-        children: [
-          Text(
-            value,
-            style: TextStyle(
-              fontFamily: 'FredokaOne', fontSize: 16, color: _fg, height: 1.1,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            label,
-            style: TextStyle(
-              fontFamily: 'Nunito', fontSize: 10.5, fontWeight: FontWeight.w700,
-              color: _muted, letterSpacing: 0.3,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
+  Future<void> _openLinkedUrl(String orgId) async {
+    final url = Uri.parse(orgPageUrl(orgId));
+    try {
+      final ok = await launchUrl(url, mode: LaunchMode.externalApplication);
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Could not open the link.'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Open failed: $e'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
+  }
 
-  Widget _buildAddLocationTile() {
-    return InkWell(
-      onTap: _showAddLocationComingSoon,
-      borderRadius: BorderRadius.circular(16),
-      child: DottedBorder(
-        color: _border,
-        radius: 16,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 18),
-          child: Row(children: [
-            Container(
-              width: 40, height: 40,
-              decoration: BoxDecoration(
-                color: _purple.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: const Icon(Icons.add, color: _purple, size: 22),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Link a Business location',
-                    style: TextStyle(
-                      fontFamily: 'Nunito', fontSize: 14, fontWeight: FontWeight.w800,
-                      color: _fg,
-                    ),
+  // Fullscreen QR modal — mirrors the OrganizationScreen QR card
+  // styling (purple-bordered white plate + brand label inside) and
+  // adds a Download CTA that captures the RepaintBoundary and saves
+  // via Gal. The GlobalKey is captured by the StatefulBuilder
+  // closure; busy state lives on the closure too so we can disable
+  // the button mid-save.
+  Future<void> _showLinkedQrDialog(String orgId, String name) async {
+    final qrKey = GlobalKey();
+    final url = orgPageUrl(orgId);
+    bool busy = false;
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => Dialog(
+          backgroundColor: _card,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 22),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Row(children: [
+                const Spacer(),
+                IconButton(
+                  icon: Icon(Icons.close, color: _muted),
+                  onPressed: () => Navigator.of(ctx).pop(),
+                ),
+              ]),
+              RepaintBoundary(
+                key: qrKey,
+                child: Container(
+                  width: 240, height: 240,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(22),
+                    border: Border.all(color: _purple, width: 3),
+                    boxShadow: [BoxShadow(color: _purple.withValues(alpha: 0.18), blurRadius: 36, spreadRadius: 4)],
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Coming Soon — invite a Business account to roll up under this HQ.',
-                    style: TextStyle(
-                      fontFamily: 'Nunito', fontSize: 12, color: _muted, height: 1.3,
+                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    QrImageView(
+                      data: url,
+                      version: QrVersions.auto,
+                      size: 184,
+                      backgroundColor: Colors.white,
                     ),
-                  ),
-                ],
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: _gold,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Text(
-                'COMING SOON',
-                style: TextStyle(
-                  fontFamily: 'Nunito', fontSize: 9, fontWeight: FontWeight.w900,
-                  color: Colors.white, letterSpacing: 0.6,
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: Text(
+                        name,
+                        textAlign: TextAlign.center,
+                        maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 11, color: _mutedLight, fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                  ]),
                 ),
               ),
-            ),
-          ]),
+              const SizedBox(height: 14),
+              Text(
+                name,
+                textAlign: TextAlign.center,
+                maxLines: 2, overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontFamily: 'FredokaOne', fontSize: 18, color: _fg),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                url,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontFamily: 'Nunito', fontSize: 11.5, color: _muted),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: busy ? null : () async {
+                    setLocal(() => busy = true);
+                    try {
+                      final boundary = qrKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+                      if (boundary == null) throw Exception('Could not capture QR');
+                      final image = await boundary.toImage(pixelRatio: 3.0);
+                      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+                      final bytes = byteData?.buffer.asUint8List();
+                      if (bytes == null) throw Exception('Could not capture QR');
+                      final hasAccess = await Gal.hasAccess();
+                      if (!hasAccess) {
+                        final granted = await Gal.requestAccess();
+                        if (!granted) throw Exception('Gallery access denied');
+                      }
+                      final safeName = name.replaceAll(RegExp(r'[^A-Za-z0-9_-]+'), '_').toLowerCase();
+                      await Gal.putImageBytes(bytes, name: 'qrparty_org_$safeName');
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                          content: Text('📸 QR saved to your photos'),
+                          backgroundColor: AppColors.green,
+                          behavior: SnackBarBehavior.floating,
+                        ));
+                      }
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text('Save failed: $e'),
+                          backgroundColor: Colors.redAccent,
+                          behavior: SnackBarBehavior.floating,
+                        ));
+                      }
+                    } finally {
+                      if (ctx.mounted) setLocal(() => busy = false);
+                    }
+                  },
+                  icon: busy
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                      : const Icon(Icons.download_outlined, size: 18),
+                  label: const Text('Download', style: TextStyle(fontWeight: FontWeight.w700)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _gold, foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+            ]),
+          ),
         ),
       ),
     );
@@ -1133,59 +1351,6 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
     );
   }
 
-  // ── Org Page banner ───────────────────────────────────────────
-  Widget _buildOrgPageBanner() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: _purple.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _purple.withValues(alpha: 0.30)),
-      ),
-      child: Row(children: [
-        const Text('🌐', style: TextStyle(fontSize: 18)),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Organization Page',
-                style: TextStyle(
-                  fontFamily: 'Nunito', fontSize: 13.5, fontWeight: FontWeight.w800,
-                  color: _fg,
-                ),
-              ),
-              const SizedBox(height: 1),
-              Text(
-                'One QR code that lists every linked location\'s events.',
-                maxLines: 1, overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: 'Nunito', fontSize: 11.5, color: _muted,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(width: 8),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-          decoration: BoxDecoration(
-            color: _gold,
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: const Text(
-            'COMING SOON',
-            style: TextStyle(
-              fontFamily: 'Nunito', fontSize: 9, fontWeight: FontWeight.w900,
-              color: Colors.white, letterSpacing: 0.6,
-            ),
-          ),
-        ),
-      ]),
-    );
-  }
-
   // ── Quick Actions ─────────────────────────────────────────────
   Widget _buildQuickActions() {
     return Column(
@@ -1200,6 +1365,63 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
             ),
           ),
         ),
+        // Business QR Code — primary action. Provisions a permanent
+        // org-level QR on first tap and opens the dedicated screen
+        // with download/share options.
+        InkWell(
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const BusinessQRScreen()),
+          ),
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [_purple.withValues(alpha: 0.22), _purple.withValues(alpha: 0.08)],
+                begin: Alignment.topLeft, end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _purple.withValues(alpha: 0.45)),
+            ),
+            child: Row(children: [
+              Container(
+                width: 44, height: 44,
+                decoration: BoxDecoration(
+                  color: _purple,
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [BoxShadow(color: _purple.withValues(alpha: 0.35), blurRadius: 10, offset: const Offset(0, 4))],
+                ),
+                child: const Icon(Icons.qr_code_2, color: Colors.white, size: 26),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Business QR Code',
+                      style: TextStyle(
+                        fontFamily: 'Nunito', fontSize: 16, fontWeight: FontWeight.w900,
+                        color: _fg, letterSpacing: 0.2,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'One QR. Every public event you host.',
+                      style: TextStyle(
+                        fontFamily: 'Nunito', fontSize: 12, fontWeight: FontWeight.w600,
+                        color: _muted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, color: _purple, size: 22),
+            ]),
+          ),
+        ),
+        const SizedBox(height: 10),
         InkWell(
           onTap: () => Navigator.push(
             context,
@@ -1257,85 +1479,62 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
             ]),
           ),
         ),
-        const SizedBox(height: 10),
-        // Permanent business QR — provisions on first tap and opens
-        // the dedicated screen with download/share options. Sits in
-        // Quick Actions so HQ owners can hand out their location-level
-        // QR alongside the create-event affordance.
-        InkWell(
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const BusinessQRScreen()),
-          ),
-          borderRadius: BorderRadius.circular(16),
-          child: Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [_purple.withValues(alpha: 0.22), _purple.withValues(alpha: 0.08)],
-                begin: Alignment.topLeft, end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: _purple.withValues(alpha: 0.45)),
-            ),
-            child: Row(children: [
-              Container(
-                width: 44, height: 44,
-                decoration: BoxDecoration(
-                  color: _purple,
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [BoxShadow(color: _purple.withValues(alpha: 0.35), blurRadius: 10, offset: const Offset(0, 4))],
-                ),
-                child: const Icon(Icons.qr_code_2, color: Colors.white, size: 26),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Business QR Code',
-                      style: TextStyle(
-                        fontFamily: 'Nunito', fontSize: 16, fontWeight: FontWeight.w900,
-                        color: _fg, letterSpacing: 0.2,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'One QR. Every public event you host.',
-                      style: TextStyle(
-                        fontFamily: 'Nunito', fontSize: 12, fontWeight: FontWeight.w600,
-                        color: _muted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Icon(Icons.chevron_right, color: _purple, size: 22),
-            ]),
-          ),
-        ),
       ],
     );
   }
 
-  // ── Locations model (single-location stub) ────────────────────
-  /// Logical locations under this Headquarters. Today the list always
-  /// contains exactly one entry — the user's own HQ — colored with the
-  /// first palette accent. When linked Business accounts ship, this
-  /// grows to one entry per linked location and Calendar/Analytics
-  /// pick up the new dimensions automatically.
-  List<({String id, String name, Color accent})> get _locations => [(
-        id: 'primary',
+  // ── Locations model ───────────────────────────────────────────
+  /// Logical locations under this Headquarters. Slot 0 is always the
+  /// HQ itself; subsequent entries are the linked Business orgs in the
+  /// order they appear in `linkedBusinessOrgIds`. Each gets a distinct
+  /// palette accent (wraps when more than [_locationPalette.length]).
+  List<({String id, String name, Color accent})> get _locations {
+    final list = <({String id, String name, Color accent})>[
+      (
+        id: _orgId ?? 'primary',
         name: _orgName,
         accent: _locationPalette[0],
-      )];
+      ),
+    ];
+    final orgIds = (_org?['linkedBusinessOrgIds'] as List?)?.cast<String>() ?? const [];
+    for (var i = 0; i < orgIds.length; i++) {
+      final id = orgIds[i];
+      final data = _linkedOrgs[id];
+      if (data == null) continue; // doc not loaded yet — skip until it lands
+      final raw = (data['name'] as String?)?.trim() ?? '';
+      final name = raw.isNotEmpty ? raw : 'Linked location';
+      list.add((
+        id: id,
+        name: name,
+        accent: _locationPalette[(i + 1) % _locationPalette.length],
+      ));
+    }
+    return list;
+  }
 
-  /// Maps an event to a location id. While linking is Coming Soon,
-  /// every event belongs to 'primary'. Once events carry a `locationId`
-  /// field this becomes a one-line read of that field with a
-  /// 'primary' fallback for legacy docs.
-  String _eventLocationId(Map<String, dynamic> _) => 'primary';
+  /// uid → location id (= orgId). Built fresh on each call from the
+  /// HQ owner + each loaded linked-org's `ownerId`. Used to slot an
+  /// event into its location for analytics/calendar tabs.
+  Map<String, String> get _uidToOrgId {
+    final m = <String, String>{};
+    final myUid = FirebaseAuth.instance.currentUser?.uid;
+    if (myUid != null && _orgId != null) m[myUid] = _orgId!;
+    for (final entry in _linkedOrgs.entries) {
+      final ownerId = entry.value['ownerId'] as String?;
+      if (ownerId != null && ownerId.isNotEmpty) m[ownerId] = entry.key;
+    }
+    return m;
+  }
+
+  /// Maps an event to its location id by looking up the host's uid in
+  /// [_uidToOrgId]. Falls back to the HQ's own orgId if the event's
+  /// hostId isn't recognized (defensive — shouldn't happen since the
+  /// events query already restricts to known uids).
+  String _eventLocationId(Map<String, dynamic> e) {
+    final hostId = e['hostId'] as String?;
+    if (hostId == null) return _orgId ?? 'primary';
+    return _uidToOrgId[hostId] ?? _orgId ?? 'primary';
+  }
 
   Color _eventLocationAccent(Map<String, dynamic> e) {
     final id = _eventLocationId(e);
@@ -2188,4 +2387,189 @@ class _DashedBorderPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _DashedBorderPainter old) =>
       old.color != color || old.radius != radius;
+}
+
+// ─── INVITE SHEET ────────────────────────────────────────────
+// Bottom-sheet body for sending a Headquarters→Business link invite.
+// Lives as a StatefulWidget (rather than an inline StatefulBuilder
+// inside the parent's _showSendInviteSheet) so the controllers it
+// owns get disposed at the correct lifecycle point — State.dispose()
+// fires AFTER every dependent (TextField, FocusScope) has
+// unregistered, satisfying the framework's `_dependents.isEmpty`
+// invariant. The earlier whenComplete-based disposal ran while the
+// sheet's widget tree was mid-teardown and tripped that assertion.
+//
+// Pattern matches share_to_wishlist_sheet.dart's _SheetBody —
+// canonical for any modal sheet that owns disposable resources.
+//
+// All validation + Firestore writes happen in [onSubmit] (the parent's
+// _sendInvite method), which throws a human-readable String on any
+// validation failure. This sheet is purely presentation + state for
+// the form; it doesn't know anything about org/invite schema.
+class _InviteSheet extends StatefulWidget {
+  /// Runs the validation pipeline and writes the invite. Returns
+  /// the target Business org's display name on success (used by the
+  /// parent's success snackbar). Throws a `String` (caught here and
+  /// shown in the inline error slot) on any validation failure.
+  final Future<String> Function(String email) onSubmit;
+
+  const _InviteSheet({required this.onSubmit});
+
+  @override
+  State<_InviteSheet> createState() => _InviteSheetState();
+}
+
+class _InviteSheetState extends State<_InviteSheet> {
+  final TextEditingController _emailCtrl = TextEditingController();
+  final FocusNode _emailFocus = FocusNode();
+  String? _error;
+  bool _sending = false;
+
+  @override
+  void dispose() {
+    _emailCtrl.dispose();
+    _emailFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (_sending) return;
+    setState(() {
+      _sending = true;
+      _error = null;
+    });
+    try {
+      final targetName = await widget.onSubmit(_emailCtrl.text);
+      if (!mounted) return;
+      // Pop with the target name as the route result. The parent's
+      // .then() on showModalBottomSheet receives this and shows the
+      // success snackbar from the parent's scaffold context.
+      Navigator.of(context).pop(targetName);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _sending = false;
+        _error = e is String ? e : "Couldn't send invite — please try again.";
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Re-derive theme-aware colors locally — the parent's `_card` /
+    // `_bg` / etc. are instance getters on its State and aren't
+    // reachable from here. Mirrors the parent's pattern using the
+    // same file-level constants (_bgDark, _cardLight, etc.).
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg     = isDark ? _bgDark     : _bgLight;
+    final border = isDark ? _borderDark : _borderLight;
+    final muted  = isDark ? _mutedDark  : _mutedLight;
+    final fg     = isDark ? Colors.white : AppColors.dark;
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          24, 12, 24,
+          24 + MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(child: Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(color: border, borderRadius: BorderRadius.circular(2)),
+            )),
+            const SizedBox(height: 18),
+            Text(
+              'Invite a Business location',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontFamily: 'FredokaOne', fontSize: 22, color: fg),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              "Enter the Business account's email — we'll send them an invite to link under your Headquarters.",
+              textAlign: TextAlign.center,
+              style: TextStyle(fontFamily: 'Nunito', fontSize: 14, color: muted, height: 1.5),
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              controller: _emailCtrl,
+              focusNode: _emailFocus,
+              autofocus: true,
+              enabled: !_sending,
+              keyboardType: TextInputType.emailAddress,
+              textInputAction: TextInputAction.send,
+              autocorrect: false,
+              enableSuggestions: false,
+              onChanged: (_) {
+                if (_error != null) setState(() => _error = null);
+              },
+              onSubmitted: (_) => _submit(),
+              style: TextStyle(fontFamily: 'Nunito', fontSize: 15, color: fg),
+              decoration: InputDecoration(
+                hintText: 'business@example.com',
+                hintStyle: TextStyle(color: muted),
+                filled: true,
+                fillColor: bg,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _purple, width: 1.5)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+              ),
+            ),
+            // Inline error slot. Reserves no vertical space when
+            // empty so the layout doesn't jump on first error.
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _error!,
+                style: const TextStyle(
+                  fontFamily: 'Nunito', fontSize: 12.5,
+                  color: Colors.redAccent, fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+            const SizedBox(height: 18),
+            Row(children: [
+              Expanded(
+                child: TextButton(
+                  onPressed: _sending ? null : () => Navigator.pop(context),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                  child: Text(
+                    'Cancel',
+                    style: TextStyle(fontFamily: 'Nunito', fontSize: 15, fontWeight: FontWeight.w800, color: muted),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: ElevatedButton(
+                  onPressed: _sending ? null : _submit,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _purple,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: _purple.withValues(alpha: 0.4),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    elevation: 0,
+                  ),
+                  child: _sending
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                      : const Text(
+                          'Send Invite',
+                          style: TextStyle(fontFamily: 'Nunito', fontSize: 15, fontWeight: FontWeight.w800),
+                        ),
+                ),
+              ),
+            ]),
+          ],
+        ),
+      ),
+    );
+  }
 }

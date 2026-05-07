@@ -49,6 +49,25 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   late AnimationController _welcomeCtrl;
   late Animation<double> _welcomeAnim;
   String rsvpStatus = 'Not Responded';
+
+  // Rebuild on tab change so [_showDoneBanner] reevaluates — the
+  // bottomNavigationBar slot is a sibling of TabBarView, not inside it,
+  // so a tab swipe alone doesn't trigger a rebuild of the banner.
+  void _onTabChanged() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  /// Shows the bottom "All Set" banner when the guest has RSVPed AND
+  /// is on a Wishlist/Checklist tab — gives them an explicit way out
+  /// of the list flow without relying on the back gesture (especially
+  /// after the auto-switch to Checklist on RSVP for Checklist-only
+  /// events). Hidden on Info tab (auto-pop handles that path) and
+  /// during onboarding (the onboarding banner owns the slot).
+  bool get _showDoneBanner =>
+      !widget.isOnboarding &&
+      (rsvpStatus == 'Yes' || rsvpStatus == 'Maybe' || rsvpStatus == 'No') &&
+      _tabController.index != 0;
   String _pendingStatus = 'Not Responded';
   int adults = 1;
   int children = 0;
@@ -74,6 +93,10 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   late String eventEmoji;
   late Color eventColor;
   late bool eventHasEnded;
+  // Free-form host description shown below the date/location card on
+  // the Info tab. Empty when the host left the editor's description
+  // field blank — the row hides itself in that case.
+  String _eventDescription = '';
   bool _isHost = false;
   bool _isCoHost = false;
   bool _isHostMode = false;
@@ -95,6 +118,34 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
 
   List<Map<String, dynamic>> _rsvps = [];
   StreamSubscription<QuerySnapshot>? _rsvpsSub;
+
+  /// `_rsvps` with web-source duplicates collapsed against their app
+  /// counterparts. The same human can land in `_rsvps` twice when they
+  /// RSVP via `event.html` (doc id = email) AND via the app (doc id =
+  /// uid) — both rows arrive with different `'uid'` values because we
+  /// store `'uid': doc.id`. The visible guest list, avatar scroller,
+  /// and group counts all read this getter so a single person renders
+  /// once. Mirrors the dedup branch in [_peopleFor].
+  List<Map<String, dynamic>> get _dedupedRsvps {
+    final byId = <String, Map<String, dynamic>>{};
+    for (final g in _rsvps) {
+      byId[g['uid'] as String] = g;
+    }
+    bool looksLikeEmail(String id) => id.contains('@');
+    final emails = byId.entries.where((e) => looksLikeEmail(e.key)).toList();
+    for (final webEntry in emails) {
+      final webName = (webEntry.value['name'] as String?)?.trim().toLowerCase();
+      if (webName == null || webName.isEmpty) continue;
+      final hasAppDup = byId.values.any((other) {
+        final otherUid = other['uid'] as String;
+        if (looksLikeEmail(otherUid)) return false;
+        final otherName = (other['name'] as String?)?.trim().toLowerCase();
+        return otherName == webName;
+      });
+      if (hasAppDup) byId.remove(webEntry.key);
+    }
+    return byId.values.toList();
+  }
 
   int? _capacity;
   bool _allowWaitlist = false;
@@ -238,7 +289,12 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   /// leading integer out of the legacy free-form `quantity` String
   /// (e.g. "12 chairs" → 12). Returns null when neither yields a
   /// usable count — caller should treat that as "no cap".
+  ///
+  /// Items flagged `unlimited: true` ALWAYS return null here so every
+  /// downstream cap check (chip filter, manual-entry max, "Fully
+  /// claimed" pill) collapses to no-cap behavior automatically.
   int? _itemQuantityNeeded(Map<String, dynamic> item) {
+    if (item['unlimited'] == true) return null;
     final raw = item['quantityNeeded'];
     if (raw is num && raw > 0) return raw.toInt();
     final str = (item['quantity'] as String?) ?? '';
@@ -318,7 +374,8 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     // Tab count = 2 (Info + Photos) + 1 per active list. Both mode
     // gives 4 tabs; single-list mode gives 3; No-List gives 2.
     final listTabs = (_hasWishlist ? 1 : 0) + (_hasChecklist ? 1 : 0);
-    _tabController = TabController(length: 2 + listTabs, vsync: this);
+    _tabController = TabController(length: 2 + listTabs, vsync: this)
+      ..addListener(_onTabChanged);
     _welcomeCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
     _welcomeAnim = CurvedAnimation(parent: _welcomeCtrl, curve: Curves.easeIn);
     if (widget.isOnboarding) {
@@ -689,7 +746,18 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         }
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: AppColors.green));
         if (switchTab && listType == 'Checklist' && (newStatus == 'Yes' || newStatus == 'Maybe')) {
+          // Checklist-only events nudge the guest into the Checklist
+          // tab to pick what they're bringing — preserve that flow
+          // and skip the auto-dismiss in this case.
           _tabController.animateTo(1);
+        } else {
+          // Auto-dismiss after the snackbar's read window so the guest
+          // lands back on whichever screen they came from. Skipped on
+          // root-route entries (deep link / web) where canPop is false.
+          Future.delayed(const Duration(seconds: 2), () {
+            if (!mounted) return;
+            if (Navigator.canPop(context)) Navigator.of(context).pop();
+          });
         }
       }
     } catch (e) {
@@ -706,105 +774,14 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   void _initEventData() {
     final data = widget.eventData;
     if (data != null) {
-      eventTitle = (data['title'] as String?) ?? 'Event';
-      eventEmoji = (data['eventEmoji'] as String?) ?? '🎉';
-      eventLocation = (data['location'] as String?) ?? 'Location TBD';
-
-      final ts = data['date'];
-      if (ts is Timestamp) {
-        final dt = ts.toDate();
-        const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-        final timeStr = (data['time'] as String?) ?? '';
-        String formattedTime = '';
-        if (timeStr.isNotEmpty) {
-          final parts = timeStr.split(':');
-          final hour = int.tryParse(parts[0]) ?? 0;
-          final minute = int.tryParse(parts.length > 1 ? parts[1] : '0') ?? 0;
-          final period = hour >= 12 ? 'PM' : 'AM';
-          final h12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
-          formattedTime = ' · $h12:${minute.toString().padLeft(2, '0')} $period';
-        }
-        eventDate = '${months[dt.month - 1]} ${dt.day}, ${dt.year}$formattedTime';
-      } else {
-        eventDate = 'Date TBD';
-      }
-
-      final eventTs = data['date'];
-      if (eventTs is Timestamp) {
-        eventHasEnded = DateTime.now().isAfter(eventTs.toDate());
-      } else {
-        eventHasEnded = false;
-      }
-      debugPrint('[GuestEventScreen] title="$eventTitle" eventHasEnded=$eventHasEnded');
-      _isArchived = (data['isArchived'] as bool?) ?? false;
-      _isOutdoor  = (data['isOutdoor']  as bool?) ?? false;
-      final hostId = data['hostId'] as String?;
-      _hostId = hostId;
-      final currentUid = FirebaseAuth.instance.currentUser?.uid;
-      _isHost = hostId != null && hostId == currentUid;
-      final coHosts = List<String>.from((data['coHosts'] as List<dynamic>?) ?? []);
-      _isCoHost = !_isHost && currentUid != null && coHosts.contains(currentUid);
-
-      final deadlineTs = data['rsvpDeadline'] as Timestamp?;
-      if (deadlineTs != null) {
-        final deadline = deadlineTs.toDate();
-        _rsvpClosed = DateTime.now().isAfter(deadline);
-        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-        _rsvpDeadlineLabel = '${months[deadline.month - 1]} ${deadline.day}, ${deadline.year}';
-      }
-
-      // Normalize capacity at hydration — treat null, 0, and any
-      // non-positive value as "no cap set". Without this, a stale doc
-      // carrying `capacity: 0` would make isFull true on first render
-      // and surface the "Event is full · Join Waitlist" UI to every
-      // guest before they've even had a chance to RSVP.
-      final rawCapacity = (data['capacity'] as num?)?.toInt();
-      _capacity = (rawCapacity != null && rawCapacity > 0) ? rawCapacity : null;
-      _allowWaitlist = (data['allowWaitlist'] as bool?) ?? false;
-      _allowPlusOnes = (data['allowPlusOnes'] as bool?) ?? false;
-      _maxPlusOnes = (data['maxPlusOnes'] as num?)?.toInt();
-
-      final typeName = (data['eventType'] as String?) ?? '';
-      _eventTypeName = typeName;
-      final matchedType = eventTypes.firstWhere((t) => t.name == typeName, orElse: () => eventTypes.last);
-      eventColor = matchedType.primary;
-
-      listType = (data['listType'] as String?) ?? 'Wishlist';
-
-      // Parse every field on every item regardless of listType. Both
-      // mode mixes wishlist + checklist items in the same array, so
-      // narrowing the parsed shape based on listType silently drops
-      // the other kind's fields (quantity for checklist items in a
-      // Wishlist/Both event, price for wishlist items in a Checklist
-      // event). The downstream tabs gate on `_itemKind(item)` which
-      // reads the stored `kind` field — so preserving it here is
-      // load-bearing for the checklist tab to find its items.
-      final rawWishlist = data['wishlist'] as List<dynamic>? ?? [];
-      wishlistItems = rawWishlist.map((item) {
-        final m = item as Map<String, dynamic>;
-        final rawClaims = m['claims'] as List<dynamic>? ?? [];
-        return <String, dynamic>{
-          'name': m['name'] as String? ?? '',
-          'kind': m['kind'] as String?,
-          // Wishlist fields
-          'price': (m['price'] as num?)?.toDouble() ?? 0.0,
-          'contributed': (m['contributed'] as num?)?.toDouble() ?? 0.0,
-          'bought': m['bought'] as bool? ?? false,
-          // Buyer info stamped by the "Buy & Bring" flow — `{uid,
-          // name}`. Distinct from the legacy/cart-based bought flag,
-          // which clears `contributed` to price without recording who.
-          // Presence of boughtBy flips the badge from "Bought ✓" to
-          // "Buying it 🛍️" so the host can see who's handling it.
-          if (m['boughtBy'] is Map) 'boughtBy': Map<String, dynamic>.from(m['boughtBy'] as Map),
-          // Checklist fields
-          'quantity': m['quantity']?.toString() ?? '',
-          'claimed': (m['claimed'] as num?)?.toInt() ?? 0,
-          'claims': rawClaims.map((c) => Map<String, dynamic>.from(c as Map)).toList(),
-          if (m['imageUrl'] is String) 'imageUrl': m['imageUrl'],
-          if (m['url'] is String) 'url': m['url'],
-        };
-      }).toList();
-    } else {
+      _populateFromEventData(data);
+      return;
+    }
+    if (widget.isOnboarding) {
+      // Onboarding demo — fully synthetic event so the welcome flow
+      // has something to render without requiring a real Firestore
+      // doc. Only fires on the demo path; every other caller that
+      // lands here without eventData hits the Firestore fetch below.
       eventTitle = "Sarah's Birthday Bash";
       eventDate = "April 25, 2026 · 6:30 PM";
       eventLocation = "123 Celebration Lane, Seaside, CA";
@@ -817,6 +794,170 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         {'name': 'Gift Card - Amazon', 'price': 100.0, 'contributed': 100.0, 'bought': true},
         {'name': 'Party Decorations', 'price': 75.0, 'contributed': 0.0, 'bought': false},
       ];
+      return;
+    }
+    // No eventData, not onboarding — caller passed only eventId.
+    // Set safe empty defaults so the late-final fields are
+    // initialized, then fetch the real doc by id and re-render. We
+    // start with `listType = 'No List'` (2 tabs total) and let
+    // [_loadEventDocFromFirestore] grow the TabController if needed.
+    eventTitle = '';
+    eventDate = '';
+    eventLocation = '';
+    eventEmoji = '🎉';
+    eventColor = const Color(0xFF9C7FD4);
+    eventHasEnded = false;
+    listType = 'No List';
+    wishlistItems = [];
+    if (widget.eventId != null) {
+      // Defer until after the synchronous initState chain finishes
+      // — the TabController is created immediately after this call,
+      // so kick the fetch onto the next frame to avoid racing it.
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadEventDocFromFirestore());
+    }
+  }
+
+  /// Hydrates every field that [_initEventData] would normally read
+  /// from `widget.eventData`. Extracted so both the constructor-data
+  /// path and the lazy Firestore fetch share the same parser.
+  void _populateFromEventData(Map<String, dynamic> data) {
+    eventTitle = (data['title'] as String?) ?? 'Event';
+    eventEmoji = (data['eventEmoji'] as String?) ?? '🎉';
+    eventLocation = (data['location'] as String?) ?? 'Location TBD';
+    _eventDescription = (data['description'] as String?)?.trim() ?? '';
+
+    final ts = data['date'];
+    if (ts is Timestamp) {
+      final dt = ts.toDate();
+      const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+      final timeStr = (data['time'] as String?) ?? '';
+      String formattedTime = '';
+      if (timeStr.isNotEmpty) {
+        final parts = timeStr.split(':');
+        final hour = int.tryParse(parts[0]) ?? 0;
+        final minute = int.tryParse(parts.length > 1 ? parts[1] : '0') ?? 0;
+        final period = hour >= 12 ? 'PM' : 'AM';
+        final h12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+        formattedTime = ' · $h12:${minute.toString().padLeft(2, '0')} $period';
+      }
+      eventDate = '${months[dt.month - 1]} ${dt.day}, ${dt.year}$formattedTime';
+    } else {
+      eventDate = 'Date TBD';
+    }
+
+    final eventTs = data['date'];
+    if (eventTs is Timestamp) {
+      eventHasEnded = DateTime.now().isAfter(eventTs.toDate());
+    } else {
+      eventHasEnded = false;
+    }
+    debugPrint('[GuestEventScreen] title="$eventTitle" eventHasEnded=$eventHasEnded');
+    _isArchived = (data['isArchived'] as bool?) ?? false;
+    _isOutdoor  = (data['isOutdoor']  as bool?) ?? false;
+    final hostId = data['hostId'] as String?;
+    _hostId = hostId;
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    _isHost = hostId != null && hostId == currentUid;
+    final coHosts = List<String>.from((data['coHosts'] as List<dynamic>?) ?? []);
+    _isCoHost = !_isHost && currentUid != null && coHosts.contains(currentUid);
+
+    final deadlineTs = data['rsvpDeadline'] as Timestamp?;
+    if (deadlineTs != null) {
+      final deadline = deadlineTs.toDate();
+      _rsvpClosed = DateTime.now().isAfter(deadline);
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      _rsvpDeadlineLabel = '${months[deadline.month - 1]} ${deadline.day}, ${deadline.year}';
+    }
+
+    // Normalize capacity at hydration — treat null, 0, and any
+    // non-positive value as "no cap set". Without this, a stale doc
+    // carrying `capacity: 0` would make isFull true on first render
+    // and surface the "Event is full · Join Waitlist" UI to every
+    // guest before they've even had a chance to RSVP.
+    final rawCapacity = (data['capacity'] as num?)?.toInt();
+    _capacity = (rawCapacity != null && rawCapacity > 0) ? rawCapacity : null;
+    _allowWaitlist = (data['allowWaitlist'] as bool?) ?? false;
+    _allowPlusOnes = (data['allowPlusOnes'] as bool?) ?? false;
+    _maxPlusOnes = (data['maxPlusOnes'] as num?)?.toInt();
+
+    final typeName = (data['eventType'] as String?) ?? '';
+    _eventTypeName = typeName;
+    final matchedType = eventTypes.firstWhere((t) => t.name == typeName, orElse: () => eventTypes.last);
+    eventColor = matchedType.primary;
+
+    listType = (data['listType'] as String?) ?? 'Wishlist';
+
+    // Parse every field on every item regardless of listType. Both
+    // mode mixes wishlist + checklist items in the same array, so
+    // narrowing the parsed shape based on listType silently drops
+    // the other kind's fields (quantity for checklist items in a
+    // Wishlist/Both event, price for wishlist items in a Checklist
+    // event). The downstream tabs gate on `_itemKind(item)` which
+    // reads the stored `kind` field — so preserving it here is
+    // load-bearing for the checklist tab to find its items.
+    final rawWishlist = data['wishlist'] as List<dynamic>? ?? [];
+    wishlistItems = rawWishlist.map((item) {
+      final m = item as Map<String, dynamic>;
+      final rawClaims = m['claims'] as List<dynamic>? ?? [];
+      return <String, dynamic>{
+        'name': m['name'] as String? ?? '',
+        'kind': m['kind'] as String?,
+        // Wishlist fields
+        'price': (m['price'] as num?)?.toDouble() ?? 0.0,
+        'contributed': (m['contributed'] as num?)?.toDouble() ?? 0.0,
+        'bought': m['bought'] as bool? ?? false,
+        // Buyer info stamped by the "Buy & Bring" flow — `{uid,
+        // name}`. Distinct from the legacy/cart-based bought flag,
+        // which clears `contributed` to price without recording who.
+        // Presence of boughtBy flips the badge from "Bought ✓" to
+        // "Buying it 🛍️" so the host can see who's handling it.
+        if (m['boughtBy'] is Map) 'boughtBy': Map<String, dynamic>.from(m['boughtBy'] as Map),
+        // Checklist fields
+        'quantity': m['quantity']?.toString() ?? '',
+        if (m['unlimited'] == true) 'unlimited': true,
+        'claimed': (m['claimed'] as num?)?.toInt() ?? 0,
+        'claims': rawClaims.map((c) => Map<String, dynamic>.from(c as Map)).toList(),
+        if (m['imageUrl'] is String) 'imageUrl': m['imageUrl'],
+        if (m['url'] is String) 'url': m['url'],
+      };
+    }).toList();
+  }
+
+  /// One-shot Firestore fetch for callers that pushed the screen with
+  /// only an eventId (deep links, push notifications, business feed
+  /// Edit button). On success, hydrates the same fields the
+  /// constructor-data path sets, then resizes the TabController if
+  /// the resolved listType implies a different tab count.
+  Future<void> _loadEventDocFromFirestore() async {
+    final id = widget.eventId;
+    if (id == null) return;
+    try {
+      final snap = await FirebaseFirestore.instance.collection('events').doc(id).get();
+      if (!mounted) return;
+      final data = snap.data();
+      if (data == null) {
+        debugPrint('[GuestEventScreen] event $id does not exist');
+        return;
+      }
+      final beforeWishlist = _hasWishlist;
+      final beforeChecklist = _hasChecklist;
+      setState(() => _populateFromEventData(data));
+      // TabController length is fixed at construction. If the live
+      // listType implies a different tab count than our loading-state
+      // default ('No List' → 2 tabs), swap the controller now.
+      if (_hasWishlist != beforeWishlist || _hasChecklist != beforeChecklist) {
+        _tabController.removeListener(_onTabChanged);
+        _tabController.dispose();
+        final listTabs = (_hasWishlist ? 1 : 0) + (_hasChecklist ? 1 : 0);
+        if (mounted) {
+          setState(() {
+            _tabController = TabController(length: 2 + listTabs, vsync: this)
+              ..addListener(_onTabChanged);
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('[GuestEventScreen] event doc fetch failed: $e');
     }
   }
 
@@ -1175,10 +1316,42 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           _buildPhotosTab(),
         ],
       ),
-      bottomNavigationBar: widget.isOnboarding ? _buildOnboardingBanner() : debugLabel('Screen 10 — Guest View'),
+      bottomNavigationBar: widget.isOnboarding
+          ? _buildOnboardingBanner()
+          : (_showDoneBanner ? _buildDoneBanner() : debugLabel('Screen 10 — Guest View')),
         ),
         if (_showWelcome) _buildWelcomeOverlay(),
       ],
+    );
+  }
+
+  Widget _buildDoneBanner() {
+    return Container(
+      decoration: BoxDecoration(
+        color: _card,
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 16, offset: const Offset(0, -4))],
+      ),
+      padding: EdgeInsets.fromLTRB(20, 12, 20, 16 + MediaQuery.of(context).padding.bottom),
+      child: SizedBox(
+        width: double.infinity,
+        child: ElevatedButton(
+          onPressed: () {
+            Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute(builder: (_) => const HomeFeedScreen()),
+              (_) => false,
+            );
+          },
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.gold,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          ),
+          child: const Text('All Set 🎉',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+        ),
+      ),
     );
   }
 
@@ -1294,6 +1467,28 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                           ),
                         ),
                       ]),
+                      if (_eventDescription.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        const Divider(height: 1),
+                        const SizedBox(height: 12),
+                        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Container(
+                            width: 36, height: 36,
+                            decoration: BoxDecoration(color: eventColor.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
+                            child: Icon(Icons.notes_outlined, size: 16, color: eventColor),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Text(
+                                _eventDescription,
+                                style: TextStyle(fontSize: 14, height: 1.45, color: _muted),
+                              ),
+                            ),
+                          ),
+                        ]),
+                      ],
                     ],
                   ),
                 ),
@@ -2219,10 +2414,21 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       }
     }
 
-    final yesGuests = _rsvps.where((g) => g['status'] == 'Yes').toList();
-    final maybeGuests = _rsvps.where((g) => g['status'] == 'Maybe').toList();
-    final noGuests = _rsvps.where((g) => g['status'] == 'No').toList();
-    final totalPeople = _rsvps.fold<int>(0, (s, g) => s + (g['adults'] as int) + (g['children'] as int));
+    // Deduped first (collapse same-human web+app rows), then filter
+    // out 'Not Responded' so the visible guest list, header count, and
+    // group totals all agree on what counts as a guest.
+    final responded = _dedupedRsvps.where((g) => g['status'] != 'Not Responded').toList();
+    final yesGuests = responded.where((g) => g['status'] == 'Yes').toList();
+    final maybeGuests = responded.where((g) => g['status'] == 'Maybe').toList();
+    final noGuests = responded.where((g) => g['status'] == 'No').toList();
+    final totalPeople = responded.fold<int>(
+      0,
+      (s, g) =>
+          s +
+          ((g['adults']   as int?) ?? 1) +
+          ((g['children'] as int?) ?? 0) +
+          ((g['plusOnes'] as int?) ?? 0),
+    );
 
     Widget guestRow(Map<String, dynamic> guest) {
       final name = guest['name'] as String;
@@ -2267,13 +2473,13 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       Row(children: [
         const Icon(Icons.people_outline, size: 18, color: AppColors.green),
         const SizedBox(width: 8),
-        Text('Guest List (${_rsvps.length})', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
+        Text('Guest List (${responded.length})', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
         const Spacer(),
         if (totalPeople > 0)
           Text('$totalPeople people total', style: TextStyle(fontSize: 12, color: _muted)),
       ]),
       const SizedBox(height: 6),
-      if (_rsvps.isEmpty)
+      if (responded.isEmpty)
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 16),
           child: Center(child: Text('No RSVPs yet', style: TextStyle(color: _muted, fontSize: 14))),
@@ -2281,19 +2487,19 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       else ...[
         if (yesGuests.isNotEmpty) ...[
           const SizedBox(height: 8),
-          Text('Going (${yesGuests.fold(0, (s, g) => s + (g['adults'] as int) + (g['children'] as int))})', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.green, letterSpacing: 0.4)),
+          Text('Going (${yesGuests.fold<int>(0, (s, g) => s + ((g['adults'] as int?) ?? 1) + ((g['children'] as int?) ?? 0) + ((g['plusOnes'] as int?) ?? 0))})', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.green, letterSpacing: 0.4)),
           const SizedBox(height: 6),
           ...yesGuests.map(guestRow),
         ],
         if (maybeGuests.isNotEmpty) ...[
           const SizedBox(height: 8),
-          Text('Maybe (${maybeGuests.fold(0, (s, g) => s + (g['adults'] as int) + (g['children'] as int))})', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.gold, letterSpacing: 0.4)),
+          Text('Maybe (${maybeGuests.fold<int>(0, (s, g) => s + ((g['adults'] as int?) ?? 1) + ((g['children'] as int?) ?? 0) + ((g['plusOnes'] as int?) ?? 0))})', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.gold, letterSpacing: 0.4)),
           const SizedBox(height: 6),
           ...maybeGuests.map(guestRow),
         ],
         if (noGuests.isNotEmpty) ...[
           const SizedBox(height: 8),
-          Text("Can't Go (${noGuests.fold(0, (s, g) => s + (g['adults'] as int) + (g['children'] as int))})", style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.redAccent, letterSpacing: 0.4)),
+          Text("Can't Go (${noGuests.fold<int>(0, (s, g) => s + ((g['adults'] as int?) ?? 1) + ((g['children'] as int?) ?? 0) + ((g['plusOnes'] as int?) ?? 0))})", style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.redAccent, letterSpacing: 0.4)),
           const SizedBox(height: 6),
           ...noGuests.map(guestRow),
         ],
@@ -2363,13 +2569,18 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   }
 
   Widget _buildGuestAvatarRow() {
+    // Same source-of-truth as the host guest list: deduped, then drop
+    // 'Not Responded' so the scroller only shows people who actually
+    // RSVPed (Yes / Maybe / No). Keeps the avatar count consistent
+    // with the `Guest List (N)` header above it.
+    final visible = _dedupedRsvps.where((g) => g['status'] != 'Not Responded').toList();
     return SizedBox(
       height: 72,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
-        itemCount: _rsvps.length,
+        itemCount: visible.length,
         itemBuilder: (context, i) {
-          final guest = _rsvps[i];
+          final guest = visible[i];
           final name = guest['name'] as String;
           final status = guest['status'] as String;
           final initials = name.trim().split(' ').take(2).map((p) => p.isNotEmpty ? p[0].toUpperCase() : '').join();
@@ -3643,13 +3854,24 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                             runSpacing: 4,
                             children: [
                               Text(item['name'] as String, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
-                              // Quantity pill. Prefer the host-set
+                              // Quantity pill. Unlimited items get a
+                              // purple pill with the running tally +
+                              // ∞. Cap-having items use the host-set
                               // numeric `quantityNeeded` ("X/Y
                               // claimed"); fall back to the legacy
-                              // free-form `quantity` String for
-                              // items written before the typed
-                              // quantity field existed.
-                              if (quantityNeeded != null)
+                              // free-form `quantity` String for items
+                              // written before the typed quantity
+                              // field existed.
+                              if (item['unlimited'] == true)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                                  decoration: BoxDecoration(color: _purple.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(100)),
+                                  child: Text(
+                                    '$totalClaimed claimed · ∞',
+                                    style: const TextStyle(fontSize: 12, color: _purple, fontWeight: FontWeight.w800),
+                                  ),
+                                )
+                              else if (quantityNeeded != null)
                                 Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
                                   decoration: BoxDecoration(color: AppColors.greenPale, borderRadius: BorderRadius.circular(100)),

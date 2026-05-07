@@ -400,8 +400,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ── PROFILE / ACCOUNT EDIT DIALOGS ─────────────────────────────
 
   Future<void> _showEditProfileDialog() async {
+    final accountType = _userData['accountType'] as String?;
+    final isPersonal  = accountType != 'business' && accountType != 'businessPlus';
     final firstCtrl = TextEditingController(text: (_userData['firstName'] as String?) ?? '');
     final lastCtrl  = TextEditingController(text: (_userData['lastName']  as String?) ?? '');
+    final orgCtrl   = TextEditingController(text: (_userData['name']      as String?) ?? '');
     String? localError;
 
     final result = await showDialog<String>(
@@ -412,9 +415,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           title: Text('Edit Profile', style: TextStyle(fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
-            _dialogField(firstCtrl, 'First name', Icons.person_outline, textCapitalization: TextCapitalization.words),
-            const SizedBox(height: 12),
-            _dialogField(lastCtrl, 'Last name', Icons.person_outline, textCapitalization: TextCapitalization.words),
+            if (isPersonal) ...[
+              _dialogField(firstCtrl, 'First name', Icons.person_outline, textCapitalization: TextCapitalization.words),
+              const SizedBox(height: 12),
+              _dialogField(lastCtrl, 'Last name', Icons.person_outline, textCapitalization: TextCapitalization.words),
+            ] else
+              _dialogField(
+                orgCtrl,
+                accountType == 'business' ? 'Business name' : 'Organization name',
+                Icons.business_outlined,
+                textCapitalization: TextCapitalization.words,
+              ),
             if (localError != null) ...[
               const SizedBox(height: 8),
               Text(localError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
@@ -424,21 +435,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
             TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: TextStyle(color: _muted))),
             TextButton(
               onPressed: () async {
-                final first = firstCtrl.text.trim();
-                final last  = lastCtrl.text.trim();
-                if (first.isEmpty || last.isEmpty) {
-                  setLocal(() => localError = 'Both fields required');
-                  return;
+                final first   = firstCtrl.text.trim();
+                final last    = lastCtrl.text.trim();
+                final orgName = orgCtrl.text.trim();
+                if (isPersonal) {
+                  if (first.isEmpty || last.isEmpty) {
+                    setLocal(() => localError = 'Both fields required');
+                    return;
+                  }
+                } else {
+                  if (orgName.isEmpty) {
+                    setLocal(() => localError = 'Name required');
+                    return;
+                  }
                 }
                 try {
                   final user = FirebaseAuth.instance.currentUser;
                   if (user == null) { Navigator.pop(ctx, 'error'); return; }
-                  final fullName = '$first $last';
-                  await user.updateDisplayName(fullName);
+                  final displayName = isPersonal ? '$first $last' : orgName;
+                  await user.updateDisplayName(displayName);
                   await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
-                    'firstName': first,
-                    'lastName':  last,
-                    'name':      fullName,
+                    'firstName': isPersonal ? first : '',
+                    'lastName':  isPersonal ? last  : '',
+                    'name':      displayName,
                   });
                   if (ctx.mounted) Navigator.pop(ctx, 'saved');
                 } catch (e) {
@@ -454,6 +473,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     firstCtrl.dispose();
     lastCtrl.dispose();
+    orgCtrl.dispose();
     if (result == 'saved' && mounted) _snack('✓ Profile updated', ok: true);
   }
 

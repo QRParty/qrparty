@@ -915,16 +915,18 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
             decoration: BoxDecoration(
               color: Colors.white, borderRadius: BorderRadius.circular(12),
             ),
-            child: QrImageView(
-              // Prefer the shortCode path form when we've resolved one
-              // (initState seeds + _resolveShortCode fetches). Legacy
-              // events without a shortCode fall back to the query-param
-              // form — both route through the same event.html resolver.
-              data: (_shortCode != null && _shortCode!.isNotEmpty)
-                  ? 'https://partywithqr.com/event/$_shortCode'
-                  : 'https://partywithqr.com/event?id=${widget.eventId}',
-              backgroundColor: Colors.white,
-            ),
+            // Canonical shortCode path. Every event doc is guaranteed
+            // to have a non-empty `shortCode` (backfill complete);
+            // initState seeds it from widget.shortCode and
+            // _resolveShortCode fetches the doc when the caller
+            // didn't pass one. While the async fetch is in flight we
+            // render a silent placeholder instead of `partywithqr.com/event/null`.
+            child: _shortCode != null
+                ? QrImageView(
+                    data: 'https://partywithqr.com/event/$_shortCode',
+                    backgroundColor: Colors.white,
+                  )
+                : const SizedBox(height: 200),
           ),
           const SizedBox(height: 24),
           SizedBox(

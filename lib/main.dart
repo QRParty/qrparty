@@ -15,6 +15,7 @@ import 'utils.dart';
 import 'screens/welcome_screen.dart';
 import 'screens/guest_event_screen.dart';
 import 'screens/home_router.dart';
+import 'screens/public_org_screen.dart';
 import 'services/wishlist_share_handler.dart';
 import 'widgets/share_to_wishlist_sheet.dart';
 import 'firebase_options.dart';
@@ -184,6 +185,11 @@ class _QRPartyAppState extends State<QRPartyApp> {
   /// on the right event screen automatically after login.
   String? _pendingDeepLinkEventLookup;
 
+  /// Same pattern as [_pendingDeepLinkEventLookup] but for the
+  /// `/org/{orgId}` deep link. Mutually exclusive in practice — a
+  /// single incoming URL writes to one OR the other.
+  String? _pendingDeepLinkOrgId;
+
   @override
   void initState() {
     super.initState();
@@ -293,38 +299,64 @@ class _QRPartyAppState extends State<QRPartyApp> {
   void _setupPendingDeepLinkDrain() {
     _authSub = FirebaseAuth.instance.authStateChanges().listen((user) async {
       if (user == null) return;
-      final pending = _pendingDeepLinkEventLookup;
-      if (pending == null || pending.isEmpty) return;
+      final pendingEvent = _pendingDeepLinkEventLookup;
+      final pendingOrg   = _pendingDeepLinkOrgId;
+      if ((pendingEvent == null || pendingEvent.isEmpty) &&
+          (pendingOrg   == null || pendingOrg.isEmpty)) return;
       _pendingDeepLinkEventLookup = null;
+      _pendingDeepLinkOrgId       = null;
       // Defer one frame so HomeRouter has had a chance to mount —
       // otherwise the push lands on a still-rebuilding navigator.
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _resolveAndPushEvent(pending);
+        if (pendingEvent != null && pendingEvent.isNotEmpty) {
+          _resolveAndPushEvent(pendingEvent);
+        }
+        if (pendingOrg != null && pendingOrg.isNotEmpty) {
+          _pushOrgScreen(pendingOrg);
+        }
       });
     });
   }
 
-  /// Two URL shapes recognised here:
-  ///   • New: `https://partywithqr.com/event/{shortCode}` — path-based,
-  ///     used by the QR encoder ([generate_qr_screen.dart]) and by share
-  ///     buttons. shortCode is a 4–8 char uppercase alphanumeric.
-  ///   • Legacy: `https://partywithqr.com/?id={docId}` — querystring,
-  ///     kept around for older invitations / merch print files that
-  ///     stamped the long-form URL.
-  /// On a hit we look up the event (shortCode → doc-id fallback) and
-  /// push [GuestEventScreen]. If the user isn't signed in yet we stash
-  /// the lookup; the auth-drain listener routes them once they're in.
+  /// Three URL shapes recognised here:
+  ///   • Event (new): `https://partywithqr.com/event/{shortCode}` —
+  ///     path-based, used by the QR encoder ([generate_qr_screen.dart])
+  ///     and share buttons. shortCode is a 4–8 char uppercase alphanumeric.
+  ///   • Event (legacy): `https://partywithqr.com/?id={docId}` —
+  ///     querystring, kept around for older invitations / merch print
+  ///     files that stamped the long-form URL.
+  ///   • Org: `https://partywithqr.com/org/{orgId}` — public org page
+  ///     reached by scanning an org QR sticker. Routes to
+  ///     [PublicOrgScreen] which shows the org's upcoming events.
+  /// On a hit we look up the target and push the matching screen. If
+  /// the user isn't signed in yet we stash the lookup; the auth-drain
+  /// listener routes them once they're in.
   Future<void> _handleDeepLink(Uri uri) async {
     if (uri.host != 'partywithqr.com') return;
-    String? lookup;
     final segs = uri.pathSegments;
+    debugPrint('[DeepLink] received uri=$uri segments=$segs');
+
+    // Org path takes priority over the event-id resolver.
+    if (segs.length >= 2 && segs[0] == 'org' && segs[1].isNotEmpty) {
+      final orgId = segs[1];
+      if (FirebaseAuth.instance.currentUser == null) {
+        debugPrint('[DeepLink] org=$orgId — not signed in, queuing for drain');
+        _pendingDeepLinkOrgId = orgId;
+        return;
+      }
+      _pushOrgScreen(orgId);
+      return;
+    }
+
+    // Event paths — new path form first, then legacy querystring.
+    String? lookup;
     if (segs.length >= 2 && segs[0] == 'event' && segs[1].isNotEmpty) {
       lookup = segs[1];
     } else {
       lookup = uri.queryParameters['id'];
     }
     if (lookup == null || lookup.isEmpty) return;
-    debugPrint('[DeepLink] received uri=$uri → lookup=$lookup');
+    debugPrint('[DeepLink] event lookup=$lookup');
 
     if (FirebaseAuth.instance.currentUser == null) {
       debugPrint('[DeepLink] not signed in — queuing for post-login drain');
@@ -332,6 +364,17 @@ class _QRPartyAppState extends State<QRPartyApp> {
       return;
     }
     await _resolveAndPushEvent(lookup);
+  }
+
+  /// Pushes [PublicOrgScreen] for the given orgId. Org doc fetch and
+  /// permission validation happen inside the screen itself — if the
+  /// orgId is bogus or the doc was deleted, the screen renders an
+  /// inline "Couldn't find that organization" empty state instead
+  /// of a snackbar from here.
+  void _pushOrgScreen(String orgId) {
+    _navigatorKey.currentState?.push(MaterialPageRoute(
+      builder: (_) => PublicOrgScreen(orgId: orgId),
+    ));
   }
 
   /// shortCode → docId lookup. A 4–8 char uppercase alphanumeric input

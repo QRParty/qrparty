@@ -56,6 +56,18 @@
                     android:host="partywithqr.com"
                     android:pathPrefix="/event"/>
             </intent-filter>
+            <!-- Deep link: https://partywithqr.com/org/{orgId} — public
+                 org page reached by scanning an org QR sticker. Routes
+                 in main.dart's _handleDeepLink → PublicOrgScreen. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data
+                    android:scheme="https"
+                    android:host="partywithqr.com"
+                    android:pathPrefix="/org"/>
+            </intent-filter>
             <!-- Share sheet: receive shared URLs from any app (Amazon, Target,
                  Etsy, browser share menu, etc.). The Flutter side reads these
                  via the receive_sharing_intent plugin and routes the URL into

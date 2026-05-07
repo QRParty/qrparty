@@ -291,9 +291,15 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
         mainAxisSpacing: 10,
         childAspectRatio: 1.1,
       ),
-      itemCount: eventTypes.length,
+      // Templates are a Business-tier feature reachable only from
+      // the Business / Headquarters home feed, so we hardcode
+      // businessEventTypes here — the same list the create-event
+      // grid shows for those tiers (see _tierEventTypes in
+      // create_event_screen.dart). Personal event types are
+      // intentionally absent.
+      itemCount: businessEventTypes.length,
       itemBuilder: (_, i) {
-        final t = eventTypes[i];
+        final t = businessEventTypes[i];
         final selected = _selectedEventType?.name == t.name;
         return GestureDetector(
           onTap: () => setState(() => _selectedEventType = t),

@@ -4,17 +4,14 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../models/merch_order.dart';
 import '../utils.dart';
 
-/// Canonical RSVP URL. Prefers the path-based shortCode form
-/// (`/event/{XXXXXX}`) which both the in-app scanner and the
-/// public web resolver handle natively. Falls back to the legacy
-/// query-param form (`/event?id={docId}`) for events that haven't
-/// been migrated to a shortCode yet — both formats route through
-/// the same resolveEvent flow on event.html so nothing breaks.
-String _eventQrUrl(String eventId, {String? shortCode}) {
-  if (shortCode != null && shortCode.isNotEmpty) {
-    return 'https://partywithqr.com/event/$shortCode';
-  }
-  return 'https://partywithqr.com/event?id=$eventId';
+/// Canonical RSVP URL — path-based shortCode form (`/event/{XXXXXX}`)
+/// which both the in-app scanner and the public web resolver handle
+/// natively. Every event doc is guaranteed to have a non-empty
+/// `shortCode` (backfill complete), so the legacy `/event?id={docId}`
+/// query-param fallback has been removed.
+String _eventQrUrl(String shortCode) {
+  assert(shortCode.isNotEmpty, 'shortCode must be non-empty — every event doc must have one');
+  return 'https://partywithqr.com/event/$shortCode';
 }
 
 /// Phase 1 Kids-birthday theme set. Each value resolves to a distinct
@@ -157,7 +154,7 @@ class InvitationPreviewSheet extends StatelessWidget {
           if (kidsTheme != null)
             KidsBirthdayInvitationCard(
               theme: kidsTheme,
-              qrData: _eventQrUrl(eventId, shortCode: shortCode),
+              qrData: _eventQrUrl(shortCode!),
               shortCode: shortCode,
               eventName: eventName,
               eventDate: eventDate,
@@ -168,7 +165,7 @@ class InvitationPreviewSheet extends StatelessWidget {
           else
             _Card4x6(
               variant: variant,
-              qrData: _eventQrUrl(eventId, shortCode: shortCode),
+              qrData: _eventQrUrl(shortCode!),
               shortCode: shortCode,
               eventName: eventName,
               eventDate: eventDate,
@@ -225,6 +222,10 @@ class ThemeMiniPreview extends StatelessWidget {
     if (kidsTheme != null) {
       return KidsBirthdayInvitationCard(
         theme: kidsTheme,
+        // Hardcoded brand URL — this is a DESIGN-ONLY thumbnail in the
+        // theme picker grid, not a scannable invitation. The real
+        // event QR is stamped by the main preview surface
+        // ([InvitationPreviewSheet]) via `_eventQrUrl(...)`.
         qrData: 'https://partywithqr.com',
         eventName: '',
         accountTier: 'personal',
@@ -233,6 +234,8 @@ class ThemeMiniPreview extends StatelessWidget {
     }
     return _Card4x6(
       variant: variant,
+      // Hardcoded brand URL — see KidsBirthdayInvitationCard branch
+      // above. Design-only thumbnail; not a scannable invitation.
       qrData: 'https://partywithqr.com',
       eventName: '',
       accountTier: 'personal',
@@ -305,7 +308,7 @@ const _palettes = <KidsBirthdayTheme, _KidsPalette>{
 // ── KIDS BIRTHDAY INVITATION CARD ──────────────────────────────
 class KidsBirthdayInvitationCard extends StatelessWidget {
   final KidsBirthdayTheme theme;
-  /// URL the QR encodes — typically `https://partywithqr.com/event?id=…`.
+  /// URL the QR encodes — typically `https://partywithqr.com/event/{shortCode}`.
   final String qrData;
   /// Optional 6-char short code rendered as a typeable fallback below the QR.
   final String? shortCode;
@@ -481,8 +484,12 @@ class _KidsContentOverlay extends StatelessWidget {
           ),
         ],
         const SizedBox(height: 12),
+        // QR container sized for a ≥1-inch printed QR on a 4×6 card
+        // (104px / 540px card-height ≈ 19.3% → ~1.16" at 6" tall).
+        // Industry guidance puts general-population scan reliability
+        // at ≥1.0" on the long side; the previous 88px was at ~0.93".
         Container(
-          width: 88, height: 88,
+          width: 104, height: 104,
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
             color: Colors.white,
@@ -2086,8 +2093,10 @@ class _Card4x6 extends StatelessWidget {
               const SizedBox(height: 12),
             ] else
               const SizedBox(height: 12),
+            // QR container sized for a ≥1-inch printed QR on a 4×6
+            // card — see _KidsContentOverlay above for the math.
             Container(
-              width: 88, height: 88,
+              width: 104, height: 104,
               padding: const EdgeInsets.all(6),
               decoration: BoxDecoration(
                 color: Colors.white,

@@ -4,14 +4,12 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:google_places_flutter/google_places_flutter.dart';
 import 'package:google_places_flutter/model/prediction.dart';
 import 'package:http/http.dart' as http;
 import '../utils.dart';
 import '../models/merch_order.dart';
 import 'generate_qr_screen.dart';
-import 'home_feed_screen.dart';
 import 'order_merch_screen.dart';
 import 'wishlist_browser_screen.dart';
 
@@ -121,6 +119,14 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   final newItemNameController = TextEditingController();
   final newItemPriceController = TextEditingController();
   final newItemQtyController = TextEditingController();
+  // Custom event-type name. Visible only when [selectedEventType?.name]
+  // is 'Custom'. Saved as the literal `eventType` string on the event
+  // doc when non-empty so the host's choice survives reload + render.
+  final _customTypeCtrl = TextEditingController();
+  // Unlimited-quantity mode for the next checklist item the host adds.
+  // When true, the qty TextField is replaced with an ∞ pill and the
+  // saved item carries `unlimited: true` (no `quantityNeeded`).
+  bool _newItemUnlimited = false;
   // Default list type for a brand-new event. Falls through to Checklist
   // when Wishlist is disabled so the form doesn't start in a state whose
   // chip isn't even rendered. Existing drafts/templates hydrate their
@@ -138,6 +144,29 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   /// Recompute listType from the two booleans. Called by the editor
   /// toggles. Keeps the single string field that the rest of the app
   /// (templates, analytics, business feed) still reads.
+  /// Tier-filtered picker list. Driven by `_accountType` — Business
+  /// and BusinessPlus owners pick from [businessEventTypes]; everyone
+  /// else (including unset/null) gets [personalEventTypes]. Restoration
+  /// still uses the union [eventTypes] so legacy saves resolve.
+  List<EventType> get _tierEventTypes =>
+      (_accountType == 'business' || _accountType == 'businessPlus')
+          ? businessEventTypes
+          : personalEventTypes;
+
+  /// Saved-doc value for the `eventType` field. When the host picked
+  /// "Custom" and typed a label, return the typed label so the saved
+  /// doc carries their wording. Empty input falls back to literal
+  /// "Custom" so the saved doc still has SOME identifier.
+  String? get _resolvedEventTypeName {
+    final type = selectedEventType;
+    if (type == null) return null;
+    if (type.name == 'Custom') {
+      final custom = _customTypeCtrl.text.trim();
+      return custom.isNotEmpty ? custom : 'Custom';
+    }
+    return type.name;
+  }
+
   void _setHasWishlist(bool v) {
     setState(() {
       final c = _hasChecklist;
@@ -204,7 +233,6 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
 
   int _templateRsvpOffsetDays = 0;
   List<Map<String, dynamic>> _templates = [];
-  bool _templatesLoading = false;
 
   String _zipCode = '';
   final _locationFocusNode = FocusNode();
@@ -287,7 +315,16 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         if (parts.length == 2) selectedTime = TimeOfDay(hour: int.parse(parts[0]), minute: int.parse(parts[1]));
       }
       final typeName = d['eventType'] as String?;
-      if (typeName != null) selectedEventType = eventTypes.firstWhere((t) => t.name == typeName, orElse: () => eventTypes.last);
+      if (typeName != null) {
+        final migrated = migrateEventTypeName(typeName);
+        selectedEventType = eventTypes.firstWhere((t) => t.name == migrated, orElse: () => eventTypes.last);
+        // Preserve the original saved label when it falls through to
+        // Custom (e.g. user previously typed "Yard Sale") so editing
+        // doesn't wipe their typed name back to the literal "Custom".
+        if (selectedEventType?.name == 'Custom' && migrated.isNotEmpty && migrated != 'Custom') {
+          _customTypeCtrl.text = migrated;
+        }
+      }
       final rawList = d['wishlist'] as List<dynamic>? ?? [];
       wishlistItems = rawList.map((e) => Map<String, dynamic>.from(e as Map)).toList();
       _isPublic = (d['isPublic'] as bool?) ?? false;
@@ -317,7 +354,11 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       _isPublic = (t['isPublic'] as bool?) ?? false;
       final typeName = t['eventType'] as String?;
       if (typeName != null) {
-        selectedEventType = eventTypes.firstWhere((e) => e.name == typeName, orElse: () => eventTypes.last);
+        final migrated = migrateEventTypeName(typeName);
+        selectedEventType = eventTypes.firstWhere((e) => e.name == migrated, orElse: () => eventTypes.last);
+        if (selectedEventType?.name == 'Custom' && migrated.isNotEmpty && migrated != 'Custom') {
+          _customTypeCtrl.text = migrated;
+        }
       }
       final coHostEmails = List<String>.from(t['coHostEmails'] as List? ?? []);
       final coHostUids = List<String>.from(t['coHosts'] as List? ?? []);
@@ -421,7 +462,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         'location': locationController.text,
         'date': selectedDate != null ? Timestamp.fromDate(selectedDate!) : null,
         'time': selectedTime != null ? '${selectedTime!.hour}:${selectedTime!.minute}' : null,
-        'eventType': selectedEventType?.name,
+        'eventType': _resolvedEventTypeName,
         'eventEmoji': selectedEventType?.emoji,
         'listType': listType,
         'isPublic': _isPublic,
@@ -467,6 +508,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       if (item['quantityNeeded'] is num) {
         out['quantityNeeded'] = (item['quantityNeeded'] as num).toInt();
       }
+      if (item['unlimited'] == true) out['unlimited'] = true;
       out['claimed'] = item['claimed'] ?? 0;
       out['claims']  = (item['claims'] as List?) ?? const [];
     } else {
@@ -510,6 +552,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     newItemQtyController.dispose();
     _coHostEmailController.dispose();
     _capacityController.dispose();
+    _customTypeCtrl.dispose();
     super.dispose();
   }
 
@@ -574,7 +617,6 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   Future<void> _loadTemplates() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-    if (mounted) setState(() => _templatesLoading = true);
     try {
       final snap = await FirebaseFirestore.instance
           .collection('users')
@@ -585,12 +627,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       if (mounted) {
         setState(() {
           _templates = snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
-          _templatesLoading = false;
         });
       }
-    } catch (_) {
-      if (mounted) setState(() => _templatesLoading = false);
-    }
+    } catch (_) {/* silent — picker handles the empty list gracefully */}
   }
 
   void _showTemplatePicker() {
@@ -624,7 +663,13 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       _isPublic = (t['isPublic'] as bool?) ?? false;
       final typeName = t['eventType'] as String?;
       if (typeName != null) {
-        selectedEventType = eventTypes.firstWhere((e) => e.name == typeName, orElse: () => eventTypes.last);
+        final migrated = migrateEventTypeName(typeName);
+        selectedEventType = eventTypes.firstWhere((e) => e.name == migrated, orElse: () => eventTypes.last);
+        if (selectedEventType?.name == 'Custom' && migrated.isNotEmpty && migrated != 'Custom') {
+          _customTypeCtrl.text = migrated;
+        } else {
+          _customTypeCtrl.text = '';
+        }
       }
       _coHosts.clear();
       final coHostEmails = List<String>.from(t['coHostEmails'] as List? ?? []);
@@ -755,23 +800,38 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     if (newItemNameController.text.trim().isEmpty) return;
     setState(() {
       if (kind == 'checklist') {
-        final qtyStr = newItemQtyController.text.trim();
-        if (qtyStr.isEmpty) return;
-        // Parse the qty input as an integer count needed. Stored as
-        // `quantityNeeded` so the guest screen can cap claims and
-        // chip choices to the unclaimed remainder. The original
-        // `quantity` String is kept for back-compat (legacy rendering
-        // paths that show "Qty: <free-form>") so existing items
-        // don't lose their human label.
-        final qtyNeeded = int.tryParse(qtyStr.replaceAll(RegExp(r'[^0-9]'), ''));
-        wishlistItems.add({
-          'name': newItemNameController.text.trim(),
-          'quantity': qtyStr,
-          if (qtyNeeded != null && qtyNeeded > 0) 'quantityNeeded': qtyNeeded,
-          'claimed': 0,
-          'claims': <Map<String, dynamic>>[],
-          'kind': 'checklist',
-        });
+        if (_newItemUnlimited) {
+          // Unlimited item — `quantity` carries '∞' for legacy render
+          // paths that show the raw string, no `quantityNeeded`,
+          // `unlimited: true` for the guest screen's cap bypass.
+          wishlistItems.add({
+            'name': newItemNameController.text.trim(),
+            'quantity': '∞',
+            'unlimited': true,
+            'claimed': 0,
+            'claims': <Map<String, dynamic>>[],
+            'kind': 'checklist',
+          });
+          _newItemUnlimited = false;
+        } else {
+          final qtyStr = newItemQtyController.text.trim();
+          if (qtyStr.isEmpty) return;
+          // Parse the qty input as an integer count needed. Stored as
+          // `quantityNeeded` so the guest screen can cap claims and
+          // chip choices to the unclaimed remainder. The original
+          // `quantity` String is kept for back-compat (legacy rendering
+          // paths that show "Qty: <free-form>") so existing items
+          // don't lose their human label.
+          final qtyNeeded = int.tryParse(qtyStr.replaceAll(RegExp(r'[^0-9]'), ''));
+          wishlistItems.add({
+            'name': newItemNameController.text.trim(),
+            'quantity': qtyStr,
+            if (qtyNeeded != null && qtyNeeded > 0) 'quantityNeeded': qtyNeeded,
+            'claimed': 0,
+            'claims': <Map<String, dynamic>>[],
+            'kind': 'checklist',
+          });
+        }
       } else {
         if (newItemPriceController.text.trim().isEmpty) return;
         wishlistItems.add({
@@ -941,7 +1001,17 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
           child: Text("Pick a type and we'll set the vibe", style: TextStyle(fontSize: 14, color: _muted)),
         ),
         Expanded(
-          child: GridView.builder(
+          // Wait for the user-doc fetch (lines ~409-413) before
+          // painting the grid. Without this, the picker rendered on
+          // the first frame defaults to personalEventTypes for any
+          // tier whose accountType hasn't loaded yet — businessPlus
+          // owners briefly saw the personal list before the setState
+          // flipped them to businessEventTypes. Loader is a no-op for
+          // signed-out callers and resolves within a frame or two
+          // for signed-in users.
+          child: _accountType == null
+              ? const Center(child: CircularProgressIndicator(color: _purple, strokeWidth: 2))
+              : GridView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 3,
@@ -949,9 +1019,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
               mainAxisSpacing: 12,
               childAspectRatio: 0.95,
             ),
-            itemCount: eventTypes.length,
+            itemCount: _tierEventTypes.length,
             itemBuilder: (context, index) {
-              final type = eventTypes[index];
+              final type = _tierEventTypes[index];
               final isSelected = selectedEventType?.name == type.name;
               // Dark-mode-safe accent. Several event-type primaries
               // (Corporate, Graduation, Holiday, Divorce) are nearly
@@ -1015,6 +1085,28 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             },
           ),
         ),
+        if (selectedEventType?.name == 'Custom')
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+            child: TextField(
+              controller: _customTypeCtrl,
+              textCapitalization: TextCapitalization.words,
+              onChanged: (_) => _scheduleDraftSave(),
+              style: TextStyle(color: _fg, fontSize: 15),
+              cursorColor: _purple,
+              decoration: InputDecoration(
+                hintText: 'Name your custom event type',
+                hintStyle: TextStyle(color: _muted),
+                prefixIcon: Icon(Icons.edit_outlined, size: 18, color: _muted),
+                filled: true,
+                fillColor: _card,
+                border:        OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: _border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: _border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: const BorderSide(color: _purple, width: 1.5)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+              ),
+            ),
+          ),
         if (_isBusiness && _templates.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
@@ -1506,7 +1598,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     'location': locationController.text,
                     'date': selectedDate != null ? Timestamp.fromDate(selectedDate!) : null,
                     'time': selectedTime != null ? '${selectedTime!.hour}:${selectedTime!.minute}' : null,
-                    'eventType': selectedEventType?.name,
+                    'eventType': _resolvedEventTypeName,
                     'eventEmoji': selectedEventType?.emoji,
                     'hostId': user.uid,
                     'hostName': user.displayName ?? 'Host',
@@ -1521,8 +1613,8 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     'coHosts': _coHosts.map((c) => c['uid'] as String).toList(),
                     'zipCode': _zipCode,
                     'isRecurring': isRecurring,
-                    if (seriesId != null) 'recurringSeriesId': seriesId,
-                    if (recurrenceRule != null) 'recurrenceRule': recurrenceRule,
+                    'recurringSeriesId': ?seriesId,
+                    'recurrenceRule':    ?recurrenceRule,
                     // Same clamp as the draft-save path above — see
                     // _persistedCapacity getter for the rationale.
                     'capacity': _persistedCapacity,
@@ -1554,7 +1646,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                         'description': descController.text,
                         'location': locationController.text,
                         'time': selectedTime != null ? '${selectedTime!.hour}:${selectedTime!.minute}' : null,
-                        'eventType': selectedEventType?.name,
+                        'eventType': _resolvedEventTypeName,
                         'eventEmoji': selectedEventType?.emoji,
                         'listType': listType,
                         'wishlist': wishlistData,
@@ -1617,7 +1709,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                           eventTitle: titleController.text,
                           hostName: user.displayName ?? 'Host',
                           eventDate: selectedDate,
-                          eventType: selectedEventType?.name,
+                          eventType: _resolvedEventTypeName,
                           initialProduct: pick == 'sticker'
                               ? MerchProduct.sticker
                               : MerchProduct.invitation,
@@ -1912,30 +2004,77 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
               ),
             ),
             const SizedBox(width: 8),
-            SizedBox(
-              width: 80,
-              child: isChecklist
-                  ? TextField(
-                      controller: newItemQtyController,
-                      focusNode: _checklistQtyFocusNode,
-                      keyboardType: TextInputType.number,
-                      textInputAction: TextInputAction.done,
-                      onSubmitted: (_) => _addItemOfKind(kind),
-                      style: TextStyle(color: _fg),
-                      // Hint shows × N convention so the host knows
-                      // it's a count, not a free-form descriptor.
-                      decoration: _inputDecoration('× 12'),
-                    )
-                  : TextField(
-                      controller: newItemPriceController,
-                      focusNode: _wishlistPriceFocusNode,
-                      keyboardType: TextInputType.number,
-                      textInputAction: TextInputAction.done,
-                      onSubmitted: (_) => _addItemOfKind(kind),
-                      style: TextStyle(color: _fg),
-                      decoration: _inputDecoration('\$ Price'),
-                    ),
-            ),
+            // Quantity slot. Three states:
+            //   • wishlist → $ Price TextField (80 wide)
+            //   • checklist + capped → × 12 TextField (80) + "Unlimited" outlined toggle
+            //   • checklist + unlimited → "Unlimited ✓" filled chip, no TextField
+            if (!isChecklist)
+              SizedBox(
+                width: 80,
+                child: TextField(
+                  controller: newItemPriceController,
+                  focusNode: _wishlistPriceFocusNode,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _addItemOfKind(kind),
+                  style: TextStyle(color: _fg),
+                  decoration: _inputDecoration('\$ Price'),
+                ),
+              )
+            else if (_newItemUnlimited)
+              GestureDetector(
+                onTap: () => setState(() => _newItemUnlimited = false),
+                child: Container(
+                  height: 48,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: _purple,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Text(
+                    'Unlimited ✓',
+                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 13),
+                  ),
+                ),
+              )
+            else ...[
+              SizedBox(
+                width: 80,
+                child: TextField(
+                  controller: newItemQtyController,
+                  focusNode: _checklistQtyFocusNode,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _addItemOfKind(kind),
+                  style: TextStyle(color: _fg),
+                  // Hint shows × N convention so the host knows
+                  // it's a count, not a free-form descriptor.
+                  decoration: _inputDecoration('× 12'),
+                ),
+              ),
+              const SizedBox(width: 6),
+              GestureDetector(
+                onTap: () => setState(() {
+                  _newItemUnlimited = true;
+                  newItemQtyController.clear();
+                }),
+                child: Container(
+                  height: 48,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: _card,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: _purple, width: 1.5),
+                  ),
+                  child: const Text(
+                    'Unlimited',
+                    style: TextStyle(color: _purple, fontWeight: FontWeight.w800, fontSize: 13),
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(width: 8),
             ElevatedButton(
               onPressed: () => _addItemOfKind(kind),
@@ -1948,6 +2087,14 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
               child: const Icon(Icons.add),
             ),
           ]),
+          if (isChecklist && _newItemUnlimited)
+            Padding(
+              padding: const EdgeInsets.only(top: 6, left: 4),
+              child: Text(
+                'Anyone can claim — no limit',
+                style: TextStyle(fontSize: 12, color: _muted),
+              ),
+            ),
           const SizedBox(height: 12),
           if (indices.isEmpty)
             Padding(
@@ -1977,8 +2124,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     // toggle. Falls back to the listType-based heuristic in
     // [_itemKind] for legacy items missing the field.
     final isChecklist = _itemKind(item) == 'checklist';
+    final isUnlimited = item['unlimited'] == true;
     final subtitle = isChecklist
-        ? 'Qty needed: ${item['quantity']}'
+        ? (isUnlimited ? 'Qty needed: ∞' : 'Qty needed: ${item['quantity']}')
         : '\$${(item['price'] as double? ?? 0.0).toStringAsFixed(2)}';
     return Container(
       margin: const EdgeInsets.only(bottom: 14),

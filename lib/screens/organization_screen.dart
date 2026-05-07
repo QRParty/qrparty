@@ -345,7 +345,7 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
     if (_accountType == null) {
       return const Center(child: CircularProgressIndicator(color: _purple));
     }
-    if (_accountType != 'businessPlus') {
+    if (_accountType != 'business' && _accountType != 'businessPlus') {
       return _buildUpgradePrompt();
     }
     if (_orgId == null) return _buildCreateOrg();

@@ -17,6 +17,19 @@ exports.sendOrderStatusEmail   = require("./sendOrderStatusEmail").sendOrderStat
 // GA4 analytics for the admin dashboard.
 exports.getWebsiteAnalytics = require("./getWebsiteAnalytics").getWebsiteAnalytics;
 
+// Headquarters↔Business org link — atomic 3-doc accept transaction.
+// See acceptOrgInvite.js for the validation/invariant set.
+exports.acceptOrgInvite = require("./acceptOrgInvite").acceptOrgInvite;
+
+// Reverse direction of the HQ→Business invite — a Business owner asks
+// to link UP to a Headquarters. See requestHqLink.js for the validation
+// pipeline; bypasses firestore.rules via admin SDK.
+exports.requestHqLink = require("./requestHqLink").requestHqLink;
+
+// Mass notification fan-out for the Contacts tab — see
+// sendMassNotification.js for the rsvp → uid → token pipeline.
+exports.sendMassNotification = require("./sendMassNotification").sendMassNotification;
+
 exports.createPaymentIntent = onCall(
   { secrets: [stripeSecretKey] },
   async (request) => {

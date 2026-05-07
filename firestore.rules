@@ -21,7 +21,15 @@ service cloud.firestore {
     }
 
     function isCoHost(eventId) {
-      return isSignedIn() && request.auth.uid in eventData(eventId).coHosts;
+      // `coHosts` is an optional array on the event doc — legacy events
+      // and any event whose host never added co-hosts won't have the
+      // field at all. Without the `'coHosts' in ...` guard, the `in`
+      // operator below would error on a null read and the surrounding
+      // isHostOrCoHost expression would fail closed even for legitimate
+      // hosts. Short-circuiting on field-absence keeps the rule safe.
+      return isSignedIn()
+        && 'coHosts' in eventData(eventId)
+        && request.auth.uid in eventData(eventId).coHosts;
     }
 
     function isHostOrCoHost(eventId) {
@@ -35,11 +43,31 @@ service cloud.firestore {
 
     // ── USERS ─────────────────────────────────────────────────────────────────
     // Users can read and write their own profile document.
-    // Admins can read any user document.
+    // Reads (both `get` and `list`) are open to all signed-in users so
+    // host-side fan-out flows work without case-by-case helpers:
+    //   • HQ→Business invite send (headquarters_home_feed_screen.dart:
+    //     _sendInvite) — `where('email', '==', x).limit(1)` query.
+    //   • Host notification fan-out (host_notifications_screen.dart:
+    //     _sendNotification) — per-guest `users/{uid}.get()` to pull
+    //     fcmToken / email for push + Trigger Email fallback.
+    //   • Co-host email lookups (create_event_screen.dart) — same
+    //     query shape as the invite-send path.
+    //
+    // Firestore rules can't gate queries by which field is being
+    // filtered on, so opening `list` already permits enumeration of
+    // any indexed field. Opening `get` adds no surface area beyond
+    // that — it just lets a caller skip the query when the uid is
+    // already known. Writes stay locked to the doc owner.
+    //
+    // PRE-PUBLIC-LAUNCH TODO: replace this with callable Cloud
+    // Functions (admin SDK lookups that return just the fields each
+    // caller needs — orgId/accountType for invites, fcmToken/email
+    // for notifications) and revert `get`/`list` to admin-only.
+    // Tracked as part of the soft-launch hardening pass.
 
     match /users/{uid} {
-      allow read: if isSignedIn() && (isUser(uid) || isAdmin());
-      allow write: if isSignedIn() && isUser(uid);
+      allow get, list: if isSignedIn();
+      allow write:     if isSignedIn() && isUser(uid);
     }
 
     // ── EVENTS ────────────────────────────────────────────────────────────────
@@ -247,6 +275,81 @@ service cloud.firestore {
         allow read: if true;
         allow write: if isSignedIn()
           && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid;
+      }
+
+      // ── HQ → BUSINESS LINK INVITES ──────────────────────────────────────────
+      // Subcollection on the BUSINESS-side org doc. Doc id is the inviting
+      // HQ's orgId so re-sending the same invite is idempotent (overwrites
+      // an existing pending one rather than spawning duplicates).
+      //
+      // Lifecycle:
+      //   1. HQ creates an invite at /organizations/{businessOrgId}/invites/{hqOrgId}
+      //      with status='pending'.
+      //   2. Business sees it via a snapshot listener on its own org's invites
+      //      subcollection and shows an accept/decline banner.
+      //   3a. Decline: Business updates status pending → declined (rule below).
+      //   3b. Accept: Business calls the `acceptOrgInvite` Cloud Function,
+      //       which uses Admin SDK to atomically (a) flip status to
+      //       'accepted', (b) set parentOrgId+linkedAt on the Business org
+      //       doc, and (c) append uid+orgId to the HQ org's linkedBusiness*
+      //       arrays. The CF bypasses these rules entirely, which is why
+      //       the update rule below only authorizes the decline transition.
+      //   4. Either party can delete the invite for cleanup; HQ delete also
+      //      doubles as an explicit revoke for pending invites.
+      //
+      // The match path's outer `{orgId}` wildcard is the BUSINESS org id;
+      // the inner `{hqOrgId}` is the inviting HQ's org id. Within these
+      // rules:
+      //   • orgId   = the Business doc that holds the subcollection
+      //   • hqOrgId = the HQ doc that originated the invite (== doc id here)
+      match /invites/{hqOrgId} {
+        // Read: either party. The HQ-side read is dead today (no "view
+        // sent invites" UI yet) but rule-ready for when that ships.
+        allow read: if isSignedIn()
+          && (
+            get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid
+            || get(/databases/$(database)/documents/organizations/$(hqOrgId)).data.ownerId == request.auth.uid
+          );
+
+        // Create: HQ owner of the doc-id'd org sends an invite. Doc id
+        // must equal the HQ's orgId so we can verify ownership via a
+        // single get() against the HQ doc. Payload must self-identify
+        // (hqOrgId, hqOwnerUid, hqOrgName) and start in pending status.
+        // accountType validation (HQ='businessPlus', target='business')
+        // is enforced client-side at send time AND re-checked inside the
+        // acceptOrgInvite Cloud Function — duplicating it here would
+        // require yet another get() with no security benefit since the
+        // CF is the actual gate.
+        allow create: if isSignedIn()
+          && get(/databases/$(database)/documents/organizations/$(hqOrgId)).data.ownerId == request.auth.uid
+          && request.resource.data.hqOrgId    == hqOrgId
+          && request.resource.data.hqOwnerUid == request.auth.uid
+          && request.resource.data.status     == 'pending'
+          && request.resource.data.hqOrgName  is string
+          && request.resource.data.hqOrgName.size() > 0;
+
+        // Update: ONLY the Business owner, ONLY the decline transition.
+        // Accept lives in the Cloud Function because it has to write
+        // three docs atomically (this invite, the Business org doc, and
+        // the HQ org doc's linkedBusiness arrays). Status is one-way per
+        // the agreed invariant — current must be 'pending', new must be
+        // 'declined'. respondedAt is allowed alongside status so the
+        // client can stamp the response time.
+        allow update: if isSignedIn()
+          && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid
+          && resource.data.status == 'pending'
+          && request.resource.data.status == 'declined'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'respondedAt']);
+
+        // Delete: either party.
+        //   • HQ owner: revoke a pending or stale invite.
+        //   • Business owner: tidy up after responding (remove a
+        //     declined invite from their banner stream, etc.).
+        allow delete: if isSignedIn()
+          && (
+            get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid
+            || get(/databases/$(database)/documents/organizations/$(hqOrgId)).data.ownerId == request.auth.uid
+          );
       }
     }
 

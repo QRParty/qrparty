@@ -48,6 +48,8 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
   Color get _fg     => _isDark ? Colors.white : AppColors.dark;
 
   static const _businessFeatures = [
+    'One QR code for your whole business',
+    'Recurring events — weekly, monthly, custom',
     'Co-hosting with your team',
     'Event templates',
     'Cross-event analytics',
@@ -58,8 +60,6 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
   ];
 
   static const _plusExtraFeatures = [
-    'Organization Page — one QR for all events',
-    'Recurring events — weekly, monthly, custom',
     'White-label stickers — your logo, not ours',
     'Unlimited archived events',
     '2-year photo storage',
@@ -132,6 +132,42 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
     }
   }
 
+  // Test-only upgrade path. Writes accountType + isTrialing directly
+  // to the user doc, bypassing Stripe / IAP entirely. Activation
+  // detection in _watchActivation picks up the change and pops back
+  // to the home feed, mirroring the real purchase flow's exit.
+  Future<void> _testUpgrade(String tier) async {
+    if (_purchasing) return;
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    setState(() => _purchasing = true);
+    try {
+      final accountType = tier == 'businessPlus' ? 'businessPlus' : 'business';
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
+        'accountType': accountType,
+        'isTrialing':  false,
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('🧪 Test upgrade applied: $accountType'),
+          backgroundColor: AppColors.green,
+          behavior: SnackBarBehavior.floating,
+          shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Test upgrade failed: $e'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _purchasing = false);
+    }
+  }
+
   Future<void> _restore() async {
     setState(() => _purchasing = true);
     try {
@@ -159,7 +195,7 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: const Text(
-                    '🧪 Internal Testing Mode — Purchases Disabled',
+                    '🧪 TEST MODE — Bypasses Stripe, writes accountType directly',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 13,
@@ -211,7 +247,7 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
                 yearlyPrice: '\$79.99',
                 selectedPlan: _selectedBusinessPlan,
                 onPlanChanged: (p) => setState(() => _selectedBusinessPlan = p),
-                onSubscribe: () => _subscribe('business'),
+                onSubscribe: () => kTestingMode ? _testUpgrade('business') : _subscribe('business'),
                 featured: false,
               ),
 
@@ -227,7 +263,7 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
                 yearlyPrice: '\$159.99',
                 selectedPlan: _selectedPlusPlan,
                 onPlanChanged: (p) => setState(() => _selectedPlusPlan = p),
-                onSubscribe: () => _subscribe('businessPlus'),
+                onSubscribe: () => kTestingMode ? _testUpgrade('businessPlus') : _subscribe('businessPlus'),
                 featured: true,
               ),
 
@@ -415,20 +451,27 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
                   width: double.infinity,
                   height: 52,
                   child: ElevatedButton(
-                    onPressed: kTestingMode || _loadingProducts || _purchasing ? null : onSubscribe,
+                    onPressed: (kTestingMode ? _purchasing : (_loadingProducts || _purchasing)) ? null : onSubscribe,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: accent,
-                      foregroundColor: featured ? const Color(0xFF1A1A1A) : Colors.white,
+                      backgroundColor: kTestingMode ? _gold : accent,
+                      foregroundColor: (kTestingMode || featured) ? const Color(0xFF1A1A1A) : Colors.white,
                       disabledBackgroundColor: _border,
                       disabledForegroundColor: _muted,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                       elevation: 0,
                     ),
-                    child: kTestingMode
-                        ? const Text('Coming Soon', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800))
-                        : (_loadingProducts || _purchasing)
-                            ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5))
-                            : const Text('Start 14-Day Free Trial', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                    child: (kTestingMode ? _purchasing : (_loadingProducts || _purchasing))
+                        ? SizedBox(
+                            width: 22, height: 22,
+                            child: CircularProgressIndicator(
+                              color: (kTestingMode || featured) ? const Color(0xFF1A1A1A) : Colors.white,
+                              strokeWidth: 2.5,
+                            ),
+                          )
+                        : Text(
+                            kTestingMode ? 'Test Upgrade (Dev Only)' : 'Start 14-Day Free Trial',
+                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                          ),
                   ),
                 ),
               ],
