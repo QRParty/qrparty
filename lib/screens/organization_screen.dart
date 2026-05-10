@@ -38,6 +38,11 @@ class OrganizationScreen extends StatefulWidget {
 
 class _OrganizationScreenState extends State<OrganizationScreen> {
   final GlobalKey _qrKey = GlobalKey();
+  // Owns the "Organization name" field on the create-org form
+  // (_buildCreateOrg). Held on State so a rebuild — theme toggle, listener
+  // fire, etc. — doesn't allocate a fresh controller and orphan the
+  // user's typed-but-unsubmitted text.
+  final TextEditingController _orgNameController = TextEditingController();
   StreamSubscription<DocumentSnapshot>? _userSub;
   StreamSubscription<QuerySnapshot>? _orgSub;
   StreamSubscription<QuerySnapshot>? _eventsSub;
@@ -70,6 +75,7 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
     _orgSub?.cancel();
     _eventsSub?.cancel();
     _orgEventsSub?.cancel();
+    _orgNameController.dispose();
     super.dispose();
   }
 
@@ -394,7 +400,6 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
 
   Widget _buildCreateOrg() {
     final fg = _isDark ? Colors.white : AppColors.dark;
-    final ctrl = TextEditingController();
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -412,7 +417,7 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
         ),
         const SizedBox(height: 22),
         TextField(
-          controller: ctrl,
+          controller: _orgNameController,
           style: TextStyle(color: fg),
           decoration: InputDecoration(
             hintText: 'Organization name',
@@ -428,10 +433,14 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
         const SizedBox(height: 14),
         ElevatedButton.icon(
           onPressed: () async {
-            final name = ctrl.text.trim();
+            final name = _orgNameController.text.trim();
             if (name.isEmpty) return;
             try {
               await _createOrg(name);
+              // Reset the field so re-entering the create-org flow
+              // (rare — only if creation fails or the user comes back
+              // through some pathway) doesn't show stale text.
+              if (mounted) _orgNameController.clear();
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Organization created'), backgroundColor: AppColors.green),
@@ -694,43 +703,48 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
     final fg = _isDark ? Colors.white : AppColors.dark;
     final nameCtrl = TextEditingController(text: currentName);
     final descCtrl = TextEditingController(text: currentDesc);
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: _card,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text('Edit organization', style: TextStyle(color: fg)),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(
-            controller: nameCtrl,
-            style: TextStyle(color: fg),
-            decoration: InputDecoration(
-              labelText: 'Name',
-              labelStyle: TextStyle(color: _muted),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+    try {
+      final saved = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: _card,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text('Edit organization', style: TextStyle(color: fg)),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: nameCtrl,
+              style: TextStyle(color: fg),
+              decoration: InputDecoration(
+                labelText: 'Name',
+                labelStyle: TextStyle(color: _muted),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
             ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: descCtrl,
-            style: TextStyle(color: fg),
-            maxLines: 3,
-            decoration: InputDecoration(
-              labelText: 'Description',
-              labelStyle: TextStyle(color: _muted),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: descCtrl,
+              style: TextStyle(color: fg),
+              maxLines: 3,
+              decoration: InputDecoration(
+                labelText: 'Description',
+                labelStyle: TextStyle(color: _muted),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
             ),
-          ),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: TextStyle(color: _muted))),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save', style: TextStyle(color: _purple, fontWeight: FontWeight.w700))),
-        ],
-      ),
-    );
-    if (saved != true) return;
-    final newName = nameCtrl.text.trim();
-    if (newName.isEmpty) return;
-    await _updateOrg({'name': newName, 'description': descCtrl.text.trim()});
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: TextStyle(color: _muted))),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save', style: TextStyle(color: _purple, fontWeight: FontWeight.w700))),
+          ],
+        ),
+      );
+      if (saved != true) return;
+      final newName = nameCtrl.text.trim();
+      if (newName.isEmpty) return;
+      await _updateOrg({'name': newName, 'description': descCtrl.text.trim()});
+    } finally {
+      nameCtrl.dispose();
+      descCtrl.dispose();
+    }
   }
 }

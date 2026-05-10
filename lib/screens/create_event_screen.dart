@@ -116,6 +116,12 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   late TextEditingController titleController;
   final descController = TextEditingController();
   final locationController = TextEditingController();
+  // Optional secondary location detail — room number, suite, area
+  // within the venue. Stored separately from `location` so the Places
+  // autocomplete on the main field can keep returning a clean address
+  // string, with the freeform "Library / Room 204 / Main Stage"
+  // detail layered on top.
+  final locationDetailController = TextEditingController();
   final newItemNameController = TextEditingController();
   final newItemPriceController = TextEditingController();
   final newItemQtyController = TextEditingController();
@@ -228,6 +234,15 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
 
   List<Map<String, dynamic>> wishlistItems = [];
 
+  // ── Registry Links state ────────────────────────────────────
+  // External gift-registry URLs (Zola / Amazon / Target / Babylist /
+  // etc.). Lives on a dedicated `registryLinks` field on the event
+  // doc so a host can attach registries even on `No List` events.
+  // Hydrated from draft / template in initState; flushed back on every
+  // draft save and on the final create write.
+  final List<String> _registryLinks = [];
+  final TextEditingController _registryLinkController = TextEditingController();
+
   String? _draftId;
   Timer? _draftTimer;
 
@@ -306,6 +321,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     if (d != null) {
       descController.text = (d['description'] as String?) ?? descController.text;
       locationController.text = (d['location'] as String?) ?? '';
+      locationDetailController.text = (d['locationDetail'] as String?) ?? '';
       listType = (d['listType'] as String?) ?? 'Wishlist';
       final ts = d['date'] as Timestamp?;
       if (ts != null) selectedDate = ts.toDate();
@@ -327,6 +343,10 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       }
       final rawList = d['wishlist'] as List<dynamic>? ?? [];
       wishlistItems = rawList.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      final rawRegistry = d['registryLinks'] as List<dynamic>? ?? [];
+      _registryLinks
+        ..clear()
+        ..addAll(rawRegistry.whereType<String>());
       _isPublic = (d['isPublic'] as bool?) ?? false;
       _isOutdoor = (d['isOutdoor'] as bool?) ?? false;
       final deadlineTs = d['rsvpDeadline'] as Timestamp?;
@@ -366,6 +386,10 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         _coHosts.add({'uid': coHostUids[i], 'email': coHostEmails[i]});
       }
       _templateRsvpOffsetDays = (t['rsvpDeadlineOffsetDays'] as int?) ?? 0;
+      final rawTplRegistry = t['registryLinks'] as List<dynamic>? ?? [];
+      _registryLinks
+        ..clear()
+        ..addAll(rawTplRegistry.whereType<String>());
       if (selectedEventType != null) currentStep = 1;
     }
     titleController.addListener(_onTitleChanged);
@@ -374,6 +398,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     // GooglePlaceAutoCompleteTextField widget owns the field's onChanged,
     // so a controller listener is the only hook left to us.
     locationController.addListener(_scheduleDraftSave);
+    locationDetailController.addListener(_scheduleDraftSave);
     _checkBusinessAccount();
   }
 
@@ -460,6 +485,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         'title': titleController.text,
         'description': descController.text,
         'location': locationController.text,
+        'locationDetail': locationDetailController.text.trim(),
         'date': selectedDate != null ? Timestamp.fromDate(selectedDate!) : null,
         'time': selectedTime != null ? '${selectedTime!.hour}:${selectedTime!.minute}' : null,
         'eventType': _resolvedEventTypeName,
@@ -488,6 +514,10 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         // never gained `quantityNeeded` (broke claim caps on the guest
         // screen).
         'wishlist': wishlistItems.map(_serializeItemForSave).toList(),
+        // Registry links — host-curated external URLs (Zola, Amazon,
+        // Babylist…). Independent of the wishlist editor; saved
+        // wholesale so removals propagate.
+        'registryLinks': _registryLinks,
       });
     } catch (_) {}
   }
@@ -542,6 +572,8 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     descController.dispose();
     locationController.removeListener(_scheduleDraftSave);
     locationController.dispose();
+    locationDetailController.removeListener(_scheduleDraftSave);
+    locationDetailController.dispose();
     _locationFocusNode.dispose();
     _itemNameFocusNode.dispose();
     _checklistNameFocusNode.dispose();
@@ -553,6 +585,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     _coHostEmailController.dispose();
     _capacityController.dispose();
     _customTypeCtrl.dispose();
+    _registryLinkController.dispose();
     super.dispose();
   }
 
@@ -678,6 +711,10 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         _coHosts.add({'uid': coHostUids[i], 'email': coHostEmails[i]});
       }
       _templateRsvpOffsetDays = (t['rsvpDeadlineOffsetDays'] as int?) ?? 0;
+      final rawTplRegistry = t['registryLinks'] as List<dynamic>? ?? [];
+      _registryLinks
+        ..clear()
+        ..addAll(rawTplRegistry.whereType<String>());
       _rsvpDeadline = null;
       if (selectedEventType != null) currentStep = 1;
     });
@@ -1212,6 +1249,15 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             const SizedBox(height: 16),
             _fieldLabel('Location'),
             _buildLocationField(),
+            const SizedBox(height: 12),
+            _fieldLabel('Room / Suite / Area (optional)'),
+            _glowWrap(TextField(
+              controller: locationDetailController,
+              style: TextStyle(color: _fg),
+              decoration: _inputDecoration('e.g. Library, Room 204, Main Stage').copyWith(
+                prefixIcon: Icon(Icons.meeting_room_outlined, size: 18, color: _muted),
+              ),
+            )),
             const SizedBox(height: 16),
             _fieldLabel('Description'),
             _glowWrap(TextField(
@@ -1532,6 +1578,14 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                       ],
                     ),
                   ),
+                // Registry Links — visible regardless of listType so a
+                // host can attach Zola/Amazon/Babylist URLs even when
+                // the event has 'No List'. Saved on a dedicated field
+                // independent of the wishlist editor above.
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  child: _buildRegistryLinksSection(type),
+                ),
               ],
             ),
           ),
@@ -1596,6 +1650,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     'title': titleController.text,
                     'description': descController.text,
                     'location': locationController.text,
+                    'locationDetail': locationDetailController.text.trim(),
                     'date': selectedDate != null ? Timestamp.fromDate(selectedDate!) : null,
                     'time': selectedTime != null ? '${selectedTime!.hour}:${selectedTime!.minute}' : null,
                     'eventType': _resolvedEventTypeName,
@@ -1604,6 +1659,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     'hostName': user.displayName ?? 'Host',
                     'listType': listType,
                     'wishlist': wishlistData,
+                    'registryLinks': _registryLinks,
                     'yes': 0,
                     'maybe': 0,
                     'no': 0,
@@ -1645,11 +1701,13 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                         'title': titleController.text,
                         'description': descController.text,
                         'location': locationController.text,
+                        'locationDetail': locationDetailController.text.trim(),
                         'time': selectedTime != null ? '${selectedTime!.hour}:${selectedTime!.minute}' : null,
                         'eventType': _resolvedEventTypeName,
                         'eventEmoji': selectedEventType?.emoji,
                         'listType': listType,
                         'wishlist': wishlistData,
+                        'registryLinks': _registryLinks,
                         'isPublic': _isPublic,
                         'coHosts': _coHosts.map((c) => c['uid'] as String).toList(),
                         'zipCode': _zipCode,
@@ -2152,6 +2210,146 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
             onPressed: () => setState(() => wishlistItems.removeAt(index)),
           ),
+        ],
+      ),
+    );
+  }
+
+  // ── Registry Links ──────────────────────────────────────────
+  /// Friendly label for a registry URL. Recognised registries get a
+  /// branded name; everything else falls back to the bare host (with
+  /// a leading `www.` stripped).
+  String _registryLabel(String url) {
+    final lower = url.toLowerCase();
+    if (lower.contains('zola.com'))            { return 'Zola'; }
+    if (lower.contains('amazon.com'))          { return 'Amazon'; }
+    if (lower.contains('target.com'))          { return 'Target'; }
+    if (lower.contains('theknot.com'))         { return 'The Knot'; }
+    if (lower.contains('babylist.com'))        { return 'Babylist'; }
+    if (lower.contains('crateandbarrel.com'))  { return 'Crate & Barrel'; }
+    if (lower.contains('williams-sonoma.com') ||
+        lower.contains('williamssonoma.com'))  { return 'Williams Sonoma'; }
+    final uri = Uri.tryParse(url.startsWith('http') ? url : 'https://$url');
+    if (uri == null) return url;
+    final host = uri.host.replaceFirst('www.', '');
+    return host.isEmpty ? url : host;
+  }
+
+  /// Append the typed URL to [_registryLinks]. Best-effort prepends
+  /// `https://` to a bare-domain paste so the saved string is launch-
+  /// ready and [_registryLabel]'s `Uri.tryParse` has a scheme. Silent
+  /// no-op on empties or duplicates.
+  void _addRegistryLink() {
+    final raw = _registryLinkController.text.trim();
+    if (raw.isEmpty) return;
+    final url = raw.startsWith('http') ? raw : 'https://$raw';
+    if (_registryLinks.contains(url)) {
+      _registryLinkController.clear();
+      return;
+    }
+    setState(() {
+      _registryLinks.add(url);
+      _registryLinkController.clear();
+    });
+    _scheduleDraftSave();
+  }
+
+  Widget _buildRegistryLinksSection(EventType type) {
+    return Container(
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _border),
+      ),
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.card_giftcard_outlined, size: 18, color: type.primary),
+            const SizedBox(width: 8),
+            Text('Registry Links',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: _fg)),
+          ]),
+          const SizedBox(height: 4),
+          Text('Paste a registry URL — guests can tap through from the event page.',
+              style: TextStyle(fontSize: 12, color: _muted)),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _registryLinkController,
+                keyboardType: TextInputType.url,
+                autocorrect: false,
+                textInputAction: TextInputAction.done,
+                style: TextStyle(color: _fg),
+                onSubmitted: (_) => _addRegistryLink(),
+                decoration: _inputDecoration('https://www.zola.com/...'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: _addRegistryLink,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: type.primary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+              ),
+              child: const Icon(Icons.add),
+            ),
+          ]),
+          if (_registryLinks.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            for (var i = 0; i < _registryLinks.length; i++) ...[
+              Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: _bg,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: _border),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(children: [
+                  Container(
+                    width: 32, height: 32,
+                    decoration: BoxDecoration(
+                      color: _purple.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.card_giftcard_outlined, size: 16, color: _purple),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(_registryLabel(_registryLinks[i]),
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: _fg)),
+                        Text(_registryLinks[i],
+                            maxLines: 1, overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 11, color: _muted)),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.redAccent, size: 20),
+                    onPressed: () {
+                      setState(() => _registryLinks.removeAt(i));
+                      _scheduleDraftSave();
+                    },
+                  ),
+                ]),
+              ),
+            ],
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'Paste another URL above and tap + to include more.',
+                style: TextStyle(fontSize: 12, color: _muted, fontStyle: FontStyle.italic),
+              ),
+            ),
+          ],
         ],
       ),
     );

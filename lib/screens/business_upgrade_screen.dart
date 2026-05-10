@@ -6,7 +6,7 @@ import 'package:in_app_purchase/in_app_purchase.dart';
 import '../utils.dart';
 
 // Flip to false to re-enable real purchases.
-const bool kTestingMode = true;
+const bool kTestingMode = false;
 
 // ── Theme palette ──────────────────────────────────────────────
 const _bgDark      = Color(0xFF2D3047);

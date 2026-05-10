@@ -1,7 +1,7 @@
 name: qrparty
 description: "A new Flutter project."
 publish_to: 'none'
-version: 1.0.6+20
+version: 1.0.6+21
 environment:
   sdk: ^3.11.4
 dependencies:

@@ -80,6 +80,15 @@ class _EditEventScreenState extends State<EditEventScreen> {
   final FocusNode _checklistQtyFocus = FocusNode();
   final FocusNode _wishlistPriceFocus = FocusNode();
 
+  // ── Registry Links state ─────────────────────────────────────
+  // Free-form list of external registry URLs (Zola, Amazon, Target,
+  // Babylist, etc.). Stored as a top-level `registryLinks` array on
+  // the event doc — independent of the wishlist editor above so a
+  // host can attach registries even on `No List` events. Hydrated
+  // from the event doc in initState; flushed back wholesale on Save.
+  final List<String> _registryLinks = [];
+  final TextEditingController _registryLinkController = TextEditingController();
+
   /// Retailer chip catalog — uses the retailer's canonical https URL
   /// rather than a custom URI scheme. Most modern retailer apps register
   /// these as Android App Links / iOS Universal Links, so launching the
@@ -143,6 +152,14 @@ class _EditEventScreenState extends State<EditEventScreen> {
       ..clear()
       ..addAll(raw.map((e) => Map<String, dynamic>.from(e as Map)));
 
+    // Registry links — string-list field on the event doc; defensive
+    // whereType<String> drops any non-string entries that might have
+    // landed via a legacy / hand-edited write path.
+    final rawRegistry = d['registryLinks'] as List<dynamic>? ?? [];
+    _registryLinks
+      ..clear()
+      ..addAll(rawRegistry.whereType<String>());
+
     _checkBusinessAccount();
   }
 
@@ -160,6 +177,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
     _checklistQtyFocus.dispose();
     _wishlistPriceFocus.dispose();
     _newItemQtyCtrl.dispose();
+    _registryLinkController.dispose();
     super.dispose();
   }
 
@@ -432,6 +450,10 @@ class _EditEventScreenState extends State<EditEventScreen> {
         // take effect; existing item fields (price/contributed/bought/
         // claimed) are preserved when the host doesn't touch them.
         'wishlist': _wishlistItems,
+        // Registry links — host-curated list of external gift-registry
+        // URLs (Zola, Amazon, Target, etc.). Wholesale write so removals
+        // propagate; the in-memory list is the canonical edit state.
+        'registryLinks': _registryLinks,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
@@ -810,6 +832,12 @@ class _EditEventScreenState extends State<EditEventScreen> {
             _buildWishlistSection('checklist'),
             const SizedBox(height: 14),
           ],
+          // Registry Links — visible regardless of listType so a host
+          // can attach external registry URLs even when the event has
+          // 'No List'. Sits below the wishlist editor; the underlying
+          // `registryLinks` field is independent of `wishlist`.
+          _buildRegistryLinksSection(),
+          const SizedBox(height: 14),
           _buildCapacitySection(),
           const SizedBox(height: 14),
           _sectionCard(
@@ -1123,6 +1151,158 @@ class _EditEventScreenState extends State<EditEventScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  // ── Registry Links ──────────────────────────────────────────
+  /// Friendly label for a registry URL. Recognised registries get a
+  /// branded name; everything else falls back to the bare host (with
+  /// a leading `www.` stripped) so a pasted URL never renders as the
+  /// raw string in the saved-link list.
+  String _registryLabel(String url) {
+    final lower = url.toLowerCase();
+    if (lower.contains('zola.com'))            { return 'Zola'; }
+    if (lower.contains('amazon.com'))          { return 'Amazon'; }
+    if (lower.contains('target.com'))          { return 'Target'; }
+    if (lower.contains('theknot.com'))         { return 'The Knot'; }
+    if (lower.contains('babylist.com'))        { return 'Babylist'; }
+    if (lower.contains('crateandbarrel.com'))  { return 'Crate & Barrel'; }
+    if (lower.contains('williams-sonoma.com') ||
+        lower.contains('williamssonoma.com'))  { return 'Williams Sonoma'; }
+    final uri = Uri.tryParse(url.startsWith('http') ? url : 'https://$url');
+    if (uri == null) return url;
+    final host = uri.host.replaceFirst('www.', '');
+    return host.isEmpty ? url : host;
+  }
+
+  /// Append the URL in [_registryLinkController] to [_registryLinks].
+  /// Best-effort normalises a bare-domain paste ("zola.com/foo") to
+  /// `https://…` so the saved string is launch-ready and
+  /// [_registryLabel]'s `Uri.tryParse` has a scheme to chew on.
+  /// Silently no-ops on empties or duplicates so a host can keep
+  /// hitting Add without seeing the same URL stack up.
+  void _addRegistryLink() {
+    final raw = _registryLinkController.text.trim();
+    if (raw.isEmpty) return;
+    final url = raw.startsWith('http') ? raw : 'https://$raw';
+    if (_registryLinks.contains(url)) {
+      _registryLinkController.clear();
+      return;
+    }
+    setState(() {
+      _registryLinks.add(url);
+      _registryLinkController.clear();
+    });
+  }
+
+  Widget _buildRegistryLinksSection() {
+    final fg = _isDark ? Colors.white : AppColors.dark;
+    return _sectionCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.card_giftcard_outlined, size: 16, color: _purple),
+            const SizedBox(width: 6),
+            Text('Registry Links',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: fg)),
+          ]),
+          const SizedBox(height: 2),
+          Text(
+            'Paste a registry URL — guests can tap through from the event page.',
+            style: TextStyle(fontSize: 11, color: _muted),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _registryLinkController,
+                  keyboardType: TextInputType.url,
+                  autocorrect: false,
+                  textInputAction: TextInputAction.done,
+                  style: TextStyle(fontSize: 14, color: fg),
+                  onSubmitted: (_) => _addRegistryLink(),
+                  decoration: InputDecoration(
+                    hintText: 'https://www.zola.com/...',
+                    hintStyle: TextStyle(color: _muted, fontSize: 13),
+                    filled: true,
+                    fillColor: _bg,
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border:        OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: _border)),
+                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: _border)),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.green, width: 1.5)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                height: 40,
+                child: ElevatedButton(
+                  onPressed: _addRegistryLink,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.green,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                  ),
+                  child: const Text('Add', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ],
+          ),
+          if (_registryLinks.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            for (var i = 0; i < _registryLinks.length; i++) ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: _bg,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: _border),
+                ),
+                child: Row(children: [
+                  Container(
+                    width: 30, height: 30,
+                    decoration: BoxDecoration(
+                      color: _purple.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.card_giftcard_outlined, size: 15, color: _purple),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(_registryLabel(_registryLinks[i]),
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: fg)),
+                        Text(_registryLinks[i],
+                            maxLines: 1, overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 11, color: _muted)),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 18, color: Colors.redAccent),
+                    tooltip: 'Remove',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => setState(() => _registryLinks.removeAt(i)),
+                  ),
+                ]),
+              ),
+              if (i < _registryLinks.length - 1) const SizedBox(height: 6),
+            ],
+            const SizedBox(height: 6),
+            Text(
+              'Paste another URL above and tap Add to include more.',
+              style: TextStyle(fontSize: 11, color: _muted, fontStyle: FontStyle.italic),
+            ),
+          ],
+        ],
+      ),
     );
   }
 

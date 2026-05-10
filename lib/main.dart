@@ -292,6 +292,27 @@ class _QRPartyAppState extends State<QRPartyApp> {
   }
 
   /// Watches the auth stream so we can re-fire a deep link that arrived
+  /// Writes the device's FCM token to `users/{uid}.fcmToken` so the
+  /// host-push paths (Running Late, RSVP confirmations, mass notifs)
+  /// can find the right device. Fired on every sign-in via the auth
+  /// listener below — runs regardless of which screen the user lands
+  /// on, so deep-link-only users still register. Best-effort: any
+  /// failure (denied permission, network blip, prefs unavailable) is
+  /// swallowed so it can never block sign-in or app startup.
+  Future<void> _registerFcmTokenForUser(User user) async {
+    try {
+      await FirebaseMessaging.instance.requestPermission(
+        alert: true, badge: true, sound: true,
+      );
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token == null || token.isEmpty) return;
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .set({'fcmToken': token}, SetOptions(merge: true));
+    } catch (_) {/* best-effort — see doc comment */}
+  }
+
   /// while the user was on the welcome / login screen. When auth flips to
   /// a signed-in user we drain `_pendingDeepLinkEventLookup` once and
   /// route to the matching event. Harmless on warm-state sign-ins because
@@ -299,6 +320,12 @@ class _QRPartyAppState extends State<QRPartyApp> {
   void _setupPendingDeepLinkDrain() {
     _authSub = FirebaseAuth.instance.authStateChanges().listen((user) async {
       if (user == null) return;
+      // Register the FCM token on every sign-in. Was previously gated
+      // behind HomeFeedScreen.initState, which meant deep-link-only
+      // users (deep link → guest event screen, never visiting the
+      // home feed) silently never registered — they couldn't receive
+      // host pushes like Running Late or RSVP confirmations.
+      _registerFcmTokenForUser(user);
       final pendingEvent = _pendingDeepLinkEventLookup;
       final pendingOrg   = _pendingDeepLinkOrgId;
       if ((pendingEvent == null || pendingEvent.isEmpty) &&

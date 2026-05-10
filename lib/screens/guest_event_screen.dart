@@ -17,7 +17,7 @@ import 'host_notifications_screen.dart';
 import 'home_feed_screen.dart';
 
 // Flip to false to re-enable real Stripe checkout.
-const bool kTestingMode = true;
+const bool kTestingMode = false;
 
 // ── Theme palette ──────────────────────────────────────────────
 // Light + dark variants for the four surface colors; accents stay the same.
@@ -119,6 +119,15 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   List<Map<String, dynamic>> _rsvps = [];
   StreamSubscription<QuerySnapshot>? _rsvpsSub;
 
+  /// External gift-registry URLs the host attached on the edit/create
+  /// event screens (Zola, Amazon, Babylist, etc.). Hydrated from the
+  /// event doc's top-level `registryLinks` field via `_populateFrom
+  /// EventData` — clear()+addAll() instead of reassign so the field
+  /// stays final. The Registry section in the Info tab self-hides
+  /// when this list is empty so events without registries (most
+  /// parties) get no extra chrome.
+  final List<String> _registryLinks = [];
+
   /// `_rsvps` with web-source duplicates collapsed against their app
   /// counterparts. The same human can land in `_rsvps` twice when they
   /// RSVP via `event.html` (doc id = email) AND via the app (doc id =
@@ -166,6 +175,122 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   Color get _border => _isDark ? _borderDark : _borderLight;
   Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
 
+
+  // ── Registry section ────────────────────────────────────────
+  /// Friendly label for a registry URL. Recognised registries get a
+  /// branded name; everything else falls back to the bare host (with a
+  /// leading `www.` stripped). Mirrors the helper used host-side on
+  /// edit_event_screen / create_event_screen so a registry pasted in
+  /// either editor renders with the same label here on the guest view.
+  String _registryLabel(String url) {
+    final lower = url.toLowerCase();
+    if (lower.contains('zola.com'))            { return 'Zola'; }
+    if (lower.contains('amazon.com'))          { return 'Amazon'; }
+    if (lower.contains('target.com'))          { return 'Target'; }
+    if (lower.contains('theknot.com'))         { return 'The Knot'; }
+    if (lower.contains('babylist.com'))        { return 'Babylist'; }
+    if (lower.contains('crateandbarrel.com'))  { return 'Crate & Barrel'; }
+    if (lower.contains('williams-sonoma.com') ||
+        lower.contains('williamssonoma.com'))  { return 'Williams Sonoma'; }
+    final uri = Uri.tryParse(url.startsWith('http') ? url : 'https://$url');
+    if (uri == null) return url;
+    final host = uri.host.replaceFirst('www.', '');
+    return host.isEmpty ? url : host;
+  }
+
+  /// Hand off to the OS to open the registry URL in the user's default
+  /// browser / retailer app. externalApplication mode (vs. the in-app
+  /// browser used elsewhere) is intentional — registries often require
+  /// sign-in / persistent cart state, both of which work better in the
+  /// user's real browser session than in a one-shot WebView.
+  Future<void> _openRegistryUrl(String url) async {
+    final uri = Uri.tryParse(url.startsWith('http') ? url : 'https://$url');
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (e) {
+      debugPrint('[Registry] launchUrl failed for $url: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open: $url'), backgroundColor: Colors.redAccent),
+        );
+      }
+    }
+  }
+
+  /// Renders the host's registry links as a small list of tappable
+  /// rows. Self-hides when [_registryLinks] is empty so events
+  /// without registries don't get an empty card.
+  Widget _buildRegistrySection() {
+    if (_registryLinks.isEmpty) return const SizedBox.shrink();
+    final fg = _isDark ? Colors.white : AppColors.dark;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.card_giftcard_outlined, size: 18, color: AppColors.purple),
+            const SizedBox(width: 8),
+            Text(
+              'Registry',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: fg),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Text(
+            'Tap to open in your browser',
+            style: TextStyle(fontSize: 12, color: _muted),
+          ),
+          const SizedBox(height: 10),
+          for (var i = 0; i < _registryLinks.length; i++) ...[
+            InkWell(
+              onTap: () => _openRegistryUrl(_registryLinks[i]),
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: _bg,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: _border),
+                ),
+                child: Row(children: [
+                  Container(
+                    width: 32, height: 32,
+                    decoration: BoxDecoration(
+                      color: AppColors.purple.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.card_giftcard_outlined, size: 16, color: AppColors.purple),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(_registryLabel(_registryLinks[i]),
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: fg)),
+                        Text(_registryLinks[i],
+                            maxLines: 1, overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 11, color: _muted)),
+                      ],
+                    ),
+                  ),
+                  Icon(Icons.open_in_new, size: 16, color: _muted),
+                ]),
+              ),
+            ),
+            if (i < _registryLinks.length - 1) const SizedBox(height: 8),
+          ],
+        ],
+      ),
+    );
+  }
 
   Future<void> _addToCalendar() async {
     final data = widget.eventData;
@@ -895,6 +1020,15 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     // event). The downstream tabs gate on `_itemKind(item)` which
     // reads the stored `kind` field — so preserving it here is
     // load-bearing for the checklist tab to find its items.
+    // External gift-registry URLs (top-level `registryLinks` array on
+    // the event doc, written by edit/create event screens). Defensive
+    // whereType<String> drops malformed entries; clear() guards against
+    // stale state when the screen rehydrates after an edit.
+    final rawRegistry = data['registryLinks'] as List<dynamic>? ?? [];
+    _registryLinks
+      ..clear()
+      ..addAll(rawRegistry.whereType<String>());
+
     final rawWishlist = data['wishlist'] as List<dynamic>? ?? [];
     wishlistItems = rawWishlist.map((item) {
       final m = item as Map<String, dynamic>;
@@ -1493,6 +1627,17 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                   ),
                 ),
                 const SizedBox(height: 16),
+                // Registry section — host-attached external gift
+                // registry URLs (Zola, Amazon, Babylist, etc.). Self-
+                // hides when the host hasn't added any links, so
+                // events without registries get no extra chrome.
+                // Sits above the weather + RSVP block so guests see
+                // it as part of the event-info cluster, not buried
+                // below the action area.
+                if (_registryLinks.isNotEmpty) ...[
+                  _buildRegistrySection(),
+                  const SizedBox(height: 16),
+                ],
                 // Weather widget — gated to outdoor events only. The
                 // host opts in via the "Outdoor event" toggle on
                 // create / edit; indoor events get nothing here so

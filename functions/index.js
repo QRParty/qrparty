@@ -30,6 +30,14 @@ exports.requestHqLink = require("./requestHqLink").requestHqLink;
 // sendMassNotification.js for the rsvp → uid → token pipeline.
 exports.sendMassNotification = require("./sendMassNotification").sendMassNotification;
 
+// Server-side Google Play Billing token validation. Client (main.dart's
+// purchaseStream listener) sends {productId, purchaseToken}; this CF
+// hits the Play Developer API to confirm the purchase, acknowledges
+// it within Google's 3-day window, then writes entitlement to
+// users/{uid}. See verifyAndDeliverPurchase.js for the per-product
+// state-machine + entitlement field shape.
+exports.verifyAndDeliverPurchase = require("./verifyAndDeliverPurchase").verifyAndDeliverPurchase;
+
 exports.createPaymentIntent = onCall(
   { secrets: [stripeSecretKey] },
   async (request) => {
@@ -77,15 +85,34 @@ exports.onEventDeleted = onDocumentDeleted(
 );
 
 exports.sendRunningLateNotification = onCall(async (request) => {
+  // Authn: must be signed in. onCall does NOT auto-reject anonymous
+  // callers — without this guard, anyone could trigger a "running
+  // late" push for any event by passing the eventId. Mirrors the
+  // pattern used in getStripeRevenue below.
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "Must be signed in");
+  }
+  const callerUid = request.auth.uid;
+
   const { eventId } = request.data;
   if (!eventId) throw new HttpsError("invalid-argument", "eventId is required");
 
   const db = getFirestore();
 
-  // Get host display name from the event doc
+  // Fetch the event doc once — used for both the authz check and the
+  // host-name string in the notification body.
   const eventSnap = await db.collection("events").doc(eventId).get();
   if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found");
-  const hostName = eventSnap.data().hostName || "Your host";
+  const eventData = eventSnap.data();
+
+  // Authz: caller must be the host or a co-host of this event.
+  const isHost = eventData.hostId === callerUid;
+  const coHosts = Array.isArray(eventData.coHosts) ? eventData.coHosts : [];
+  if (!isHost && !coHosts.includes(callerUid)) {
+    throw new HttpsError("permission-denied", "Only the host or a co-host can send this notification");
+  }
+
+  const hostName = eventData.hostName || "Your host";
 
   // Query all RSVPs with status == "Yes"
   const rsvpSnap = await db
@@ -95,20 +122,28 @@ exports.sendRunningLateNotification = onCall(async (request) => {
 
   if (rsvpSnap.empty) return { sent: 0 };
 
-  // Look up FCM tokens for each yes RSVP in parallel
+  // Look up FCM tokens for each yes RSVP in parallel. We keep a
+  // token→uid map so that if a token comes back as
+  // `messaging/registration-token-not-registered` after the multicast,
+  // we can scrub it from the matching user doc (mirrors the cleanup
+  // pattern in processNotificationQueue).
   const uids = rsvpSnap.docs.map((d) => d.id);
   const userDocs = await Promise.all(
     uids.map((uid) => db.collection("users").doc(uid).get())
   );
-  const tokens = userDocs
-    .map((d) => d.data()?.fcmToken)
-    .filter((t) => typeof t === "string" && t.length > 0);
+  const tokenToUid = new Map();
+  for (const d of userDocs) {
+    const t = d.data()?.fcmToken;
+    if (typeof t === "string" && t.length > 0) tokenToUid.set(t, d.id);
+  }
+  const tokens = Array.from(tokenToUid.keys());
 
   if (tokens.length === 0) return { sent: 0 };
 
   const messaging = getMessaging();
   const chunkSize = 500;
   let totalSuccess = 0;
+  const deadTokens = [];
 
   for (let i = 0; i < tokens.length; i += chunkSize) {
     const chunk = tokens.slice(i, i + chunkSize);
@@ -123,6 +158,24 @@ exports.sendRunningLateNotification = onCall(async (request) => {
       apns: { payload: { aps: { sound: "default", badge: 1 } } },
     });
     totalSuccess += response.successCount;
+    response.responses.forEach((r, idx) => {
+      if (!r.success && r.error?.code === "messaging/registration-token-not-registered") {
+        deadTokens.push(chunk[idx]);
+      }
+    });
+  }
+
+  // Scrub dead tokens so future sends don't keep retrying them.
+  if (deadTokens.length > 0) {
+    for (const dt of deadTokens) {
+      const uid = tokenToUid.get(dt);
+      if (!uid) continue;
+      try {
+        await db.collection("users").doc(uid).update({ fcmToken: FieldValue.delete() });
+      } catch (err) {
+        console.log(`[sendRunningLate] dead-token cleanup failed for users/${uid}: ${err.code} ${err.message}`);
+      }
+    }
   }
 
   return { sent: totalSuccess };

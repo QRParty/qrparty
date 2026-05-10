@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import '../utils.dart';
 import '../widgets/rsvp_live_counts.dart';
@@ -56,24 +55,8 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
     _subscribeToEvents();
     _subscribeToPublicEvents();
     _subscribeToAttendingEvents();
-    _saveFcmToken();
-  }
-
-  Future<void> _saveFcmToken() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    try {
-      await FirebaseMessaging.instance.requestPermission(
-        alert: true, badge: true, sound: true,
-      );
-      final token = await FirebaseMessaging.instance.getToken();
-      if (token != null) {
-        await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .set({'fcmToken': token}, SetOptions(merge: true));
-      }
-    } catch (_) {}
+    // FCM token registration moved to main.dart's auth listener so
+    // deep-link-only users (who never visit this screen) also register.
   }
 
   @override
