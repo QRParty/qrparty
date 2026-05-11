@@ -6,6 +6,7 @@ import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
 import 'package:app_links/app_links.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
@@ -450,15 +451,39 @@ class _QRPartyAppState extends State<QRPartyApp> {
     for (final purchase in purchases) {
       if (purchase.status == PurchaseStatus.purchased ||
           purchase.status == PurchaseStatus.restored) {
-        await _deliverPurchase(purchase);
+        final delivered = await _deliverPurchase(purchase);
         final ctx = _navigatorKey.currentContext;
-        if (ctx != null && ctx.mounted) {
-          ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-            content: Text(purchase.status == PurchaseStatus.restored
-                ? 'Purchase restored!'
-                : '🎉 Purchase successful!'),
-            backgroundColor: AppColors.green,
-          ));
+        if (delivered) {
+          if (ctx != null && ctx.mounted) {
+            ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+              content: Text(purchase.status == PurchaseStatus.restored
+                  ? 'Purchase restored!'
+                  : '🎉 Purchase successful!'),
+              backgroundColor: AppColors.green,
+            ));
+          }
+          // Acknowledge to Google ONLY after server-side validation
+          // succeeded. Acknowledging before validation would let a
+          // failed-validation purchase look "complete" to Google — the
+          // queue would never replay it, and the user would be charged
+          // without entitlement. Leaving it pending here means the
+          // purchaseStream re-fires this same purchase on next app
+          // launch, giving validation another chance.
+          if (purchase.pendingCompletePurchase) {
+            await InAppPurchase.instance.completePurchase(purchase);
+          }
+        } else {
+          // CF said no — show a soft error and DO NOT call
+          // completePurchase. See comment above for why we leave it
+          // pending. The CF logs (firebase functions:log) will say
+          // whether this was an auth issue, a Play API rejection,
+          // or a productId mismatch.
+          if (ctx != null && ctx.mounted) {
+            ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+              content: Text("Couldn't verify your purchase — we'll retry on next launch. Contact support if this keeps happening."),
+              backgroundColor: Colors.redAccent,
+            ));
+          }
         }
       } else if (purchase.status == PurchaseStatus.error) {
         final ctx = _navigatorKey.currentContext;
@@ -468,64 +493,71 @@ class _QRPartyAppState extends State<QRPartyApp> {
             backgroundColor: Colors.redAccent,
           ));
         }
-      }
-      if (purchase.pendingCompletePurchase) {
-        await InAppPurchase.instance.completePurchase(purchase);
+        // Error / canceled — nothing to validate, ack so Google clears
+        // the queue and doesn't replay the same failure on every launch.
+        if (purchase.pendingCompletePurchase) {
+          await InAppPurchase.instance.completePurchase(purchase);
+        }
       }
     }
   }
 
-  Future<void> _deliverPurchase(PurchaseDetails purchase) async {
+  /// Hands the purchase off to the server-side validator
+  /// (`verifyAndDeliverPurchase` CF), which:
+  ///   1. Hits the Google Play Developer API to confirm the
+  ///      purchaseToken is real, paid, and not refunded.
+  ///   2. Acknowledges the purchase with Google (subscription or
+  ///      product) within the 3-day acknowledgement window.
+  ///   3. Writes the entitlement fields onto `users/{uid}` —
+  ///      accountType / subscriptionTier / subscriptionExpiry for
+  ///      subscriptions; archivedEventLimit / storagePurchase for
+  ///      one-time storage upgrades; subscriptionPurchaseToken or
+  ///      purchaseToken for the back-pointer.
+  ///
+  /// Returns true only when the CF responds with `{ok: true}`. Any
+  /// auth, validation, network, or unexpected failure returns false
+  /// so [_handlePurchases] can skip the [completePurchase] call and
+  /// let Google replay the purchase on the next app launch.
+  ///
+  /// Replaces the previous client-side Firestore write. That older
+  /// path trusted whatever the IAP plugin reported and would happily
+  /// stamp `accountType: 'businessPlus'` on any uid that produced a
+  /// `PurchaseStatus.purchased` event — including a spoofed one. The
+  /// CF closes that trust gap.
+  Future<bool> _deliverPurchase(PurchaseDetails purchase) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return;
-    final token = purchase.verificationData.serverVerificationData;
-    final ref = FirebaseFirestore.instance.collection('users').doc(uid);
-
-    switch (purchase.productID) {
-      case 'business_monthly':
-        await ref.update({
-          'accountType': 'business',
-          'isTrialing': false,
-          'subscriptionTier': 'monthly',
-          'subscriptionExpiry': Timestamp.fromDate(DateTime.now().add(const Duration(days: 30))),
-          'subscriptionPurchaseToken': token,
-        });
-      case 'business_yearly':
-        await ref.update({
-          'accountType': 'business',
-          'isTrialing': false,
-          'subscriptionTier': 'yearly',
-          'subscriptionExpiry': Timestamp.fromDate(DateTime.now().add(const Duration(days: 365))),
-          'subscriptionPurchaseToken': token,
-        });
-      case 'business_plus_monthly':
-        await ref.update({
-          'accountType': 'businessPlus',
-          'isTrialing': false,
-          'subscriptionTier': 'monthly_plus',
-          'subscriptionExpiry': Timestamp.fromDate(DateTime.now().add(const Duration(days: 30))),
-          'subscriptionPurchaseToken': token,
-        });
-      case 'business_plus_yearly':
-        await ref.update({
-          'accountType': 'businessPlus',
-          'isTrialing': false,
-          'subscriptionTier': 'yearly_plus',
-          'subscriptionExpiry': Timestamp.fromDate(DateTime.now().add(const Duration(days: 365))),
-          'subscriptionPurchaseToken': token,
-        });
-      case 'storage_25_events':
-        await ref.update({
-          'archivedEventLimit': 25,
-          'storagePurchase': 'storage_25_events',
-          'purchaseToken': token,
-        });
-      case 'storage_50_events':
-        await ref.update({
-          'archivedEventLimit': 50,
-          'storagePurchase': 'storage_50_events',
-          'purchaseToken': token,
-        });
+    if (uid == null) {
+      debugPrint('[Purchase] no signed-in user — cannot verify productId=${purchase.productID}');
+      return false;
+    }
+    final purchaseToken = purchase.verificationData.serverVerificationData;
+    if (purchaseToken.isEmpty) {
+      debugPrint('[Purchase] empty serverVerificationData for productId=${purchase.productID}');
+      return false;
+    }
+    try {
+      final callable = FirebaseFunctions.instance.httpsCallable('verifyAndDeliverPurchase');
+      final result = await callable.call({
+        'productId':     purchase.productID,
+        'purchaseToken': purchaseToken,
+      });
+      final data = (result.data as Map?)?.cast<String, dynamic>() ?? const {};
+      final ok = data['ok'] == true;
+      if (!ok) {
+        debugPrint('[Purchase] CF non-ok response productId=${purchase.productID}: $data');
+      }
+      return ok;
+    } on FirebaseFunctionsException catch (e) {
+      // Surfaces the CF's HttpsError code (unauthenticated /
+      // permission-denied / failed-precondition / invalid-argument /
+      // not-found / internal). Specific codes guide support triage —
+      // failed-precondition = subscription expired or refunded,
+      // permission-denied = Play API rejected the token.
+      debugPrint('[Purchase] verifyAndDeliverPurchase rejected productId=${purchase.productID} code=${e.code} message=${e.message}');
+      return false;
+    } catch (e) {
+      debugPrint('[Purchase] verifyAndDeliverPurchase failed productId=${purchase.productID}: $e');
+      return false;
     }
   }
 

@@ -38,6 +38,18 @@ exports.sendMassNotification = require("./sendMassNotification").sendMassNotific
 // state-machine + entitlement field shape.
 exports.verifyAndDeliverPurchase = require("./verifyAndDeliverPurchase").verifyAndDeliverPurchase;
 
+// Google Play Real-time Developer Notifications (RTDN) handler.
+// Pub/Sub-triggered on the `play-rtdn` topic, which the Play Console
+// publishes to whenever a subscription's lifecycle changes (renewal,
+// cancellation, grace period, expiry, revocation, recovery). The
+// handler looks the user up via subscriptionPurchaseToken on
+// users/{uid}, fetches the authoritative subscriptionsv2 state from
+// the Play API, then updates entitlement accordingly — downgrading
+// to personal on EXPIRED/REVOKED/ON_HOLD, refreshing expiry on
+// RENEWED/IN_GRACE_PERIOD, restoring entitlement on RECOVERED. See
+// handleRTDN.js for the type→action state machine.
+exports.handleRTDN = require("./handleRTDN").handleRTDN;
+
 exports.createPaymentIntent = onCall(
   { secrets: [stripeSecretKey] },
   async (request) => {
