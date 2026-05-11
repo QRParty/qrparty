@@ -1,7 +1,11 @@
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:gal/gal.dart';
 import '../utils.dart';
 import '../models/merch_order.dart';
 import '../services/merch_order_service.dart';
@@ -131,6 +135,13 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
   // preview always shows — same screen, two different visuals.
   String? _shortCode;
 
+  // ── Vistaprint hand-off (invitations only) ───────────────────
+  // Anchors the QR repaint boundary in the invitation flow so we can
+  // capture pixels for the "Download QR Code" button. Sticker flow
+  // never reads this — it doesn't render a capturable QR on screen.
+  final GlobalKey _vistaprintQrKey = GlobalKey();
+  bool _busyQrDownload = false;
+
   @override
   void initState() {
     super.initState();
@@ -215,6 +226,108 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
 
   bool get _isBirthday =>
       (widget.eventType ?? '').toLowerCase() == 'birthday';
+
+  // ── Vistaprint hand-off for invitations ──────────────────────
+  /// Maps the source event's type → the right Vistaprint catalog
+  /// landing page. Falls through to the general "party invitations"
+  /// page for anything we don't have a dedicated match for so the
+  /// host always lands somewhere usable rather than a 404.
+  String _vistaprintUrlForEventType() {
+    final t = (widget.eventType ?? '').toLowerCase().trim();
+    if (t.contains('birthday')) {
+      return 'https://www.vistaprint.com/invitations-announcements/birthday-party-invitations';
+    }
+    if (t.contains('wedding')) {
+      return 'https://www.vistaprint.com/invitations-announcements/wedding-invitations';
+    }
+    // Match "baby shower" / "baby_shower" / "babyShower" / etc.
+    if (t.contains('baby') && t.contains('shower')) {
+      return 'https://www.vistaprint.com/invitations-announcements/baby-shower-invitations';
+    }
+    return 'https://www.vistaprint.com/invitations-announcements/party-invitations';
+  }
+
+  /// Captures the rendered QR widget (via the [_vistaprintQrKey]
+  /// RepaintBoundary) as a 3×-density PNG and writes it to the device
+  /// gallery via Gal. Mirrors the same capture pipeline used in
+  /// generate_qr_screen.dart and organization_screen.dart so a host
+  /// who's already saved an event QR there gets the exact same image
+  /// in their photos. Requests gallery permission lazily — the
+  /// permission prompt only fires the first time on iOS / on Android
+  /// 13+.
+  Future<void> _downloadQrToGallery() async {
+    if (_busyQrDownload) return;
+    setState(() => _busyQrDownload = true);
+    try {
+      final boundary = _vistaprintQrKey.currentContext?.findRenderObject()
+          as RenderRepaintBoundary?;
+      if (boundary == null) throw Exception('QR not ready — please try again');
+      final image = await boundary.toImage(pixelRatio: 3.0);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      final bytes = byteData?.buffer.asUint8List();
+      if (bytes == null) throw Exception('Could not capture QR image');
+      final hasAccess = await Gal.hasAccess();
+      if (!hasAccess) {
+        final granted = await Gal.requestAccess();
+        if (!granted) throw Exception('Gallery access denied');
+      }
+      // Filename built from a safe-ASCII slug of the event title so the
+      // saved file is recognisable in Photos / Files. Falls back to the
+      // eventId when the title is empty / all-symbols.
+      final safeName = widget.eventTitle
+          .replaceAll(RegExp(r'[^A-Za-z0-9_-]+'), '_')
+          .toLowerCase();
+      final name = safeName.isEmpty
+          ? 'qrparty_event_${widget.eventId}'
+          : 'qrparty_$safeName';
+      await Gal.putImageBytes(bytes, name: name);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('📸 QR code saved to your photos. Add it to your Vistaprint design next!'),
+          backgroundColor: AppColors.green,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not save QR: $e'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _busyQrDownload = false);
+    }
+  }
+
+  /// Hands off to the device's default browser with the right Vistaprint
+  /// catalog URL. externalApplication mode (rather than
+  /// inAppBrowserView) keeps Vistaprint's session / cart / design
+  /// state in the user's real browser — they almost certainly already
+  /// have an account there and want everything persisted across the
+  /// long design session.
+  Future<void> _launchVistaprint() async {
+    final url = _vistaprintUrlForEventType();
+    final uri = Uri.parse(url);
+    try {
+      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!launched && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not open Vistaprint. Copy this URL: $url'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Failed to open browser: $e'),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
+    }
+  }
 
   /// Sub-categories that use the Kids theme set + Phase 1 themed previews.
   /// Currently kids and firstBirthday share the same designs; centralised
@@ -316,6 +429,16 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Invitation flow: skip the multi-step Stripe path entirely and
+    // hand off to Vistaprint. The host downloads their event QR, then
+    // launches Vistaprint's catalog page in the system browser and
+    // designs the card there. The multi-step Stripe / themed-print
+    // flow below is retained ONLY for stickers — which we still
+    // fulfill in-house via createMerchOrder + the Phase 3 print
+    // renderer.
+    if (_product == MerchProduct.invitation) {
+      return _buildInvitationVistaprintFlow();
+    }
     return Scaffold(
       backgroundColor: _bg,
       appBar: AppBar(
@@ -338,6 +461,193 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
           if (_currentStep == _StepKind.theme) _pinnedVariantBar(),
           if (_currentStep != _StepKind.confirmation) _bottomBar(),
         ]),
+      ),
+    );
+  }
+
+  /// Vistaprint hand-off screen body. Visually a focused "bottom-sheet
+  /// style" card (rounded top, handle bar, brand pill, explanation,
+  /// QR preview, two CTAs) filling the screen so we don't have to
+  /// stack a modal over the screen the caller just pushed.
+  ///
+  /// The QR rendered here is wrapped in a [RepaintBoundary] keyed by
+  /// [_vistaprintQrKey] so [_downloadQrToGallery] can capture and
+  /// save the exact pixels the host previews. The QR's data string
+  /// mirrors `_eventQrUrl(shortCode)` from invitation_preview.dart —
+  /// same canonical short-code URL the in-app preview encodes.
+  Widget _buildInvitationVistaprintFlow() {
+    final code = _shortCode;
+    final qrData = (code != null && code.isNotEmpty)
+        ? 'https://partywithqr.com/event/$code'
+        : null;
+    return Scaffold(
+      backgroundColor: _bg,
+      appBar: AppBar(
+        backgroundColor: _bg,
+        elevation: 0,
+        surfaceTintColor: Colors.transparent,
+        leading: IconButton(
+          icon: Icon(Icons.close, color: _fg),
+          onPressed: () => Navigator.of(context).pop(_orderId),
+        ),
+        title: Text('Order Invitations',
+            style: TextStyle(color: _fg, fontWeight: FontWeight.w700, fontSize: 17)),
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
+            decoration: BoxDecoration(
+              color: _card,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: _border),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              // Handle bar — mirrors the visual signature of a modal
+              // bottom sheet so the screen reads as a focused dialog
+              // rather than another full step in the flow.
+              Center(child: Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                  color: _border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              )),
+              const SizedBox(height: 18),
+              // Vistaprint hero badge — orange/red brand-ish stripe so
+              // the user understands they're handing off, not finishing
+              // an in-app purchase.
+              Center(child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _gold.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: _gold.withValues(alpha: 0.45)),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.print_outlined, size: 16, color: _gold),
+                  const SizedBox(width: 6),
+                  Text('VISTAPRINT',
+                      style: TextStyle(
+                        color: _gold, fontSize: 11,
+                        fontWeight: FontWeight.w800, letterSpacing: 1.4,
+                      )),
+                ]),
+              )),
+              const SizedBox(height: 16),
+              Text('Design your invitation',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontFamily: 'FredokaOne', fontSize: 24, color: _fg)),
+              const SizedBox(height: 8),
+              Text(
+                "You'll design your invitation on Vistaprint. Download your "
+                "event's QR code first to add it to your design.",
+                textAlign: TextAlign.center,
+                style: TextStyle(color: _muted, fontSize: 13.5, height: 1.55),
+              ),
+              const SizedBox(height: 22),
+              // QR preview, wrapped in a RepaintBoundary so we can
+              // capture pixels for "Download QR Code". The
+              // `_shortCode == null` window can briefly show a blank
+              // placeholder while _resolveShortCode resolves; the
+              // Download button is disabled in that state.
+              Center(
+                child: RepaintBoundary(
+                  key: _vistaprintQrKey,
+                  child: Container(
+                    width: 180, height: 180,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: _border),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.08),
+                          blurRadius: 14, offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: qrData != null
+                        ? QrImageView(
+                            data: qrData,
+                            version: QrVersions.auto,
+                            backgroundColor: Colors.white,
+                          )
+                        : const Center(child: CircularProgressIndicator(
+                            color: _purple, strokeWidth: 2,
+                          )),
+                  ),
+                ),
+              ),
+              if (qrData != null) ...[
+                const SizedBox(height: 8),
+                Center(child: Text(
+                  'partywithqr.com/event/$code',
+                  style: TextStyle(
+                    color: _muted, fontSize: 11,
+                    fontFamily: 'Nunito', fontWeight: FontWeight.w700,
+                    letterSpacing: 0.4,
+                  ),
+                )),
+              ],
+              const SizedBox(height: 22),
+              // Download QR — outlined / secondary so Continue reads
+              // as the primary action. Disabled while the QR is still
+              // resolving or a save is in flight.
+              SizedBox(
+                height: 50,
+                child: OutlinedButton.icon(
+                  onPressed: (qrData == null || _busyQrDownload)
+                      ? null
+                      : _downloadQrToGallery,
+                  icon: _busyQrDownload
+                      ? const SizedBox(width: 16, height: 16,
+                          child: CircularProgressIndicator(color: _purple, strokeWidth: 2))
+                      : const Icon(Icons.download_outlined, size: 18),
+                  label: Text(
+                    _busyQrDownload ? 'Saving…' : 'Download QR Code',
+                    style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _purple,
+                    side: const BorderSide(color: _purple, width: 1.5),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              // Continue to Vistaprint — primary action.
+              SizedBox(
+                height: 50,
+                child: ElevatedButton.icon(
+                  onPressed: _launchVistaprint,
+                  icon: const Icon(Icons.open_in_new, size: 18),
+                  label: const Text(
+                    'Continue to Vistaprint',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _purple,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              // Footnote — sets expectations so users don't expect
+              // Vistaprint orders to surface in QR Party's order list.
+              Text(
+                "Orders + tracking happen on Vistaprint. We'll keep your "
+                "event QR ready for you.",
+                textAlign: TextAlign.center,
+                style: TextStyle(color: _muted, fontSize: 11.5, height: 1.5),
+              ),
+            ]),
+          ),
+        ),
       ),
     );
   }
