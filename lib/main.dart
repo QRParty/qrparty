@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -540,6 +541,13 @@ class _QRPartyAppState extends State<QRPartyApp> {
       final result = await callable.call({
         'productId':     purchase.productID,
         'purchaseToken': purchaseToken,
+        // Explicit platform tag — lets the CF route to the App Store
+        // Server API (iOS) vs the Google Play Developer API (Android)
+        // without falling back to its token-shape heuristic. The
+        // heuristic works for StoreKit 2 transaction IDs but
+        // misclassifies StoreKit 1 base64 receipts as Android, so
+        // sending the tag explicitly is the safe path.
+        'platform':      Platform.isIOS ? 'ios' : 'android',
       });
       final data = (result.data as Map?)?.cast<String, dynamic>() ?? const {};
       final ok = data['ok'] == true;
