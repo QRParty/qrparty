@@ -735,12 +735,30 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       tx.update(eventRef, {'wishlist': rawWishlist});
       tx.set(contribRef, {'items': existingItems}, SetOptions(merge: true));
     });
+    // Compute the locally-clamped toAdd ONCE so the optimistic UI
+    // update and the host notification agree on the dollar figure
+    // they report — without this they were derived twice and could
+    // drift after the wholesale state replacement on the next event-
+    // doc snapshot.
+    final currentTotal = item['contributed'] as double;
+    final remaining = price - currentTotal;
+    final toAdd = amount > remaining ? remaining : amount;
     setState(() {
-      final currentTotal = item['contributed'] as double;
-      final remaining = price - currentTotal;
-      final toAdd = amount > remaining ? remaining : amount;
       wishlistItems[index]['contributed'] = (currentTotal + toAdd).clamp(0.0, price);
     });
+    // Notify the host that a guest contributed to their wishlist.
+    // Match the guest-name resolution the RSVP notification uses so
+    // a guest who never set displayName falls back to the local-part
+    // of their email instead of just "Guest". Whole-dollar amounts
+    // render without decimals to match the in-app contribute chips.
+    final guestName = user.displayName ?? user.email?.split('@').first ?? 'A guest';
+    final amountStr = toAdd == toAdd.roundToDouble()
+        ? '\$${toAdd.toInt()}'
+        : '\$${toAdd.toStringAsFixed(2)}';
+    _notifyHost(
+      'New Contribution 💝',
+      '$guestName contributed $amountStr toward $itemName on $eventTitle',
+    );
   }
 
   Future<void> _undoContributionFirestore(int index) async {
@@ -1306,6 +1324,17 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           backgroundColor: AppColors.purple,
         ));
       }
+      // Notify the host that a guest claimed an item via Buy & Bring.
+      // Fired only on the success path so a failed transaction (caught
+      // below) doesn't trigger a phantom push. Same guest-name pattern
+      // as the RSVP notification — falls through to email-local-part
+      // and then "A guest" when displayName is empty.
+      final guestName = user.displayName ?? user.email?.split('@').first ?? 'A guest';
+      final itemName = (wishlistItems[itemIdx]['name'] as String?) ?? 'an item';
+      _notifyHost(
+        'Item Claimed 🎉',
+        '$guestName is bringing $itemName to $eventTitle',
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -4702,6 +4731,17 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           ));
         }
       }
+      // Notify the host that a guest claimed a checklist item. Sits
+      // INSIDE the try success path so the fully-claimed StateError
+      // (thrown inside the transaction when remaining == 0) skips
+      // straight to the catch below without firing a misleading push.
+      // Same guest-name pattern as the RSVP notification.
+      final guestName = user.displayName ?? user.email?.split('@').first ?? 'A guest';
+      final itemName = (wishlistItems[itemIndex]['name'] as String?) ?? 'an item';
+      _notifyHost(
+        'Checklist Claim ✅',
+        '$guestName claimed $itemName on $eventTitle',
+      );
     } catch (e) {
       if (e is StateError && e.message == 'fully-claimed') {
         if (mounted) {

@@ -303,16 +303,24 @@ class _QRPartyAppState extends State<QRPartyApp> {
   /// swallowed so it can never block sign-in or app startup.
   Future<void> _registerFcmTokenForUser(User user) async {
     try {
-      await FirebaseMessaging.instance.requestPermission(
+      final settings = await FirebaseMessaging.instance.requestPermission(
         alert: true, badge: true, sound: true,
       );
+      debugPrint('[FCM] permission uid=${user.uid} status=${settings.authorizationStatus}');
       final token = await FirebaseMessaging.instance.getToken();
-      if (token == null || token.isEmpty) return;
+      if (token == null || token.isEmpty) {
+        debugPrint('[FCM] getToken() returned null/empty uid=${user.uid} authStatus=${settings.authorizationStatus} — likely APNs not registered or permission denied');
+        return;
+      }
+      debugPrint('[FCM] writing token uid=${user.uid} tokenLen=${token.length} tokenSuffix=…${token.length >= 8 ? token.substring(token.length - 8) : token}');
       await FirebaseFirestore.instance
           .collection('users')
           .doc(user.uid)
           .set({'fcmToken': token}, SetOptions(merge: true));
-    } catch (_) {/* best-effort — see doc comment */}
+      debugPrint('[FCM] token write succeeded uid=${user.uid}');
+    } catch (e, st) {
+      debugPrint('[FCM] token registration FAILED uid=${user.uid}: $e\n$st');
+    }
   }
 
   /// while the user was on the welcome / login screen. When auth flips to
