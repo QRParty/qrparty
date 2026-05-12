@@ -106,7 +106,6 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   // that's irrelevant to them. Hydrated from `isOutdoor` on the
   // event doc; defaults false for legacy events without the flag.
   bool _isOutdoor = false;
-  String? _hostId;
   bool _rsvpClosed = false;
   String _rsvpDeadlineLabel = '';
   late String listType;
@@ -336,20 +335,20 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
   }
 
   Future<void> _notifyHost(String title, String body) async {
-    if (_hostId == null) return;
     final eventId = widget.eventId;
-    // Both gates are required: the firestore.rules rule on
-    // notificationQueue requires the eventId field, so silently
-    // skipping when it's null is preferable to writing a doc that
-    // would just bounce with permission-denied anyway.
     if (eventId == null || eventId.isEmpty) return;
+    // Routed through the notifyHost CF because firestore.rules blocks
+    // guest writes to notificationQueue. The CF resolves the host
+    // fcmToken server-side and writes the queue doc via Admin SDK.
     try {
-      final doc = await FirebaseFirestore.instance.collection('users').doc(_hostId).get();
-      final token = doc.data()?['fcmToken'] as String?;
-      if (token != null) {
-        await NotificationService.sendNotification([token], title, body, eventId: eventId);
-      }
-    } catch (_) {}
+      await FirebaseFunctions.instance.httpsCallable('notifyHost').call({
+        'eventId': eventId,
+        'title': title,
+        'body': body,
+      });
+    } catch (e) {
+      debugPrint('[_notifyHost] CF call failed: $e');
+    }
   }
 
   void _addToCart(String name, double amount) {
@@ -998,7 +997,6 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     _isArchived = (data['isArchived'] as bool?) ?? false;
     _isOutdoor  = (data['isOutdoor']  as bool?) ?? false;
     final hostId = data['hostId'] as String?;
-    _hostId = hostId;
     final currentUid = FirebaseAuth.instance.currentUser?.uid;
     _isHost = hostId != null && hostId == currentUid;
     final coHosts = List<String>.from((data['coHosts'] as List<dynamic>?) ?? []);

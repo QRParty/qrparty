@@ -50,6 +50,12 @@ exports.verifyAndDeliverPurchase = require("./verifyAndDeliverPurchase").verifyA
 // handleRTDN.js for the type→action state machine.
 exports.handleRTDN = require("./handleRTDN").handleRTDN;
 
+// Server-side host notification for guest-driven actions (RSVP,
+// contributions, wishlist claims). firestore.rules blocks guests from
+// writing to notificationQueue, so the client calls this CF and the
+// Admin SDK does the write. See notifyHost.js.
+exports.notifyHost = require("./notifyHost").notifyHost;
+
 exports.createPaymentIntent = onCall(
   { secrets: [stripeSecretKey] },
   async (request) => {
