@@ -27,6 +27,14 @@ workflows:
           echo $CM_CERTIFICATE | base64 --decode > /tmp/certificate.p12
           keychain add-certificates --certificate /tmp/certificate.p12 --certificate-password $CM_CERTIFICATE_PASSWORD
           xcode-project use-profiles
+      - name: Decode GoogleService-Info.plist
+        script: |
+          if [ -z "$GOOGLE_SERVICE_INFO_PLIST" ]; then
+            echo "GOOGLE_SERVICE_INFO_PLIST env var is empty — Firebase native config will be missing from the bundle (FCM/APNs will not work)."
+            exit 1
+          fi
+          echo "$GOOGLE_SERVICE_INFO_PLIST" | base64 --decode > ios/Runner/GoogleService-Info.plist
+          echo "Wrote ios/Runner/GoogleService-Info.plist ($(wc -c < ios/Runner/GoogleService-Info.plist) bytes)"
       - name: Build IPA
         script: |
           flutter build ipa --release --export-options-plist=/Users/builder/export_options.plist
