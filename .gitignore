@@ -170,4 +170,4 @@ app.*.symbols
 
 android/app/google-services.json
 android/app/qrparty-release.jks
-.env
+.envios/Runner/GoogleService-Info.plist
