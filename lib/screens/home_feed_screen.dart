@@ -39,11 +39,11 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
   String _exploreSearch = '';
   final TextEditingController _exploreSearchController = TextEditingController();
 
-  // Events the current user has RSVP'd 'Yes' to as a guest. Driven by a
-  // collectionGroup('rsvps') stream filtered to status=='Yes' + uid==me;
-  // the parent event docs are fetched lazily when the stream fires.
-  // _attendingLoaded flips true after the first snapshot arrives so we
-  // can distinguish "still loading" from "no attending events".
+  // Events the current user has RSVP'd to as a guest, regardless of
+  // status (Yes/Maybe/No). Driven by a collectionGroup('rsvps') stream
+  // on uid==me; the parent event docs are fetched lazily when the
+  // stream fires. _attendingLoaded flips true after the first snapshot
+  // arrives so we can distinguish "still loading" from "no invites".
   List<Map<String, dynamic>> _attendingEvents = [];
   bool _attendingLoaded = false;
   StreamSubscription<QuerySnapshot>? _attendingSub;
@@ -69,21 +69,21 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
   }
 
   /// Listens to RSVP docs across every event subcollection where the
-  /// current user is `uid` AND `status == 'Yes'`. Each matching RSVP
-  /// is joined back to its parent event doc so the Attending card can
-  /// render the same chrome as the Hosting cards.
+  /// current user is `uid` (any status). Each matching RSVP is joined
+  /// back to its parent event doc so the guest sees every event they've
+  /// been invited to — not just the ones they accepted — and can change
+  /// their answer later.
   ///
   /// Notes:
-  ///   • Status field is PascalCase ('Yes'/'Maybe'/'No') in Firestore —
-  ///     the user spec said lowercase but the actual data shape, set
-  ///     by guest_event_screen.dart's _saveRsvp, is PascalCase.
+  ///   • Status field is PascalCase ('Yes'/'Maybe'/'No') in Firestore,
+  ///     set by guest_event_screen.dart's _saveRsvp. The per-card pill
+  ///     reads this to render "Attending" (Yes) vs "Invited to" (else).
   ///   • Events the user hosts themselves are filtered out so a host
-  ///     who RSVP'd Yes to their own event doesn't show in both
-  ///     sections (would double up the same card).
+  ///     who RSVP'd to their own event doesn't double up in both
+  ///     sections.
   ///   • Past / archived / draft events are filtered client-side.
-  ///   • First time this query runs Firestore will throw with a
-  ///     console-link to create the required collectionGroup index
-  ///     (`rsvps` × uid + status). One-click resolution.
+  ///   • collectionGroup query on a single field (uid) — Firestore
+  ///     auto-creates this index, no console-link error on first run.
   void _subscribeToAttendingEvents() {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -94,21 +94,24 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
     _attendingSub = FirebaseFirestore.instance
         .collectionGroup('rsvps')
         .where('uid', isEqualTo: user.uid)
-        .where('status', isEqualTo: 'Yes')
         .snapshots()
         .listen((snap) async {
       if (!mounted) return;
-      debugPrint('[HomeFeed] attending stream — ${snap.docs.length} Yes RSVP(s)');
+      debugPrint('[HomeFeed] attending stream — ${snap.docs.length} RSVP(s)');
       // Each rsvp doc lives at events/{eventId}/rsvps/{uid}. Walk up
-      // to the parent event doc id, then fetch the event docs in
-      // parallel. Skip self-hosted events to avoid the duplicate
-      // hosting/attending card.
-      final eventIds = <String>[];
+      // to the parent event doc id, capturing the RSVP status so the
+      // per-card pill can render Attending vs Invited to. Skip
+      // self-hosted events to avoid the duplicate hosting/attending
+      // card. Skip docs without a status field (legacy data).
+      final statusByEventId = <String, String>{};
       for (final rsvpDoc in snap.docs) {
         final parent = rsvpDoc.reference.parent.parent;
         if (parent == null) continue;
-        eventIds.add(parent.id);
+        final status = (rsvpDoc.data() as Map<String, dynamic>?)?['status'] as String?;
+        if (status == null || status.isEmpty) continue;
+        statusByEventId[parent.id] = status;
       }
+      final eventIds = statusByEventId.keys.toList();
       if (eventIds.isEmpty) {
         setState(() {
           _attendingEvents = [];
@@ -146,6 +149,7 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
             'host': (data['hostName'] as String?) ?? 'Host',
             'emoji': (data['eventEmoji'] as String?) ?? '🎉',
             'color': matchedType.primary,
+            'rsvpStatus': statusByEventId[eventSnap.id] ?? 'Yes',
             'rawData': data,
           });
         }
@@ -848,28 +852,30 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
         ),
       );
 
-  /// Section header for the Attending list. Purple to distinguish from
+  /// Section header for the Invited list. Purple to distinguish from
   /// the user's own UPCOMING/DRAFTS sections at a glance — the brand
-  /// accent for "guest mode" surfaces.
+  /// accent for "guest mode" surfaces. Generalised to "INVITED" since
+  /// the list now includes Maybe/No RSVPs alongside Yes.
   Widget _attendingSectionHeader(int count) => Padding(
         padding: const EdgeInsets.only(top: 4, bottom: 10, left: 2),
         child: Row(children: [
           const Icon(Icons.event_available_outlined, size: 16, color: AppColors.purple),
           const SizedBox(width: 6),
           Text(
-            'ATTENDING · $count',
+            'INVITED · $count',
             style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.purple, letterSpacing: 1.2),
           ),
         ]),
       );
 
-  /// Compact card for events the user is attending as a guest. Mirrors
+  /// Compact card for events the user is invited to as a guest. Mirrors
   /// the chrome of [_buildEventCard] — same 20-radius, same Inter/Nunito
   /// hierarchy, same emoji-tile-on-the-left layout — but trims the
   /// host-only affordances (edit/notify, draft state, select mode,
-  /// RSVP totals) and adds a "RSVP'd Yes" pill so the user knows at a
-  /// glance which line they responded to. Tapping opens the same
-  /// GuestEventScreen the QR scan flow lands on.
+  /// RSVP totals) and adds a status pill ("Attending" for Yes,
+  /// "Invited to" for Maybe/No) so the user knows at a glance how they
+  /// responded. Tapping opens the same GuestEventScreen the QR scan
+  /// flow lands on.
   Widget _buildAttendingCard(BuildContext context, Map<String, dynamic> event) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final fg = isDark ? Colors.white : AppColors.dark;
@@ -883,6 +889,11 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
     final dateStr = date.year < 2099 ? '${months[date.month - 1]} ${date.day}, ${date.year}' : 'Date TBD';
     final eventId = event['id'] as String;
     final hostName = event['host'] as String;
+    final rsvpStatus = (event['rsvpStatus'] as String?) ?? 'Yes';
+    final isAttending = rsvpStatus == 'Yes';
+    final pillColor = isAttending ? AppColors.green : AppColors.purple;
+    final pillIcon = isAttending ? Icons.check_circle_outline : Icons.mail_outline;
+    final pillLabel = isAttending ? 'Attending' : 'Invited to';
 
     return GestureDetector(
       onTap: () => Navigator.push(
@@ -940,15 +951,15 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
             decoration: BoxDecoration(
-              color: AppColors.green.withValues(alpha: 0.14),
+              color: pillColor.withValues(alpha: 0.14),
               borderRadius: BorderRadius.circular(20),
             ),
-            child: const Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.check_circle_outline, size: 12, color: AppColors.green),
-              SizedBox(width: 4),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(pillIcon, size: 12, color: pillColor),
+              const SizedBox(width: 4),
               Text(
-                "RSVP'd Yes",
-                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.green, letterSpacing: 0.2),
+                pillLabel,
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: pillColor, letterSpacing: 0.2),
               ),
             ]),
           ),
