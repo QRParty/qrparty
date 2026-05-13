@@ -33,8 +33,19 @@ class GenerateQRCodeScreen extends StatefulWidget {
 
 class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
   final GlobalKey _qrKey = GlobalKey();
+  // Anchor for the share-sheet popover on iPad / iOS. Without a non-
+  // zero source rect, share_plus throws PlatformException with the
+  // {{0,0},{0,0}} message Jennifer hit on her iPhone — UIActivity
+  // ViewController requires the popover origin to live inside the
+  // source view's coordinate space.
+  final GlobalKey _shareKey = GlobalKey();
   bool _busy = false;
   String? _shortCode;
+  // Cached host display name for the share-sheet invite text. Populated
+  // from the same event-doc fetch as _shortCode so the share button
+  // never has to round-trip on its own. Defaulted to 'Host' so the
+  // invite text reads cleanly even when the field is missing.
+  String _hostName = 'Host';
 
   @override
   void initState() {
@@ -47,12 +58,32 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
       final snap = await FirebaseFirestore.instance
           .collection('events').doc(widget.eventId).get();
       if (!mounted) return;
-      final code = snap.data()?['shortCode'] as String?;
+      final data = snap.data();
+      final code = data?['shortCode'] as String?;
+      // Pull hostName from the same fetch — share-sheet text reads it
+      // and the screen has no other source for the host's display name.
+      final host = (data?['hostName'] as String?) ?? 'Host';
+      debugPrint('[GenerateQR] eventId=${widget.eventId} loaded shortCode=$code host=$host');
+      setState(() {
+        _hostName = host.isEmpty ? 'Host' : host;
+        if (code != null && code.isNotEmpty) {
+          _shortCode = code;
+        }
+      });
       if (code != null && code.isNotEmpty) {
-        setState(() => _shortCode = code);
+        debugPrint('[GenerateQR] QR will encode: ${_qrUrl(code)}');
+      } else {
+        debugPrint('[GenerateQR] WARNING: shortCode missing on events/${widget.eventId} — QR will stay in loading state');
       }
-    } catch (_) {/* silent — UI hides the line when null */}
+    } catch (e) {
+      debugPrint('[GenerateQR] _loadShortCode failed: $e');
+    }
   }
+
+  /// Canonical QR target. Encodes the public short URL the web app handles
+  /// at `https://partywithqr.com/event/{shortCode}`. Centralised here so
+  /// the rendered QR and the textual "Or visit" hint can never drift.
+  String _qrUrl(String code) => 'https://partywithqr.com/event/$code';
 
   // Theme-aware color getters — resolve light vs dark variant from the current Theme.
   // NOTE: The QR-code card itself is always white so scanners can read it;
@@ -150,9 +181,33 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
       final dir = await getTemporaryDirectory();
       final file = File('${dir.path}/qrparty_${_safeFilename()}.png');
       await file.writeAsBytes(bytes);
+      // Include the typeable URL in the share text so guests tapping
+      // the link inside Messages / WhatsApp / etc. land directly on
+      // the event page. The QR image still tags along for guests
+      // sharing the screenshot in print/photo contexts. If the
+      // shortCode hasn't resolved yet (rare — the share button is
+      // gated on QR render which depends on the same load), we fall
+      // back to the bare domain so the share sheet doesn't surface a
+      // half-formed URL.
+      final rsvpUrl = (_shortCode == null || _shortCode!.isEmpty)
+          ? 'partywithqr.com'
+          : 'partywithqr.com/event/${_shortCode!}';
+      final shareText =
+          "You're invited to ${widget.eventTitle} hosted by $_hostName! "
+          "RSVP here: $rsvpUrl\n"
+          "Download the app here: partywithqr.com/download";
+      // iOS requires sharePositionOrigin pointing at the share button's
+      // global rect; without it the share sheet has nowhere to anchor
+      // its popover and share_plus throws. Harmless on Android — the
+      // platform channel ignores the field.
+      final box = _shareKey.currentContext?.findRenderObject() as RenderBox?;
+      final origin = box == null
+          ? null
+          : box.localToGlobal(Offset.zero) & box.size;
       await Share.shareXFiles(
         [XFile(file.path, mimeType: 'image/png')],
-        text: 'RSVP to ${widget.eventTitle} — scan this QR with the QR Party app!',
+        text: shareText,
+        sharePositionOrigin: origin,
       );
     } catch (e) {
       if (mounted) {
@@ -201,12 +256,26 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        QrImageView(
-                          data: 'https://partywithqr.com/event?id=${widget.eventId}',
-                          version: QrVersions.auto,
-                          size: 200,
-                          backgroundColor: Colors.white,
-                        ),
+                        // Show a spinner until the shortCode resolves — we
+                        // never want to render a QR that points to a
+                        // not-yet-known URL. Once shortCode loads, the QR
+                        // encodes https://partywithqr.com/event/{shortCode}
+                        // (matches the web app's short-URL router and the
+                        // "Or visit" hint shown below the card).
+                        if (_shortCode == null || _shortCode!.isEmpty)
+                          const SizedBox(
+                            width: 200, height: 200,
+                            child: Center(
+                              child: CircularProgressIndicator(color: _purple, strokeWidth: 3),
+                            ),
+                          )
+                        else
+                          QrImageView(
+                            data: _qrUrl(_shortCode!),
+                            version: QrVersions.auto,
+                            size: 200,
+                            backgroundColor: Colors.white,
+                          ),
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 12),
                           child: Text(
@@ -244,6 +313,47 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
                     ),
                   ),
                 ],
+                // ── ON-SCREEN DIAGNOSTIC ──────────────────────────────
+                // Surfaces the actual QR-encoded URL (or the load-state
+                // reason if the QR is still a spinner). Lives below the
+                // shareable card, so it never leaks into download/share
+                // images. Useful for verifying — at a glance, no DevTools
+                // — that the QR encodes /event/{shortCode} and never the
+                // homepage. Remove once you're satisfied it's encoding
+                // correctly in every flow.
+                const SizedBox(height: 18),
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.symmetric(horizontal: 8),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: _purple.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: _purple.withValues(alpha: 0.30)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('QR ENCODES',
+                          style: TextStyle(
+                            fontSize: 10, fontWeight: FontWeight.w900,
+                            letterSpacing: 1.6, color: _purple,
+                          )),
+                      const SizedBox(height: 4),
+                      SelectableText(
+                        _shortCode == null || _shortCode!.isEmpty
+                            ? '(loading… shortCode not yet read from events/${widget.eventId})'
+                            : _qrUrl(_shortCode!),
+                        style: TextStyle(
+                          fontFamily: 'Nunito',
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: fg,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 24),
                 // ── DOWNLOAD + SHARE primary row ────────────────
                 Row(
@@ -268,6 +378,7 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
                     const SizedBox(width: 10),
                     Expanded(
                       child: ElevatedButton.icon(
+                        key: _shareKey,
                         onPressed: _busy ? null : _shareQr,
                         icon: const Icon(Icons.share_outlined, size: 18),
                         label: const Text('Share', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
@@ -297,15 +408,65 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
                 ),
                 const SizedBox(height: 28),
                 // ── Secondary actions ──────────────────────────
-                Row(
-                  children: [
-                    Expanded(child: _actionButton(context, icon: Icons.mail_outline_rounded, label: 'Order Invitations', color: _gold, onTap: () => _openOrderDialog(MerchProduct.invitation))),
-                    const SizedBox(width: 8),
-                    Expanded(child: _actionButton(context, icon: Icons.star_outline_rounded, label: 'Order Stickers', color: const Color(0xFF7B5EA7), onTap: () => _openOrderDialog(MerchProduct.sticker))),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Text('Invitations & stickers powered by Printably', style: TextStyle(fontSize: 11, color: _muted)),
+                // Merch ordering (invitations + stickers) is gated by
+                // [kMerchOrderingEnabled] during beta. While off, the
+                // two CTAs are replaced by a single Coming Soon tile
+                // so users know the feature is planned, not removed.
+                if (kMerchOrderingEnabled) ...[
+                  Row(
+                    children: [
+                      Expanded(child: _actionButton(context, icon: Icons.mail_outline_rounded, label: 'Order Invitations', color: _gold, onTap: () => _openOrderDialog(MerchProduct.invitation))),
+                      const SizedBox(width: 8),
+                      Expanded(child: _actionButton(context, icon: Icons.star_outline_rounded, label: 'Order Stickers', color: const Color(0xFF7B5EA7), onTap: () => _openOrderDialog(MerchProduct.sticker))),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Text('Invitations & stickers powered by Printably', style: TextStyle(fontSize: 11, color: _muted)),
+                ] else ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: _gold.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: _gold.withValues(alpha: 0.45)),
+                    ),
+                    child: Row(children: [
+                      const Icon(Icons.local_mall_outlined, size: 20, color: _gold),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Stickers & Invitations',
+                              style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: fg),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Printed merch with your QR is on the way.',
+                              style: TextStyle(fontSize: 11.5, color: _muted, height: 1.3),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: _gold,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Text(
+                          'COMING SOON',
+                          style: TextStyle(
+                            fontSize: 9, fontWeight: FontWeight.w900,
+                            color: Colors.white, letterSpacing: 0.6,
+                          ),
+                        ),
+                      ),
+                    ]),
+                  ),
+                ],
               ],
             ),
           ),

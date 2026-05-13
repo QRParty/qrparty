@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="com.google.android.gms.permission.AD_ID" tools:node="remove"/>
+    <!-- Required by webview_flutter for the in-app wishlist browser
+         (lib/screens/wishlist_browser_screen.dart). Firebase plugins
+         merge this in transitively too, but declaring it explicitly
+         documents the dependency. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="qrparty"
         android:name="${applicationName}"
@@ -8,6 +13,17 @@
         <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="AIzaSyAHONfmej_Ifpv8ui9nbCnCnQcweDzpqIc"/>
+        <!-- Default Firebase Messaging notification channel id. Used by
+             the FCM SDK when an incoming notification message doesn't
+             specify android.notification.channel_id explicitly. Must
+             match the channel registered in main.dart's
+             NotificationBridge so background notifications land in the
+             same channel as foreground ones (consistent importance,
+             sound, etc.). Required since Android 8 — without it,
+             system tray notifications silently no-op. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="qrparty_default"/>
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -40,6 +56,18 @@
                     android:host="partywithqr.com"
                     android:pathPrefix="/event"/>
             </intent-filter>
+            <!-- Deep link: https://partywithqr.com/org/{orgId} — public
+                 org page reached by scanning an org QR sticker. Routes
+                 in main.dart's _handleDeepLink → PublicOrgScreen. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data
+                    android:scheme="https"
+                    android:host="partywithqr.com"
+                    android:pathPrefix="/org"/>
+            </intent-filter>
             <!-- Share sheet: receive shared URLs from any app (Amazon, Target,
                  Etsy, browser share menu, etc.). The Flutter side reads these
                  via the receive_sharing_intent plugin and routes the URL into
@@ -70,6 +98,49 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Wishlist shop chips: each retailer is declared two ways under
+             Android 11+ package visibility. The <package> entry lets
+             canLaunchUrl() / queryIntentActivities resolve the app even
+             when the visit is via an https:// App Link rather than a
+             custom scheme. The <intent> + scheme entry covers cases where
+             the native app registers a custom URI handler. Both are
+             required for canLaunchUrl() to return true reliably across
+             retailer apps and Android versions. -->
+
+        <!-- Amazon -->
+        <package android:name="com.amazon.mShop.android.shopping" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="amzn" />
+        </intent>
+
+        <!-- Target -->
+        <package android:name="com.target.ui" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="target" />
+        </intent>
+
+        <!-- Etsy -->
+        <package android:name="com.etsy.android" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="etsy" />
+        </intent>
+
+        <!-- Walmart -->
+        <package android:name="com.walmart.android" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="walmart" />
+        </intent>
+
+        <!-- Best Buy -->
+        <package android:name="com.bestbuy.android" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="bestbuy" />
         </intent>
     </queries>
 </manifest>

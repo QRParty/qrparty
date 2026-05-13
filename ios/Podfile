@@ -1,0 +1,126 @@
+# Uncomment this line to define a global platform for your project
+platform :ios, '15.0'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+  # Force ALL pods (including Firebase) to expose modular headers so
+  # Flutter plugins like firebase_messaging can #import "Firebase.h"
+  # under use_frameworks! without tripping:
+  #   "Include of non-modular header inside framework module"
+  # The CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES build
+  # setting alone is not sufficient when the Firebase pods themselves
+  # aren't modular; this is the canonical Flutter+Firebase fix.
+  use_modular_headers!
+
+  # Explicit modular_headers for the Firebase umbrella + FirebaseCore +
+  # GoogleUtilities. use_modular_headers! above SHOULD reach these
+  # transitively, but in practice the umbrella `Firebase` pod (which
+  # provides Firebase.h) needs to be declared explicitly to be marked
+  # modular. Without this, firebase_storage 11.7.7's plugin code fails
+  # with "Include of non-modular header inside framework module
+  # 'firebase_storage.FLTTaskStateChannelStreamHandler'".
+
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+
+    # BoringSSL-GRPC -G flag fix
+    # Newer Xcode toolchains (15+) reject the -G flag that
+    # BoringSSL-GRPC's podspec injects, surfacing as:
+    #   "unsupported option '-G' for target 'arm64-apple-iosX.0'"
+    # when building for a physical iPhone/iPad. Strip -G* flags from
+    # every per-source COMPILER_FLAGS entry on that specific target.
+    # Also remove -G* from any target's OTHER_CFLAGS / OTHER_CPLUSPLUSFLAGS
+    # so a transitively-injected flag from another pod can't reintroduce
+    # the same crash.
+    if target.name == 'BoringSSL-GRPC'
+      target.source_build_phase.files.each do |file|
+        next unless file.settings && file.settings['COMPILER_FLAGS']
+        flags = file.settings['COMPILER_FLAGS'].split
+        flags.reject! { |flag| flag == '-G' || flag.start_with?('-G') }
+        file.settings['COMPILER_FLAGS'] = flags.join(' ')
+      end
+    end
+
+    target.build_configurations.each do |config|
+      # Pin the per-pod deployment target up to the project's so a
+      # single dependency dragging in iOS 16.0 doesn't make the whole
+      # build use 16.0. 14.0 matches Runner's IPHONEOS_DEPLOYMENT_TARGET.
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+
+      # Belt-and-suspenders alongside use_modular_headers!: keep the
+      # build setting flag too so any plugin that still tries to import
+      # a non-modular header can do so.
+      config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+
+      # Belt-and-suspenders: strip any -G* flags that survived the
+      # per-file pass above (e.g. flags injected via xcconfig rather
+      # than the source-file COMPILER_FLAGS).
+      ['OTHER_CFLAGS', 'OTHER_CPLUSPLUSFLAGS'].each do |key|
+        flags = config.build_settings[key]
+        case flags
+        when Array
+          config.build_settings[key] = flags.reject { |f| f == '-G' || f.start_with?('-G') }
+        when String
+          stripped = flags.gsub(/(^|\s)-G\S*/, '\1').gsub(/\s+/, ' ').strip
+          config.build_settings[key] = stripped
+        end
+      end
+    end
+  end
+
+  # gRPC template syntax fix
+  # Newer Clang (Xcode 15+) requires explicit empty template argument
+  # list <> after template-disambiguated names. Old gRPC pods in
+  # Firebase 2.x emit Traits::template CallSeqFactory(...) which
+  # triggers: "A template argument list is expected after a name
+  # prefixed by the template keyword". Patch the source in-place
+  # in BOTH gRPC-Core and gRPC-C++ pods (they ship the same broken
+  # basic_seq.h).
+  grpc_pod_paths = [
+    'Pods/gRPC-Core/src/core/lib/promise/detail/basic_seq.h',
+    'Pods/gRPC-C++/src/core/lib/promise/detail/basic_seq.h',
+  ]
+  grpc_pod_paths.each do |relative_path|
+    full_path = File.expand_path(relative_path, __dir__)
+    next unless File.exist?(full_path)
+    content = File.read(full_path)
+    patched = content.gsub('Traits::template CallSeqFactory(', 'Traits::template CallSeqFactory<>(')
+    if content != patched
+      File.write(full_path, patched)
+      puts "Patched #{relative_path}"
+    end
+  end
+end

@@ -21,18 +21,78 @@ class WishlistShareHandler {
 
   final StreamController<String> _urls = StreamController<String>.broadcast();
   String? _pending;
+  /// When `_pending` was captured. Pairs with `_pending` so
+  /// `consumePending` can throw away stale entries that have been
+  /// sitting around longer than `_pendingTtl`. Set every time
+  /// `_pending` is assigned a non-null value, cleared in lockstep.
+  DateTime? _pendingAt;
   bool _initialized = false;
+
+  /// Pending URLs older than this are treated as stale and dropped.
+  /// Anything that actually came from a share gesture lands at the
+  /// next post-frame callback; if a value has been waiting around
+  /// for half a minute, the user likely interacted with something
+  /// else and the pending intent is no longer relevant.
+  static const _pendingTtl = Duration(seconds: 30);
+
+  /// Hosts treated as our own — incoming "shares" of these URLs
+  /// are deep-link clicks (e.g. tapping a partywithqr.com/event/X
+  /// link), NOT wishlist product shares. The OS sometimes delivers
+  /// those through the share-receive intent path on Android, which
+  /// in turn pops the wishlist sheet on top of whatever the user
+  /// is doing. Filtering them at consumption time AND at stream
+  /// arrival keeps both delivery paths clean.
+  static const _ownHosts = <String>{
+    'partywithqr.com',
+    'www.partywithqr.com',
+  };
+
+  static bool _isOwnDomain(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return false;
+    return _ownHosts.contains(uri.host.toLowerCase());
+  }
 
   /// Stream of shared URLs received while the app is running. Subscribe
   /// from the navigator-key holder so the listener survives screen rebuilds.
   Stream<String> get urls => _urls.stream;
 
   /// One-shot URL captured before any listener was ready (cold start, or
-  /// warm share that fired before the post-auth UI was up). Consume once.
+  /// warm share that fired before the post-auth UI was up). Always
+  /// returns at most one value — the pending field is cleared eagerly
+  /// at the top of every call so a second invocation can never
+  /// re-deliver the same URL, regardless of whether the first call
+  /// actually used it.
+  ///
+  /// Returns null when:
+  ///   • Nothing was pending,
+  ///   • The pending URL points at our own domain (treat as a deep
+  ///     link, not a wishlist share — see `_ownHosts`), OR
+  ///   • The pending URL is older than [_pendingTtl] (stale leftover
+  ///     from a previous foregrounding / app-switch sequence).
   String? consumePending() {
-    final p = _pending;
+    // Snapshot then clear immediately. If a caller invokes us twice
+    // in quick succession, the second call always sees null — no
+    // chance of re-firing the same URL on a navigation event.
+    final snapshot = _pending;
+    final snapshotAt = _pendingAt;
     _pending = null;
-    return p;
+    _pendingAt = null;
+
+    if (snapshot == null) return null;
+    if (_isOwnDomain(snapshot)) {
+      debugPrint('[WishlistShareHandler] consumePending dropped own-domain URL: $snapshot');
+      return null;
+    }
+    if (snapshotAt != null) {
+      final age = DateTime.now().difference(snapshotAt);
+      if (age > _pendingTtl) {
+        debugPrint('[WishlistShareHandler] consumePending dropped stale URL '
+            '(age=${age.inSeconds}s > ${_pendingTtl.inSeconds}s): $snapshot');
+        return null;
+      }
+    }
+    return snapshot;
   }
 
   /// Wire the plugin streams. Idempotent — safe to call from main() once.
@@ -44,9 +104,18 @@ class WishlistShareHandler {
       final initial = await ReceiveSharingIntent.instance.getInitialMedia();
       final firstUrl = _firstUrl(initial);
       if (firstUrl != null) {
-        _pending = firstUrl;
+        if (_isOwnDomain(firstUrl)) {
+          // Tapping a partywithqr.com link from another app comes
+          // through the same share-receive intent on Android; don't
+          // queue our own deep links as wishlist shares.
+          debugPrint('[WishlistShareHandler] init dropped own-domain initial: $firstUrl');
+        } else {
+          _pending = firstUrl;
+          _pendingAt = DateTime.now();
+        }
         // Tell the plugin we've consumed the cold-start media so it won't
-        // be re-delivered on the next foreground.
+        // be re-delivered on the next foreground. Always reset, even when
+        // we dropped the URL above — keeps state clean.
         ReceiveSharingIntent.instance.reset();
       }
     } catch (e) {
@@ -58,13 +127,23 @@ class WishlistShareHandler {
         (List<SharedMediaFile> media) {
           final url = _firstUrl(media);
           if (url == null) return;
+          if (_isOwnDomain(url)) {
+            // Same own-domain filter as the cold-start path — drop
+            // partywithqr.com deep links so they don't surface the
+            // wishlist sheet over whatever the user is doing.
+            debugPrint('[WishlistShareHandler] stream dropped own-domain: $url');
+            return;
+          }
           if (_urls.hasListener) {
             _urls.add(url);
           } else {
             // No active listener yet — queue it so the UI can grab it
             // when it eventually mounts (e.g. user shared from lock screen,
-            // app came up but the Navigator hasn't settled yet).
+            // app came up but the Navigator hasn't settled yet). Stamp
+            // a timestamp alongside so consumePending can throw it
+            // away if it's not picked up within the TTL window.
             _pending = url;
+            _pendingAt = DateTime.now();
           }
         },
         onError: (e) => debugPrint('[WishlistShareHandler] stream error: $e'),

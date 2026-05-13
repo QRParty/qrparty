@@ -199,6 +199,57 @@
       padding: 6px 14px; border-radius: 50px;
       box-shadow: 0 8px 20px rgba(200,146,42,.35);
     }
+    /* Inline "Coming Soon" tag for individual feature rows (Business tier
+       has a single coming-soon item; Headquarters card uses the larger
+       banner below). Same gold/dark colorway as .plan-badge, just smaller
+       and inline next to the feature text. */
+    .coming-soon-pill {
+      display: inline-block; margin-left: 8px;
+      background: var(--gold); color: #1A1A1A;
+      font: 900 9.5px 'DM Sans', sans-serif; letter-spacing: .8px;
+      padding: 2px 8px; border-radius: 50px;
+      text-transform: uppercase; vertical-align: middle;
+      white-space: nowrap;
+    }
+    /* Full-width "COMING SOON" banner across the top of the Headquarters
+       card. Uses negative margins to break out of the card's 32px/28px
+       padding and span edge-to-edge, with rounded top corners that match
+       the card's 24px radius so the seam disappears. */
+    .plan-coming-banner {
+      margin: -32px -28px 24px;
+      background: var(--gold); color: #1A1A1A;
+      padding: 14px 16px; text-align: center;
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 22px; letter-spacing: 5px;
+      border-radius: 24px 24px 0 0;
+      box-shadow: 0 8px 24px rgba(200,146,42,.3);
+    }
+    /* In-card footer block that sits below the features list. Used on
+       both paid tiers so it's unambiguous that Personal is the only plan
+       available today. The 1px gold divider above separates it from the
+       feature bullets without breaking the dashed-row rhythm. */
+    .plan-coming-footer {
+      margin-top: 18px; padding-top: 18px;
+      border-top: 1px solid rgba(200,146,42,.45);
+      text-align: center;
+    }
+    .plan-coming-footer .lock {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px; border-radius: 50%;
+      background: rgba(200,146,42,.18);
+      color: var(--gold); font-size: 16px;
+      margin-bottom: 8px;
+    }
+    .plan-coming-footer .heading {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 16px; letter-spacing: 3px;
+      color: var(--gold); margin-bottom: 4px;
+    }
+    .plan-coming-footer .sub {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 12.5px; line-height: 1.5;
+      color: rgba(255,255,255,.65);
+    }
     .plan-name {
       font-family: 'Bebas Neue', sans-serif; font-size: 28px;
       color: white; letter-spacing: 1.5px; margin-bottom: 10px; line-height: 1;
@@ -495,8 +546,8 @@
 
       <div class="plan-card">
         <div class="plan-name">Business</div>
-        <div class="plan-price">$9.99</div>
-        <div class="plan-price-sub">/month · $79.99/year</div>
+        <div class="plan-price">Coming Soon</div>
+        <div class="plan-price-sub">Business plan launching soon</div>
         <ul class="plan-features">
           <li>Everything in Personal</li>
           <li>Co-hosting with your team</li>
@@ -505,22 +556,35 @@
           <li>Custom branding</li>
           <li>100 archived events</li>
           <li>Priority support</li>
+          <li>Business QR Code — one QR code for your business location</li>
         </ul>
+        <div class="plan-coming-footer">
+          <div class="lock">🔒</div>
+          <div class="heading">COMING SOON</div>
+          <div class="sub">Paid plans coming soon.<br>Personal is always free.</div>
+        </div>
       </div>
 
       <div class="plan-card plan-featured">
-        <div class="plan-badge">MOST POWERFUL</div>
+        <div class="plan-coming-banner">COMING SOON</div>
         <div class="plan-name">Headquarters</div>
-        <div class="plan-price">$19.99</div>
-        <div class="plan-price-sub">/month · $159.99/year</div>
+        <div class="plan-price">Coming Soon</div>
+        <div class="plan-price-sub">Headquarters plan launching soon</div>
         <ul class="plan-features">
           <li>Everything in Business</li>
-          <li>Organization Page — one QR for all events</li>
-          <li>Recurring events (weekly / monthly / custom)</li>
-          <li>White-label stickers — your logo, not ours</li>
+          <li>Organization Page — one QR code for your entire brand</li>
+          <li>Link Business accounts under your HQ</li>
+          <li>View and monitor all linked location events</li>
+          <li>White-label stickers with your logo</li>
           <li>Unlimited archived events</li>
-          <li>2-year photo storage</li>
+          <li>2 year photo storage</li>
+          <li>Priority support</li>
         </ul>
+        <div class="plan-coming-footer">
+          <div class="lock">🔒</div>
+          <div class="heading">COMING SOON</div>
+          <div class="sub">Paid plans coming soon.<br>Personal is always free.</div>
+        </div>
       </div>
 
     </div>
@@ -537,7 +601,7 @@
 
     <div class="tier-header first">
       <span class="tier-name business">BUSINESS</span>
-      <span class="tier-price">$9.99 / month</span>
+      <span class="tier-price">Coming Soon</span>
     </div>
     <div class="feat-grid">
       <div class="feat-card">
@@ -574,7 +638,7 @@
 
     <div class="tier-header">
       <span class="tier-name plus">HEADQUARTERS</span>
-      <span class="tier-price">$19.99 / month</span>
+      <span class="tier-price">Coming Soon</span>
     </div>
     <div class="feat-grid">
       <div class="feat-card">

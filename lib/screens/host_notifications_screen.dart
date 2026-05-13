@@ -28,7 +28,6 @@ class _HostNotificationsScreenState extends State<HostNotificationsScreen> {
   String? _selectedEventTitle;
   String? _selectedEventEmoji;
   bool _loadingEvents = true;
-  bool _sending = false;
   final List<Map<String, dynamic>> _sentHistory = [];
 
   final List<String> templates = [
@@ -87,52 +86,134 @@ class _HostNotificationsScreenState extends State<HostNotificationsScreen> {
 
   Future<void> _sendNotification() async {
     final msg = _messageController.text.trim();
-    if (msg.isEmpty || _selectedEventId == null) return;
-    setState(() => _sending = true);
+    final eventId = _selectedEventId;
+    if (msg.isEmpty || eventId == null) return;
     try {
       // Fetch all Yes/Maybe RSVPs for the selected event
       final rsvpSnap = await FirebaseFirestore.instance
           .collection('events')
-          .doc(_selectedEventId)
+          .doc(eventId)
           .collection('rsvps')
           .where('status', whereIn: ['Yes', 'Maybe'])
           .get();
 
-      final uids = rsvpSnap.docs.map((d) => d.id).toList();
-
-      // Fetch FCM tokens for each guest in parallel
+      // Walk each RSVP doc instead of throwing away everything except
+      // the doc id. Web RSVPs (source: 'web') are doc-id'd by email
+      // and HAVE an `email` field but NO matching `users/{uid}` doc —
+      // they'd never get an fcmToken lookup. App RSVPs are doc-id'd
+      // by the user uid and we look up `fcmToken` from the user doc.
+      // Anyone we can push to gets a push; anyone we can't push to
+      // but who has an email gets a Trigger Email fallback so guests
+      // who RSVP'd from a browser still hear the announcement.
       final tokens = <String>[];
-      if (uids.isNotEmpty) {
-        final userDocs = await Future.wait(
-          uids.map((uid) => FirebaseFirestore.instance.collection('users').doc(uid).get()),
-        );
-        for (final doc in userDocs) {
-          final token = doc.data()?['fcmToken'] as String?;
-          if (token != null) tokens.add(token);
+      final emails = <String>[];
+      // Bucket the rsvp docs by lookup mode in one pass.
+      final appUids = <String>[];
+      final webEmails = <String>[];
+      for (final d in rsvpSnap.docs) {
+        final data = d.data();
+        final source = data['source'] as String?;
+        final emailField = (data['email'] as String?)?.trim();
+        if (source == 'web') {
+          if (emailField != null && emailField.isNotEmpty) {
+            webEmails.add(emailField);
+          }
+        } else {
+          // App RSVP — doc id is the user uid.
+          appUids.add(d.id);
         }
       }
+
+      // Fetch user docs for app RSVPs. fcmToken → push list; no
+      // token but email present on the user doc → email fallback.
+      if (appUids.isNotEmpty) {
+        final userDocs = await Future.wait(
+          appUids.map((uid) =>
+              FirebaseFirestore.instance.collection('users').doc(uid).get()),
+        );
+        for (final doc in userDocs) {
+          final data = doc.data() ?? const {};
+          final token = data['fcmToken'] as String?;
+          if (token != null && token.isNotEmpty) {
+            tokens.add(token);
+            continue;
+          }
+          final email = (data['email'] as String?)?.trim();
+          if (email != null && email.isNotEmpty) emails.add(email);
+        }
+      }
+      // All web RSVPs are emailed — they can't receive a push.
+      emails.addAll(webEmails);
 
       await NotificationService.sendNotification(
         tokens,
         _selectedEventTitle ?? 'Event Update',
         msg,
-        eventId: _selectedEventId,
+        eventId: eventId,
       );
 
-      final guestCount = tokens.length;
+      // Email fallback via the Firebase Trigger Email extension. Each
+      // mail doc carries `eventId` so the firestore.rules host check
+      // can authorize the create. The extension watches the `mail`
+      // collection and ignores extra fields, so the eventId tag is a
+      // safe annotation. Failures here are best-effort: one bad email
+      // shouldn't block the whole batch; we just log and continue.
+      final eventTitle = _selectedEventTitle ?? 'Event Update';
+      final dedupedEmails = emails.toSet().toList();
+      var emailedCount = 0;
+      if (dedupedEmails.isNotEmpty) {
+        final mail = FirebaseFirestore.instance.collection('mail');
+        final escapedMsg = msg
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('\n', '<br>');
+        for (final addr in dedupedEmails) {
+          try {
+            await mail.add({
+              'eventId': eventId,
+              'to': [addr],
+              'message': {
+                'subject': 'Update from $eventTitle',
+                'text': msg,
+                'html':
+                    '<p>$escapedMsg</p>'
+                    '<p style="color:#888;font-size:12px;margin-top:24px">'
+                    'You\'re receiving this because you RSVP\'d to '
+                    '"$eventTitle" on QR Party. '
+                    '<a href="https://partywithqr.com/event/$eventId">View event</a>'
+                    '</p>',
+              },
+            });
+            emailedCount++;
+          } catch (e) {
+            debugPrint('[HostNotifications] mail write failed for $addr: $e');
+          }
+        }
+      }
+
+      final pushedCount = tokens.length;
+      final reachedCount = pushedCount + emailedCount;
       setState(() {
         _sentHistory.insert(0, {
           'event': _selectedEventTitle,
           'message': msg,
           'time': 'Just now',
-          'guests': guestCount,
+          'guests': reachedCount,
         });
         _messageController.clear();
       });
 
       if (mounted) {
+        // Show a combined count + a small breakdown so the host knows
+        // some recipients were reached via email rather than push.
+        final breakdown = emailedCount > 0
+            ? ' ($pushedCount push, $emailedCount email)'
+            : '';
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Notification queued for $guestCount guest${guestCount == 1 ? '' : 's'}!'),
+          content: Text(
+            'Notification queued for $reachedCount guest${reachedCount == 1 ? '' : 's'}!$breakdown',
+          ),
           backgroundColor: AppColors.green,
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -146,8 +227,6 @@ class _HostNotificationsScreenState extends State<HostNotificationsScreen> {
           behavior: SnackBarBehavior.floating,
         ));
       }
-    } finally {
-      if (mounted) setState(() => _sending = false);
     }
   }
 

@@ -1,0 +1,25 @@
+QR Party — bundled fonts
+========================
+
+Drop the following .ttf files into this directory. Filenames must match
+exactly (Flutter looks them up by path from pubspec.yaml).
+
+INTER  →  https://fonts.google.com/specimen/Inter  →  "Get font" → "Download all"
+  Inter-Regular.ttf
+  Inter-Medium.ttf
+  Inter-SemiBold.ttf
+  Inter-Bold.ttf
+
+DM SANS  →  https://fonts.google.com/specimen/DM+Sans  →  "Get font" → "Download all"
+  DMSans-Regular.ttf
+  DMSans-Medium.ttf
+  DMSans-Bold.ttf
+
+After dropping the files in:
+  flutter clean
+  flutter pub get
+  flutter run
+
+Until the files are present, Flutter will log a warning at build time and
+fall back to the system default sans — the app still runs, the welcome
+popup just doesn't pick up the new family.

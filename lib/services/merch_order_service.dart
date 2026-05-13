@@ -4,7 +4,7 @@ import '../models/merch_order.dart';
 
 // Match the convention used elsewhere (business_upgrade_screen.dart,
 // guest_event_screen.dart, settings_screen.dart). Flip to false for live orders.
-const bool kTestingMode = true;
+const bool kTestingMode = false;
 
 class MerchOrderService {
   static final _fn = FirebaseFunctions.instance;

@@ -32,7 +32,10 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
   final TextEditingController _itemQtyController = TextEditingController();
 
   EventType? _selectedEventType;
-  String _listType = 'Wishlist';
+  // See create_event_screen for the rationale — defaults to Checklist
+  // when the Wishlist beta gate is closed so the form's initial state
+  // matches the visible chip set.
+  String _listType = kWishlistEnabled ? 'Wishlist' : 'Checklist';
   final List<Map<String, dynamic>> _checklistItems = [];
   final List<Map<String, dynamic>> _wishlistItems = [];
   bool _saving = false;
@@ -44,6 +47,7 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
   Color get _card   => _isDark ? _cardDark   : _cardLight;
   Color get _border => _isDark ? _borderDark : _borderLight;
   Color get _muted  => _isDark ? _mutedDark  : _mutedLight;
+  Color get _fg     => _isDark ? Colors.white : AppColors.dark;
 
   @override
   void dispose() {
@@ -138,12 +142,12 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          icon: Icon(Icons.arrow_back, color: _fg),
           onPressed: () => Navigator.pop(context),
         ),
-        title: const Text(
+        title: Text(
           'Create Template',
-          style: TextStyle(fontFamily: 'FredokaOne', fontSize: 20, color: Colors.white),
+          style: TextStyle(fontFamily: 'FredokaOne', fontSize: 20, color: _fg),
         ),
       ),
       body: SafeArea(
@@ -156,7 +160,7 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
                   _fieldLabel('Template Name'),
                   TextField(
                     controller: _nameController,
-                    style: const TextStyle(color: Colors.white),
+                    style: TextStyle(color: _fg),
                     decoration: _inputDecoration('e.g. Weekly Team Standup').copyWith(
                       errorText: _nameError,
                       errorStyle: const TextStyle(color: Colors.redAccent, fontSize: 11),
@@ -174,7 +178,7 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
                   _fieldLabel('Description  (optional)'),
                   TextField(
                     controller: _descController,
-                    style: const TextStyle(color: Colors.white),
+                    style: TextStyle(color: _fg),
                     maxLines: 3,
                     decoration: _inputDecoration('What is this template for?'),
                   ),
@@ -182,8 +186,10 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
 
                   _fieldLabel('List Type'),
                   Row(children: [
-                    _listTypeChip('Wishlist',  Icons.card_giftcard_outlined),
-                    const SizedBox(width: 8),
+                    if (kWishlistEnabled) ...[
+                      _listTypeChip('Wishlist',  Icons.card_giftcard_outlined),
+                      const SizedBox(width: 8),
+                    ],
                     _listTypeChip('Checklist', Icons.checklist_outlined),
                     const SizedBox(width: 8),
                     _listTypeChip('No List',   Icons.block_outlined),
@@ -261,7 +267,7 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
 
   Widget _fieldLabel(String label) => Padding(
         padding: const EdgeInsets.only(bottom: 8),
-        child: Text(label, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white, letterSpacing: 0.2)),
+        child: Text(label, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: _fg, letterSpacing: 0.2)),
       );
 
   InputDecoration _inputDecoration(String hint) => InputDecoration(
@@ -285,9 +291,15 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
         mainAxisSpacing: 10,
         childAspectRatio: 1.1,
       ),
-      itemCount: eventTypes.length,
+      // Templates are a Business-tier feature reachable only from
+      // the Business / Headquarters home feed, so we hardcode
+      // businessEventTypes here — the same list the create-event
+      // grid shows for those tiers (see _tierEventTypes in
+      // create_event_screen.dart). Personal event types are
+      // intentionally absent.
+      itemCount: businessEventTypes.length,
       itemBuilder: (_, i) {
-        final t = eventTypes[i];
+        final t = businessEventTypes[i];
         final selected = _selectedEventType?.name == t.name;
         return GestureDetector(
           onTap: () => setState(() => _selectedEventType = t),
@@ -351,7 +363,7 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
         Expanded(
           child: TextField(
             controller: _itemNameController,
-            style: const TextStyle(color: Colors.white),
+            style: TextStyle(color: _fg),
             decoration: _inputDecoration(isChecklist ? 'Item to bring' : 'Item name'),
           ),
         ),
@@ -361,13 +373,13 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
           child: isChecklist
               ? TextField(
                   controller: _itemQtyController,
-                  style: const TextStyle(color: Colors.white),
+                  style: TextStyle(color: _fg),
                   decoration: _inputDecoration('Qty'),
                 )
               : TextField(
                   controller: _itemPriceController,
                   keyboardType: TextInputType.number,
-                  style: const TextStyle(color: Colors.white),
+                  style: TextStyle(color: _fg),
                   decoration: _inputDecoration('\$ Price'),
                 ),
         ),
@@ -410,7 +422,7 @@ class _CreateTemplateScreenState extends State<CreateTemplateScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(primary, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
+                Text(primary, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: _fg)),
                 const SizedBox(height: 2),
                 Text(secondary, style: TextStyle(fontSize: 13, color: _muted)),
               ],

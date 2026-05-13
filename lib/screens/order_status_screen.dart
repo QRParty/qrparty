@@ -47,6 +47,9 @@ class OrderStatusScreen extends StatelessWidget {
                 }
                 final docs = snap.data?.docs ?? [];
                 if (docs.isEmpty) {
+                  // Empty-state copy adapts to the merch beta gate. While
+                  // [kMerchOrderingEnabled] is false, point to the
+                  // Coming Soon state instead of CTAs that don't exist.
                   return Center(child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 32),
                     child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -55,10 +58,29 @@ class OrderStatusScreen extends StatelessWidget {
                       Text('No orders yet', style: TextStyle(fontFamily: 'FredokaOne', fontSize: 22, color: fg)),
                       const SizedBox(height: 8),
                       Text(
-                        'After you generate a QR for an event, tap "Order Stickers" or "Order Invitations" from the QR screen.',
+                        kMerchOrderingEnabled
+                            ? 'After you generate a QR for an event, tap "Order Stickers" or "Order Invitations" from the QR screen.'
+                            : 'Sticker and invitation ordering is coming soon. Once it launches, you\'ll be able to order printed merch with your event QR right from the QR screen.',
                         textAlign: TextAlign.center,
                         style: TextStyle(fontSize: 13.5, color: muted, height: 1.5),
                       ),
+                      if (!kMerchOrderingEnabled) ...[
+                        const SizedBox(height: 14),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: _gold,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Text(
+                            'COMING SOON',
+                            style: TextStyle(
+                              fontSize: 10, fontWeight: FontWeight.w900,
+                              color: Colors.white, letterSpacing: 0.8,
+                            ),
+                          ),
+                        ),
+                      ],
                     ]),
                   ));
                 }
@@ -220,7 +242,7 @@ class _OrderTile extends StatelessWidget {
           Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: _border, borderRadius: BorderRadius.circular(2)))),
           const SizedBox(height: 14),
           Text('Order #${order.id.substring(0, order.id.length.clamp(0, 8))}',
-              style: const TextStyle(fontFamily: 'FredokaOne', fontSize: 22, color: Colors.white)),
+              style: TextStyle(fontFamily: 'FredokaOne', fontSize: 22, color: _fg)),
           const SizedBox(height: 4),
           Text(order.eventName, style: TextStyle(color: _muted, fontSize: 13)),
           const SizedBox(height: 18),
@@ -249,7 +271,7 @@ class _OrderTile extends StatelessWidget {
       SizedBox(width: 110, child: Text(label,
           style: const TextStyle(color: _mutedDark, fontSize: 12, fontWeight: FontWeight.w700))),
       Expanded(child: Text(value,
-          style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600, height: 1.4))),
+          style: TextStyle(color: _fg, fontSize: 13, fontWeight: FontWeight.w600, height: 1.4))),
     ]),
   );
 
@@ -264,7 +286,7 @@ class _OrderTile extends StatelessWidget {
         const SizedBox(width: 10),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(MerchStatusName.parse(status).label,
-              style: const TextStyle(color: Colors.white, fontSize: 12.5, fontWeight: FontWeight.w800)),
+              style: TextStyle(color: _fg, fontSize: 12.5, fontWeight: FontWeight.w800)),
           if (at != null)
             Text(_formatDateTime(at), style: const TextStyle(color: _mutedDark, fontSize: 11)),
           if (note.isNotEmpty)

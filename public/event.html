@@ -175,12 +175,20 @@
       border: none; border-radius: 16px;
       font: 800 15px 'Nunito', sans-serif; letter-spacing: .3px;
       cursor: pointer; text-decoration: none;
-      margin-bottom: 14px;
       transition: transform .15s, box-shadow .15s;
       box-shadow: 0 10px 24px rgba(200,146,42,.30), inset 0 1px 0 rgba(255,255,255,.25);
     }
     .calendar-btn:hover { transform: translateY(-2px); box-shadow: 0 14px 32px rgba(200,146,42,.45); }
     .calendar-btn:active { transform: translateY(0); }
+    /* Secondary "Google Calendar" link sitting under the .ics button.
+       Renders as a quiet text-link so the gold button stays the primary
+       affordance. Hidden when no event date is set. */
+    .calendar-secondary {
+      display: block; text-align: center; margin: 8px 0 14px;
+      font-size: 13px; font-weight: 700; color: var(--purple);
+      text-decoration: none; letter-spacing: .2px;
+    }
+    .calendar-secondary:hover { text-decoration: underline; }
 
     /* RSVP action card — top (under hero) */
     .rsvp-actions-card { padding: 18px 18px 16px; }
@@ -269,6 +277,80 @@
       color: white;
       box-shadow: 0 8px 20px rgba(156,127,212,.35);
     }
+    .rsvp-modal-btn.submit {
+      background: var(--green);
+      color: white;
+      box-shadow: 0 8px 20px rgba(82,121,111,.35);
+    }
+    .rsvp-modal-btn[disabled] {
+      opacity: .5; cursor: not-allowed;
+      transform: none !important; filter: none !important;
+    }
+    /* RSVP form fields */
+    .rsvp-form { text-align: left; margin-bottom: 14px; }
+    .rsvp-form-label {
+      display: block;
+      font-size: 11px; font-weight: 800; letter-spacing: 1.2px;
+      text-transform: uppercase; color: var(--muted);
+      margin: 12px 0 6px;
+    }
+    .rsvp-form input, .rsvp-form select {
+      width: 100%;
+      background: rgba(0,0,0,.18);
+      color: white; font: 600 15px 'Nunito', sans-serif;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 11px 12px;
+      outline: none;
+      transition: border-color .15s, background .15s;
+    }
+    .rsvp-form input:focus, .rsvp-form select:focus {
+      border-color: var(--purple);
+      background: rgba(156,127,212,.10);
+    }
+    .rsvp-form input::placeholder { color: rgba(255,255,255,.32); }
+    /* Status segment selector — replaces native select for status */
+    .rsvp-status-row { display: flex; gap: 8px; margin-top: 6px; }
+    .rsvp-status-chip {
+      flex: 1; padding: 11px 8px; border-radius: 10px;
+      border: 1px solid var(--border); background: rgba(0,0,0,.18);
+      color: rgba(255,255,255,.72);
+      font: 800 13px 'Nunito', sans-serif; letter-spacing: .3px;
+      cursor: pointer; text-align: center;
+      transition: border-color .15s, background .15s, color .15s;
+    }
+    .rsvp-status-chip.active.yes   { background: rgba(82,121,111,.30);  border-color: var(--green-light);  color: white; }
+    .rsvp-status-chip.active.maybe { background: rgba(200,146,42,.25);  border-color: var(--gold);         color: white; }
+    .rsvp-status-chip.active.no    { background: rgba(239,68,68,.20);   border-color: var(--red);          color: white; }
+    /* Headcount chips — same shape as status chips, purple accent
+       when active. Sits under the status row so a guest can RSVP
+       for themselves + a small group from the same browser. */
+    .rsvp-count-row { display: flex; gap: 6px; margin-top: 6px; }
+    .rsvp-count-chip {
+      flex: 1; padding: 11px 4px; border-radius: 10px;
+      border: 1px solid var(--border); background: rgba(0,0,0,.18);
+      color: rgba(255,255,255,.72);
+      font: 800 14px 'Nunito', sans-serif; letter-spacing: .3px;
+      cursor: pointer; text-align: center;
+      transition: border-color .15s, background .15s, color .15s;
+    }
+    .rsvp-count-chip.active {
+      background: rgba(156,127,212,.25);
+      border-color: var(--purple);
+      color: white;
+    }
+    .rsvp-form-error {
+      font-size: 12.5px; color: var(--red); margin-top: 8px;
+      font-weight: 700; text-align: center;
+    }
+    .rsvp-success-icon {
+      width: 56px; height: 56px; margin: 0 auto 14px;
+      border-radius: 50%;
+      background: rgba(82,121,111,.22);
+      border: 1px solid var(--green-light);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 30px; color: var(--green-light);
+    }
 
     /* Description */
     .desc-card { padding: 18px 20px; }
@@ -338,6 +420,74 @@
       font-size: 11px; color: var(--muted); font-weight: 700;
       margin-top: 8px; letter-spacing: .3px; text-transform: uppercase;
     }
+    /* "I'll bring this" claim modal — opens when a guest taps Claim
+       on a checklist item. Mirrors the in-app inline claim row so a
+       guest who scans the QR on web sees the same flow they'd see in
+       the app. */
+    .claim-modal {
+      position: fixed; inset: 0; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,.55); z-index: 100;
+      padding: 24px;
+    }
+    .claim-modal.open { display: flex; }
+    .claim-modal-card {
+      background: var(--card-raise);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 22px 22px 18px;
+      max-width: 360px; width: 100%;
+      box-shadow: 0 24px 60px rgba(0,0,0,.5);
+    }
+    .claim-modal-title {
+      font-family: 'Fredoka One', cursive; font-size: 20px;
+      color: white; margin-bottom: 4px;
+    }
+    .claim-modal-sub {
+      font-size: 13px; color: var(--muted);
+      margin-bottom: 16px; line-height: 1.5;
+    }
+    .claim-modal label {
+      display: block; font-size: 11px; font-weight: 800;
+      color: var(--muted); letter-spacing: 1.2px;
+      margin-bottom: 6px; text-transform: uppercase;
+    }
+    .claim-modal input {
+      width: 100%; box-sizing: border-box;
+      background: var(--card); border: 1px solid var(--border);
+      color: white; font: 600 14px 'Nunito', sans-serif;
+      padding: 11px 12px; border-radius: 10px;
+      margin-bottom: 12px; outline: none;
+    }
+    .claim-modal input:focus {
+      border-color: var(--purple);
+      box-shadow: 0 0 0 3px rgba(156,127,212,.18);
+    }
+    .claim-modal-actions {
+      display: flex; gap: 10px; margin-top: 6px;
+    }
+    .claim-modal-btn {
+      flex: 1; border: none;
+      padding: 12px 14px; border-radius: 12px;
+      font: 800 14px 'Nunito', sans-serif;
+      cursor: pointer; transition: filter .15s, transform .15s;
+    }
+    .claim-modal-btn.cancel {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .claim-modal-btn.confirm {
+      background: linear-gradient(180deg, #B398E0 0%, var(--purple) 100%);
+      color: white;
+    }
+    .claim-modal-btn.confirm:disabled {
+      opacity: .55; cursor: default;
+    }
+    .claim-modal-btn:not(:disabled):hover { filter: brightness(1.07); }
+    .claim-modal-error {
+      font-size: 12px; color: #ef4444; font-weight: 700;
+      margin: 6px 0 0; min-height: 16px;
+    }
 
     /* Footer */
     .page-footer {
@@ -393,12 +543,12 @@
   <div class="card rsvp-actions-card">
     <div class="rsvp-actions-title">Will you be there?</div>
     <div class="rsvp-actions-row">
-      <button type="button" class="rsvp-btn yes"   onclick="showRsvpModal()">Yes</button>
-      <button type="button" class="rsvp-btn maybe" onclick="showRsvpModal()">Maybe</button>
-      <button type="button" class="rsvp-btn no"    onclick="showRsvpModal()">No</button>
+      <button type="button" class="rsvp-btn yes"   onclick="openRsvpForm('Yes')">Yes</button>
+      <button type="button" class="rsvp-btn maybe" onclick="openRsvpForm('Maybe')">Maybe</button>
+      <button type="button" class="rsvp-btn no"    onclick="openRsvpForm('No')">No</button>
     </div>
     <div class="rsvp-actions-sub">
-      <a href="https://play.google.com/store/apps/details?id=com.partywithqr.app">Download QR Party to RSVP</a>
+      Want richer features? <a href="https://play.google.com/store/apps/details?id=com.partywithqr.app">Get the app</a>
     </div>
   </div>
 
@@ -421,6 +571,7 @@
   </div>
 
   <button type="button" id="calendar-btn" class="calendar-btn">📆 Add to Calendar</button>
+  <a id="gcal-link" class="calendar-secondary" target="_blank" rel="noopener" style="display:none">Or add to Google Calendar →</a>
 
   <div class="card desc-card" id="event-desc-card">
     <p id="event-desc"></p>
@@ -451,15 +602,66 @@
 
 </div>
 
-<!-- RSVP "app required" modal -->
+<!-- RSVP form modal -->
 <div id="rsvp-modal" class="rsvp-modal-backdrop" onclick="if (event.target === this) closeRsvpModal()">
-  <div class="rsvp-modal" role="dialog" aria-modal="true" aria-labelledby="rsvp-modal-title">
-    <div class="rsvp-modal-icon">📲</div>
-    <h3 id="rsvp-modal-title">Get the QR Party App</h3>
-    <p>To RSVP for this event download the QR Party app. Coming soon to Google Play and the App Store. Visit partywithqr.com to learn more.</p>
+  <!-- FORM state — name, email, status -->
+  <div id="rsvp-modal-form-state" class="rsvp-modal" role="dialog" aria-modal="true" aria-labelledby="rsvp-modal-title">
+    <div class="rsvp-modal-icon">🎉</div>
+    <h3 id="rsvp-modal-title">RSVP</h3>
+    <p id="rsvp-modal-event-line" style="margin-bottom:8px"></p>
+    <form id="rsvp-form" class="rsvp-form" onsubmit="submitRsvp(event)">
+      <label class="rsvp-form-label" for="rsvp-name">Your name</label>
+      <input id="rsvp-name" name="name" type="text" required autocomplete="name" maxlength="80" placeholder="Sarah Chen"/>
+      <label class="rsvp-form-label" for="rsvp-email">Email</label>
+      <input id="rsvp-email" name="email" type="email" required autocomplete="email" maxlength="120" placeholder="you@example.com"/>
+      <label class="rsvp-form-label">Are you coming?</label>
+      <div class="rsvp-status-row" role="radiogroup" aria-label="RSVP status">
+        <button type="button" class="rsvp-status-chip yes"   data-status="Yes"   onclick="setRsvpStatus('Yes')">Yes</button>
+        <button type="button" class="rsvp-status-chip maybe" data-status="Maybe" onclick="setRsvpStatus('Maybe')">Maybe</button>
+        <button type="button" class="rsvp-status-chip no"    data-status="No"    onclick="setRsvpStatus('No')">No</button>
+      </div>
+      <label class="rsvp-form-label">How many people? (including you)</label>
+      <div class="rsvp-count-row" role="radiogroup" aria-label="Headcount">
+        <button type="button" class="rsvp-count-chip" data-count="1" onclick="setRsvpCount(1)">1</button>
+        <button type="button" class="rsvp-count-chip" data-count="2" onclick="setRsvpCount(2)">2</button>
+        <button type="button" class="rsvp-count-chip" data-count="3" onclick="setRsvpCount(3)">3</button>
+        <button type="button" class="rsvp-count-chip" data-count="4" onclick="setRsvpCount(4)">4</button>
+        <button type="button" class="rsvp-count-chip" data-count="5" onclick="setRsvpCount(5)">5</button>
+      </div>
+      <div id="rsvp-form-error" class="rsvp-form-error" style="display:none"></div>
+    </form>
     <div class="rsvp-modal-actions">
-      <button type="button" class="rsvp-modal-btn close" onclick="closeRsvpModal()">Close</button>
-      <a class="rsvp-modal-btn learn" href="https://partywithqr.com" target="_blank" rel="noopener">Learn More</a>
+      <button type="button" class="rsvp-modal-btn close" onclick="closeRsvpModal()">Cancel</button>
+      <button type="button" id="rsvp-submit-btn" class="rsvp-modal-btn submit" onclick="submitRsvp()">Submit RSVP</button>
+    </div>
+  </div>
+  <!-- SUCCESS state — shown after a successful submit -->
+  <div id="rsvp-modal-success-state" class="rsvp-modal" style="display:none" role="dialog" aria-modal="true">
+    <div class="rsvp-success-icon">✓</div>
+    <h3>RSVP confirmed</h3>
+    <p id="rsvp-success-line">Thanks — we'll let the host know.</p>
+    <div class="rsvp-modal-actions">
+      <button type="button" class="rsvp-modal-btn submit" style="flex:1" onclick="closeRsvpModal()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Checklist claim modal — opened by clicking Claim on a checklist
+     item. Mutates the wishlist array on the event doc so the host's
+     in-app counts pick up the claim immediately. -->
+<div id="claim-modal" class="claim-modal" role="dialog" aria-modal="true" aria-labelledby="claim-modal-title">
+  <div class="claim-modal-card">
+    <div id="claim-modal-title" class="claim-modal-title">I'll bring this</div>
+    <div class="claim-modal-sub" id="claim-modal-sub">Let the host know what you're bringing.</div>
+    <label for="claim-name-input">Your name</label>
+    <input id="claim-name-input" type="text" maxlength="60" autocomplete="name" placeholder="e.g. Alex" />
+    <label for="claim-amount-input">Amount</label>
+    <input id="claim-amount-input" type="text" maxlength="40" placeholder="e.g. 1 tray" />
+    <div id="claim-modal-error" class="claim-modal-error"></div>
+    <input id="claim-item-index" type="hidden" />
+    <div class="claim-modal-actions">
+      <button type="button" class="claim-modal-btn cancel" onclick="closeClaimModal()">Cancel</button>
+      <button id="claim-submit" type="button" class="claim-modal-btn confirm" onclick="submitClaim()">Claim</button>
     </div>
   </div>
 </div>
@@ -469,27 +671,326 @@
 </div>
 
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 <script>
   console.log('[QRParty] script running');
 
-  // ── RSVP "app required" modal ─────────────────────────────────
-  function showRsvpModal() {
+  // Escape arbitrary string for safe innerHTML insertion. Used for
+  // user-supplied wishlist item names + quantities so a malicious or
+  // careless host can't inject markup into other guests' browsers via
+  // an item name like '<img src=x onerror=...>'.
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // ── RSVP form modal ───────────────────────────────────────────
+  // Three states inside one backdrop: form (default), success (after a
+  // successful submit). Cancel / Done collapse back to the page.
+  var _selectedStatus = 'Yes';
+  // Headcount the guest is RSVPing for (themselves + companions). The
+  // listener at subscribeRsvpCounts() reads `adults` off the doc when
+  // tallying, so we write the chosen value to that field. Capped 1–5
+  // by the chip UI.
+  var _selectedCount = 1;
+
+  function openRsvpForm(initialStatus) {
+    setRsvpStatus(initialStatus || 'Yes');
+    setRsvpCount(1);
+    showState('form');
     var el = document.getElementById('rsvp-modal');
     if (el) el.classList.add('open');
     document.body.style.overflow = 'hidden';
+    setTimeout(function () {
+      var name = document.getElementById('rsvp-name');
+      if (name) name.focus();
+    }, 60);
   }
+
   function closeRsvpModal() {
     var el = document.getElementById('rsvp-modal');
     if (el) el.classList.remove('open');
     document.body.style.overflow = '';
+    // Reset form so reopening shows a clean slate.
+    var form = document.getElementById('rsvp-form');
+    if (form) form.reset();
+    setError('');
+    setSubmitting(false);
+    showState('form');
   }
+
+  function showState(which) {
+    document.getElementById('rsvp-modal-form-state').style.display    = which === 'form'    ? 'block' : 'none';
+    document.getElementById('rsvp-modal-success-state').style.display = which === 'success' ? 'block' : 'none';
+  }
+
+  function setRsvpStatus(status) {
+    _selectedStatus = status;
+    var chips = document.querySelectorAll('.rsvp-status-chip');
+    for (var i = 0; i < chips.length; i++) {
+      chips[i].classList.toggle('active', chips[i].dataset.status === status);
+    }
+  }
+
+  function setRsvpCount(count) {
+    var n = parseInt(count, 10);
+    if (isNaN(n) || n < 1) n = 1;
+    if (n > 5) n = 5;
+    _selectedCount = n;
+    var chips = document.querySelectorAll('.rsvp-count-chip');
+    for (var i = 0; i < chips.length; i++) {
+      chips[i].classList.toggle('active', parseInt(chips[i].dataset.count, 10) === n);
+    }
+  }
+
+  function setError(msg) {
+    var el = document.getElementById('rsvp-form-error');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.style.display = msg ? 'block' : 'none';
+  }
+
+  function setSubmitting(busy) {
+    var btn = document.getElementById('rsvp-submit-btn');
+    if (!btn) return;
+    btn.disabled = !!busy;
+    btn.textContent = busy ? 'Submitting…' : 'Submit RSVP';
+  }
+
   // Escape key dismisses the modal
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closeRsvpModal();
   });
-  window.showRsvpModal  = showRsvpModal;
+
+  // RSVP form submit handler. Each submit creates a NEW rsvp doc with
+  // an auto-generated id — multiple guests sharing the same device (or
+  // browser session) can each RSVP independently without overwriting
+  // each other. The previous email-as-doc-id scheme meant the second
+  // person to RSVP from the same phone clobbered the first; auto-ids
+  // remove that footgun. The trade-off is that one guest who edits
+  // their RSVP creates a duplicate row instead of replacing — that's
+  // acceptable here because the live headcount listener tallies people
+  // (not docs) and dupes can be cleaned up by the host.
+  //
+  // The parent event's yes/maybe/no counters are bumped via increment
+  // so the app's cached count stays in sync. Each web RSVP represents
+  // 1 person (the form doesn't collect party size).
+  function submitRsvp(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    var name  = (document.getElementById('rsvp-name').value  || '').trim();
+    var email = (document.getElementById('rsvp-email').value || '').trim().toLowerCase();
+    if (!name)  { setError('Please enter your name.');  return false; }
+    if (!email) { setError('Please enter your email.'); return false; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError('That email doesn\'t look right.'); return false; }
+    if (!_resolvedEventRef) { setError('Event not loaded yet — try again in a moment.'); return false; }
+
+    setError('');
+    setSubmitting(true);
+    var headcount = _selectedCount;
+    if (headcount < 1) headcount = 1;
+    if (headcount > 5) headcount = 5;
+    console.log('[QRParty] writing rsvp email=' + email + ' status=' + _selectedStatus + ' count=' + headcount);
+
+    var rsvpRef = _resolvedEventRef.collection('rsvps').doc();
+    var newStatus = _selectedStatus;
+
+    rsvpRef.set({
+      name: name,
+      email: email,
+      status: newStatus,
+      // `adults` mirrors the field the app's RSVP flow writes and the
+      // live listener (subscribeRsvpCounts) sums when tallying. Web
+      // RSVPs no longer hardcode 1 — the chip selector lets a guest
+      // include their plus-ones in a single submission.
+      adults: headcount,
+      source: 'web',
+      timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+    }).then(function () {
+      // Best-effort counter bump on the parent event doc. Increments
+      // by the chosen headcount so the app's cached yes/maybe/no
+      // counters stay in sync with the rsvps subcollection. Failures
+      // here are logged but don't block the success state.
+      var counters = {};
+      counters[newStatus.toLowerCase()] = firebase.firestore.FieldValue.increment(headcount);
+      return _resolvedEventRef.update(counters).catch(function (err) {
+        console.warn('[QRParty] counter bump failed (rsvp still saved): ' + err.code);
+      });
+    }).then(function () {
+      console.log('[QRParty] rsvp written');
+      var peopleLabel = headcount === 1 ? '1 person' : headcount + ' people';
+      document.getElementById('rsvp-success-line').textContent =
+        'Thanks ' + name + ' — your "' + newStatus + '" RSVP for ' + peopleLabel + ' is on file.';
+      showState('success');
+    }).catch(function (err) {
+      console.error('[QRParty] rsvp write failed code=' + err.code + ' message=' + err.message);
+      var msg = 'Could not submit your RSVP.';
+      if (err.code === 'permission-denied') {
+        msg = 'Submitting blocked — check that your email is valid.';
+      } else if (err.code === 'unavailable') {
+        msg = 'Network issue — please try again.';
+      }
+      setError(msg);
+      setSubmitting(false);
+    });
+    return false;
+  }
+
+  // Live headcount subscription. Once the event resolves, listen on the
+  // rsvps subcollection and re-tally the yes/maybe/no display whenever a
+  // doc is added/changed/removed — covers both web and app submissions.
+  var _rsvpUnsub = null;
+  function subscribeRsvpCounts(eventRef) {
+    if (_rsvpUnsub) { _rsvpUnsub(); _rsvpUnsub = null; }
+    _rsvpUnsub = eventRef.collection('rsvps').onSnapshot(function (snap) {
+      var counts = { Yes: 0, Maybe: 0, No: 0 };
+      snap.forEach(function (doc) {
+        var d = doc.data() || {};
+        var status = d.status;
+        if (counts[status] == null) return;
+        // App RSVPs carry adults/children/plusOnes; web RSVPs don't (they
+        // each represent 1 person). Sum the count fields and fall back to
+        // 1 when none are present so the pill reflects total people, not
+        // doc count — a single family doc with 1 adult + 3 children
+        // should count as 4, not 1.
+        var people =
+          ((typeof d.adults   === 'number') ? d.adults   : 0) +
+          ((typeof d.children === 'number') ? d.children : 0) +
+          ((typeof d.plusOnes === 'number') ? d.plusOnes : 0);
+        if (people <= 0) people = 1;
+        counts[status] += people;
+      });
+      console.log('[QRParty] rsvp counts yes=' + counts.Yes + ' maybe=' + counts.Maybe + ' no=' + counts.No);
+      setText('rsvp-yes',   counts.Yes);
+      setText('rsvp-maybe', counts.Maybe);
+      setText('rsvp-no',    counts.No);
+    }, function (err) {
+      console.warn('[QRParty] rsvp listener error code=' + err.code);
+    });
+  }
+
+  // Captured by the resolveEvent flow so submitRsvp() and the live
+  // headcount listener can both reuse the same DocumentReference without
+  // re-querying.
+  var _resolvedEventRef = null;
+
+  window.openRsvpForm   = openRsvpForm;
   window.closeRsvpModal = closeRsvpModal;
+  window.setRsvpStatus  = setRsvpStatus;
+  window.setRsvpCount   = setRsvpCount;
+  window.submitRsvp     = submitRsvp;
+  // Checklist claim handlers — declared below near the modal markup.
+  // Exposed on window so the inline onclick attributes on the dynamically-
+  // rendered checklist rows resolve.
+
+  // ── Checklist claim modal ────────────────────────────────────
+  // Mirror of guest_event_screen.dart's _saveClaimToFirestore: stamp
+  // a {uid, name, amount} entry into the target item's `claims` array
+  // and bump `claimed` to claims.length. For web (anonymous auth) the
+  // uid is the anonymous Firebase user id — same row gets replaced if
+  // the same anonymous session claims twice (e.g. guest fixes a typo).
+  function openClaimModal(itemIndex) {
+    var items = window._wishlistItems || [];
+    var item = items[itemIndex];
+    if (!item) return;
+    document.getElementById('claim-item-index').value = String(itemIndex);
+    document.getElementById('claim-modal-title').textContent =
+      "I'll bring " + (item.name || 'this');
+    document.getElementById('claim-modal-sub').textContent =
+      item.quantity ? 'Needed: ' + item.quantity : 'Let the host know what you\'re bringing.';
+    document.getElementById('claim-name-input').value = '';
+    document.getElementById('claim-amount-input').value = item.quantity || '';
+    document.getElementById('claim-modal-error').textContent = '';
+    var btn = document.getElementById('claim-submit');
+    btn.disabled = false; btn.textContent = 'Claim';
+    document.getElementById('claim-modal').classList.add('open');
+    document.body.style.overflow = 'hidden';
+    setTimeout(function () {
+      document.getElementById('claim-name-input').focus();
+    }, 60);
+  }
+
+  function closeClaimModal() {
+    document.getElementById('claim-modal').classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  function submitClaim() {
+    var nameEl = document.getElementById('claim-name-input');
+    var amountEl = document.getElementById('claim-amount-input');
+    var idxEl = document.getElementById('claim-item-index');
+    var errEl = document.getElementById('claim-modal-error');
+    var btn = document.getElementById('claim-submit');
+
+    var name = (nameEl.value || '').trim();
+    var amount = (amountEl.value || '').trim();
+    var itemIndex = parseInt(idxEl.value, 10);
+
+    if (!name) { errEl.textContent = 'Please enter your name.'; nameEl.focus(); return; }
+    if (!_resolvedEventRef) {
+      errEl.textContent = 'Event not loaded yet — please reload and try again.';
+      return;
+    }
+    var user = firebase.auth().currentUser;
+    if (!user) {
+      errEl.textContent = 'Sign-in still pending — try again in a moment.';
+      return;
+    }
+
+    btn.disabled = true; btn.textContent = 'Saving…'; errEl.textContent = '';
+
+    // Read-modify-write the entire wishlist array. Firestore can't
+    // increment one element of an array, so we pull the whole list
+    // down, splice in the new claim, and write it back. Concurrent
+    // claims could theoretically clobber each other in the window
+    // between read and write — acceptable for an RSVP page where
+    // genuine simultaneous claims are vanishingly rare.
+    _resolvedEventRef.get().then(function (snap) {
+      var data = snap.data() || {};
+      var wishlist = (data.wishlist || []).map(function (it) {
+        return Object.assign({}, it);
+      });
+      if (!wishlist[itemIndex]) {
+        throw new Error('Item not found');
+      }
+      var claims = (wishlist[itemIndex].claims || []).slice().map(function (c) {
+        return Object.assign({}, c);
+      });
+      // Replace any prior claim by this anonymous session so a guest
+      // who edits doesn't double-count themselves. Mirrors the app's
+      // _saveClaimToFirestore flow.
+      claims = claims.filter(function (c) { return c.uid !== user.uid; });
+      claims.push({ uid: user.uid, name: name, amount: amount, source: 'web' });
+      wishlist[itemIndex].claims = claims;
+      wishlist[itemIndex].claimed = claims.length;
+      return _resolvedEventRef.update({ wishlist: wishlist }).then(function () {
+        return { itemIndex: itemIndex, claimed: claims.length };
+      });
+    }).then(function (result) {
+      // Update the in-memory cache + claim count UI without re-rendering.
+      var items = window._wishlistItems || [];
+      if (items[result.itemIndex]) {
+        items[result.itemIndex].claimed = result.claimed;
+      }
+      var countEl = document.querySelector('[data-claim-count="' + result.itemIndex + '"]');
+      if (countEl) {
+        countEl.textContent = result.claimed + ' already claimed';
+        countEl.style.display = result.claimed > 0 ? '' : 'none';
+      }
+      closeClaimModal();
+    }).catch(function (err) {
+      console.error('[QRParty] claim failed:', err && err.code, err && err.message);
+      btn.disabled = false; btn.textContent = 'Claim';
+      errEl.textContent = (err && err.code === 'permission-denied')
+        ? 'Permission denied — host may have disabled claims.'
+        : 'Could not save claim. Please try again.';
+    });
+  }
+
+  window.openClaimModal  = openClaimModal;
+  window.closeClaimModal = closeClaimModal;
+  window.submitClaim     = submitClaim;
 
   firebase.initializeApp({
     apiKey:            'AIzaSyDI8j_7H9VoIFMCwGdJzEij406ap_tRlcA',
@@ -526,6 +1027,22 @@
   function icsEscape(s) {
     return String(s || '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/,/g, '\\,').replace(/;/g, '\\;');
   }
+  // Google Calendar's "create event" template URL. Opens the GCal app on
+  // mobile (deep-link auto-handoff) or the web composer on desktop. Use as
+  // a fallback for users whose default calendar isn't tied to .ics
+  // (Android Gmail accounts in particular).
+  function googleCalendarUrl(title, startDate, location, description) {
+    var start = startDate;
+    var end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+    var params =
+      'action=TEMPLATE'
+      + '&text='     + encodeURIComponent(title || 'Event')
+      + '&dates='    + toIcsDate(start) + '/' + toIcsDate(end)
+      + '&details='  + encodeURIComponent(description || '')
+      + '&location=' + encodeURIComponent(location || '');
+    return 'https://calendar.google.com/calendar/render?' + params;
+  }
+
   function downloadIcs(eventId, title, startDate, location, description) {
     var start = startDate;
     var end   = new Date(start.getTime() + 2 * 60 * 60 * 1000); // default 2h duration
@@ -560,16 +1077,50 @@
   var eventId = rawPath.replace(/^\/event\//, '').replace(/\/$/, '');
   console.log('[QRParty] eventId:', eventId);
 
-  // Resolve either a Firestore doc ID or a 6-char shortCode. We try the
-  // doc.get() first because it's the common case; on a miss we query the
-  // shortCode field (uppercased — codes are always written uppercase).
+  // Resolve either a Firestore doc ID or a 6-char shortCode. A 6-char
+  // alphanumeric input is almost certainly a shortCode, so we query that
+  // first to avoid a wasted doc.get() that always misses; if the where()
+  // returns empty we fall back to treating the input as a literal doc id.
+  // Both paths require authentication — firestore.rules gates events on
+  // isSignedIn() — so the caller must complete signInAnonymously() before
+  // calling this function.
   function resolveEvent(input) {
-    return db.collection('events').doc(input).get().then(function(snap) {
-      if (snap.exists) return snap;
+    var upper = input.toUpperCase();
+    var looksLikeShortCode = /^[A-Z0-9]{4,8}$/.test(upper);
+    console.log('[QRParty] resolveEvent input=' + input + ' upper=' + upper + ' looksLikeShortCode=' + looksLikeShortCode);
+
+    function shortCodeQuery() {
+      console.log('[QRParty] querying events.where(shortCode == "' + upper + '").limit(1)');
       return db.collection('events')
-        .where('shortCode', '==', input.toUpperCase())
+        .where('shortCode', '==', upper)
         .limit(1).get()
-        .then(function(qs) { return qs.empty ? null : qs.docs[0]; });
+        .then(function(qs) {
+          console.log('[QRParty] shortCode query empty=' + qs.empty + ' size=' + qs.size);
+          return qs.empty ? null : qs.docs[0];
+        });
+    }
+
+    function docGet() {
+      console.log('[QRParty] doc.get events/' + input);
+      return db.collection('events').doc(input).get().then(function(snap) {
+        console.log('[QRParty] doc.get exists=' + snap.exists);
+        return snap.exists ? snap : null;
+      });
+    }
+
+    if (looksLikeShortCode) {
+      return shortCodeQuery().then(function(snap) {
+        if (snap) return snap;
+        // Fall through to a literal doc lookup in case someone hands us a
+        // doc id that happens to match the alphanumeric pattern.
+        return docGet();
+      });
+    }
+    // Long-form doc id (e.g. partywithqr.com/event?id=AbCdEf123XyZ7) —
+    // try the direct lookup first, then fall back to shortCode for safety.
+    return docGet().then(function(snap) {
+      if (snap) return snap;
+      return shortCodeQuery();
     });
   }
 
@@ -577,7 +1128,17 @@
     hide('loading-state');
     show('error-state');
   } else {
-    resolveEvent(eventId)
+    // Sign in anonymously so the firestore.rules isSignedIn() check passes.
+    // Without this, every doc.get() and where() call rejects with
+    // permission-denied — which manifests as a confusing "event not found"
+    // page even when the doc exists. Anonymous auth must be enabled in
+    // Firebase console → Authentication → Sign-in method → Anonymous.
+    console.log('[QRParty] signing in anonymously…');
+    firebase.auth().signInAnonymously()
+      .then(function(cred) {
+        console.log('[QRParty] anonymous auth ok uid=' + (cred && cred.user && cred.user.uid));
+        return resolveEvent(eventId);
+      })
       .then(function(snap) {
         console.log('[QRParty] resolved:', snap && snap.exists);
         hide('loading-state');
@@ -589,6 +1150,14 @@
 
         var d = snap.data();
         console.log('[QRParty] title:', d.title);
+
+        // Capture the doc reference + start the live RSVP-count listener
+        // so the headcount display updates instantly on every submit
+        // (both web and app sources).
+        _resolvedEventRef = snap.ref;
+        subscribeRsvpCounts(snap.ref);
+        var line = document.getElementById('rsvp-modal-event-line');
+        if (line) line.textContent = d.title || 'this event';
 
         // Hero
         document.getElementById('event-emoji').textContent = d.eventEmoji || '🎉';
@@ -606,18 +1175,32 @@
           directionsBtn.style.display = 'none';
         }
 
-        // Add to Calendar — only enable if we actually have a date
+        // Add to Calendar — primary button downloads an .ics (Apple
+        // Calendar / Outlook / most desktop clients); the secondary link
+        // opens the Google Calendar template URL (preferred on Android).
+        // Both are disabled when the event has no date set.
         var startDate = d.date ? (d.date.toDate ? d.date.toDate() : new Date(d.date)) : null;
-        var calBtn = document.getElementById('calendar-btn');
+        var calBtn   = document.getElementById('calendar-btn');
+        var gcalLink = document.getElementById('gcal-link');
         if (startDate) {
           calBtn.addEventListener('click', function() {
-            downloadIcs(eventId, d.title || 'Event', startDate, d.location || '', d.description || '');
+            console.log('[QRParty] downloading ics for ' + (snap.id) + ' starting ' + startDate.toISOString());
+            try {
+              downloadIcs(snap.id, d.title || 'Event', startDate, d.location || '', d.description || '');
+            } catch (e) {
+              console.error('[QRParty] ics download failed:', e);
+            }
           });
+          if (gcalLink) {
+            gcalLink.href = googleCalendarUrl(d.title || 'Event', startDate, d.location || '', d.description || '');
+            gcalLink.style.display = 'block';
+          }
         } else {
           calBtn.disabled = true;
           calBtn.style.opacity = '0.5';
           calBtn.style.cursor  = 'not-allowed';
           calBtn.textContent   = '📆 Date TBD';
+          if (gcalLink) gcalLink.style.display = 'none';
         }
 
         // Description
@@ -627,33 +1210,47 @@
           hide('event-desc-card');
         }
 
-        // RSVP counts
-        setText('rsvp-yes',   d.yes   || 0);
-        setText('rsvp-maybe', d.maybe || 0);
-        setText('rsvp-no',    d.no    || 0);
+        // RSVP counts come from the live listener (subscribeRsvpCounts
+        // above) so web + app submissions both show up in real time.
+        // The cached d.yes/d.maybe/d.no fields on the event doc are
+        // ignored here — they'd otherwise undercount web RSVPs which
+        // never touch the parent doc.
 
-        // Wishlist / Checklist — field is always 'wishlist' but listType selects the render
+        // Wishlist / Checklist — field is always 'wishlist' but listType selects the render.
+        // Cached on window so the claim modal's submit handler can do a
+        // read-modify-write on the array without re-fetching the doc.
         var items    = d.wishlist || [];
         var listType = d.listType || 'Wishlist';
+        window._wishlistItems = items;
+        window._listType = listType;
         if (items.length > 0 && listType !== 'No List') {
           setText('list-title', listType === 'Checklist' ? 'Checklist' : 'Wishlist');
           var container = document.getElementById('list-items');
-          items.forEach(function(item) {
+          items.forEach(function(item, idx) {
             var el = document.createElement('div');
             el.className = 'list-item';
+            el.setAttribute('data-item-index', String(idx));
             if (listType === 'Checklist') {
               var name    = item.name || '';
               var qty     = item.quantity || '';
               var claimed = item.claimed || 0;
+              // Real button (not a Play Store anchor) — opens the
+              // claim modal and writes the claim back to Firestore.
+              // Each claim row also gets a data attribute so we can
+              // refresh the displayed claim count after a successful
+              // write without re-rendering the whole list.
               el.innerHTML =
                 '<div class="list-item-row">' +
                   '<div class="checklist-info">' +
-                    '<div class="list-name">' + name + '</div>' +
-                    '<div class="checklist-qty">Needed: ' + qty + '</div>' +
+                    '<div class="list-name">' + escapeHtml(name) + '</div>' +
+                    '<div class="checklist-qty">Needed: ' + escapeHtml(qty) + '</div>' +
                   '</div>' +
-                  '<a href="https://play.google.com/store/apps/details?id=com.partywithqr.app" class="claim-btn">Claim</a>' +
+                  '<button type="button" class="claim-btn" onclick="openClaimModal(' + idx + ')">Claim</button>' +
                 '</div>' +
-                (claimed > 0 ? '<div class="claim-count">' + claimed + ' already claimed</div>' : '');
+                '<div class="claim-count" data-claim-count="' + idx + '" style="' +
+                  (claimed > 0 ? '' : 'display:none') + '">' +
+                  claimed + ' already claimed' +
+                '</div>';
             } else {
               var price       = item.price       || 0;
               var contributed = item.contributed || 0;
@@ -682,7 +1279,11 @@
         console.log('[QRParty] render complete');
       })
       .catch(function(err) {
-        console.error('[QRParty] Firestore error:', err.code, err.message);
+        // err.code surfaces the real cause: 'permission-denied' (rules
+        // blocked the read), 'auth/operation-not-allowed' (anonymous
+        // sign-in disabled in console), 'unavailable' (network), etc.
+        // Logged to console so debugging in prod is one-click via DevTools.
+        console.error('[QRParty] resolve failed code=' + err.code + ' message=' + err.message);
         hide('loading-state');
         show('error-state');
       });

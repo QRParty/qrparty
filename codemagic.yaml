@@ -1,0 +1,40 @@
+workflows:
+  ios-workflow:
+    name: QR Party iOS
+    max_build_duration: 120
+    environment:
+      flutter: 3.41.7
+      xcode: 26
+      cocoapods: default
+      groups:
+        - ios_signing
+    scripts:
+      - name: Get Flutter packages
+        script: flutter pub get
+      - name: Install pods
+        script: |
+          cd ios
+          rm -rf Pods Podfile.lock
+          pod install
+      - name: Set up code signing
+        script: |
+          keychain initialize
+          PROFILES_HOME="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILES_HOME"
+          PROFILE_PATH="$(mktemp "$PROFILES_HOME"/$(uuidgen).mobileprovision)"
+          echo $CM_PROVISIONING_PROFILE | base64 --decode > "$PROFILE_PATH"
+          echo "Installed profile $PROFILE_PATH"
+          echo $CM_CERTIFICATE | base64 --decode > /tmp/certificate.p12
+          keychain add-certificates --certificate /tmp/certificate.p12 --certificate-password $CM_CERTIFICATE_PASSWORD
+          xcode-project use-profiles
+      - name: Build IPA
+        script: |
+          flutter build ipa --release --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true

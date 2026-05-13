@@ -8,22 +8,22 @@ service firebase.storage {
 
     match /events/{eventId}/photos/{filename} {
 
-      // Read is restricted to:
-      //   (a) the event host, or
-      //   (b) any authenticated user who has an RSVP document for this event.
-      allow read: if request.auth != null
-        && (
-          firestore.get(
-            /databases/(default)/documents/events/$(eventId)
-          ).data.hostId == request.auth.uid
-          ||
-          firestore.exists(
-            /databases/(default)/documents/events/$(eventId)/rsvps/$(request.auth.uid)
-          )
-        );
+      // Any authenticated user can read event photos. Previously this
+      // was gated to the host or guests with an existing RSVP doc,
+      // which broke the upload path: putData() succeeds, but the
+      // immediately-following getDownloadURL() call needs `read` to
+      // resolve the URL. Guests who hadn't yet RSVPed (e.g. walked
+      // into the event without using the QR flow first) saw their
+      // upload land but got firebase_storage/unauthorized on the URL
+      // fetch. The privacy bar now matches the firestore.rules
+      // photos collection — signed-in reads, no per-event gating.
+      allow read: if request.auth != null;
 
       // Any authenticated user can upload their own photos.
-      // Constraints: image content type · max 10 MB · filename starts with own uid.
+      // Constraints: image content type · max 25 MB · filename
+      // prefixed with their uid so the delete rule below can
+      // authorize the original uploader without an extra Firestore
+      // read.
       allow create: if request.auth != null
         && request.resource.contentType.matches('image/.*')
         && request.resource.size <= 25 * 1024 * 1024

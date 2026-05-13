@@ -211,7 +211,11 @@ class _AdminOrderTableState extends State<AdminOrderTable> {
   void _openDetail(MerchOrder order) {
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: _card,
+      // AdminOrderDetailModal is intentionally a dark-mode-only surface
+      // (uses _cardDark / _mutedDark / Colors.white text throughout). Force
+      // the dark card here so it doesn't render white text on a white
+      // background when the caller is in light mode.
+      backgroundColor: _cardDark,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (_) => AdminOrderDetailModal(order: order),
@@ -401,19 +405,19 @@ class _OrderCard extends StatelessWidget {
       context: ctx,
       builder: (_) => AlertDialog(
         backgroundColor: _card,
-        title: const Text('Vistaprint cost', style: TextStyle(color: Colors.white)),
+        title: Text('Vistaprint cost', style: TextStyle(color: _fg)),
         content: TextField(
           controller: c, autofocus: true,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          style: const TextStyle(color: Colors.white),
-          decoration: const InputDecoration(
-            labelText: 'Total cost (USD)', labelStyle: TextStyle(color: _mutedDark),
-            hintText: 'e.g. 12.34', hintStyle: TextStyle(color: _mutedDark),
-            prefixText: '\$  ', prefixStyle: TextStyle(color: _mutedDark),
+          style: TextStyle(color: _fg),
+          decoration: InputDecoration(
+            labelText: 'Total cost (USD)', labelStyle: TextStyle(color: _muted),
+            hintText: 'e.g. 12.34', hintStyle: TextStyle(color: _muted),
+            prefixText: '\$  ', prefixStyle: TextStyle(color: _muted),
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: _mutedDark))),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: TextStyle(color: _muted))),
           TextButton(
             onPressed: () {
               final dollars = double.tryParse(c.text.trim());

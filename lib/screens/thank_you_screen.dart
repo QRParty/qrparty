@@ -31,6 +31,7 @@ class ThankYouScreen extends StatefulWidget {
 class _ThankYouScreenState extends State<ThankYouScreen> {
   bool _loading = true;
   bool _isBusiness = false;
+  bool _isHeadquarters = false;
   List<Map<String, dynamic>> _guests = [];
   final Set<String> _sent = {};
 
@@ -65,7 +66,14 @@ class _ThankYouScreenState extends State<ThankYouScreen> {
       if (fUser != null) {
         final userSnap = await fUser;
         final d = userSnap.data() ?? {};
-        _isBusiness = d['accountType'] == 'business' && d['isTrialing'] != true;
+        // _isBusiness gates business-only thank-you affordances — both
+        // tiers (Business + Headquarters) qualify. _isHeadquarters
+        // separately differentiates the top tier so the AppBar badge
+        // can read "HEADQUARTERS" instead of "PRO".
+        final acct = d['accountType'];
+        final activated = d['isTrialing'] != true;
+        _isHeadquarters = acct == 'businessPlus' && activated;
+        _isBusiness = activated && (acct == 'business' || acct == 'businessPlus');
       }
 
       // uid → checklist items claimed
@@ -94,24 +102,42 @@ class _ThankYouScreenState extends State<ThankYouScreen> {
         if (parts.isNotEmpty) contribByUid[doc.id] = parts.join(', ');
       }
 
-      // Fetch FCM tokens for all guests in parallel
-      final guestUids = rsvpSnap.docs.map((d) => d.id).toList();
+      // Bucket the rsvp docs by channel: app guests have a doc id
+      // == user uid (so the FCM token lives at users/{uid}); web
+      // guests have an auto-id doc id and an `email` field on the
+      // rsvp itself (no users/{uid} record). Looking up users/ for a
+      // web guest's auto-id wastes a round-trip and always returns
+      // empty, so partition first and only fetch tokens for app
+      // guests.
+      final appGuestUids = <String>[];
+      for (final d in rsvpSnap.docs) {
+        final src = d.data()['source'] as String?;
+        if (src != 'web') appGuestUids.add(d.id);
+      }
       final tokenDocs = await Future.wait(
-        guestUids.map((uid) => FirebaseFirestore.instance.collection('users').doc(uid).get()),
+        appGuestUids.map((uid) => FirebaseFirestore.instance.collection('users').doc(uid).get()),
       );
       final tokenByUid = <String, String>{};
-      for (int i = 0; i < guestUids.length; i++) {
+      for (int i = 0; i < appGuestUids.length; i++) {
         final token = tokenDocs[i].data()?['fcmToken'] as String?;
-        if (token != null) tokenByUid[guestUids[i]] = token;
+        if (token != null) tokenByUid[appGuestUids[i]] = token;
       }
 
       final guests = rsvpSnap.docs.map((d) {
         final data = d.data();
         final uid = d.id;
+        // Web guests carry source='web' + an email field stamped by
+        // event.html at submit time. App guests have neither. The
+        // `isWebGuest` flag drives the send-channel decision in
+        // _ThankYouSheet._send (push for app, email for web) and
+        // the badge on the guest tile.
+        final isWebGuest = (data['source'] as String?) == 'web';
         return <String, dynamic>{
           'uid': uid,
           'name': (data['name'] as String?) ?? 'Guest',
           'status': (data['status'] as String?) ?? 'Not Responded',
+          'email': (data['email'] as String?)?.trim(),
+          'isWebGuest': isWebGuest,
           'checklist': checklistByUid[uid]?.join(', '),
           'contribution': contribByUid[uid],
           'fcmToken': tokenByUid[uid],
@@ -191,7 +217,10 @@ class _ThankYouScreenState extends State<ThankYouScreen> {
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(color: _gold.withValues(alpha: 0.4)),
                         ),
-                        child: const Text('PRO', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _gold, letterSpacing: 0.5)),
+                        child: Text(
+                          _isHeadquarters ? 'HEADQUARTERS' : 'PRO',
+                          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _gold, letterSpacing: 0.5),
+                        ),
                       ),
                   ]),
                 ),
@@ -217,6 +246,9 @@ class _ThankYouScreenState extends State<ThankYouScreen> {
                           final status = guest['status'] as String;
                           final hasChecklist = guest['checklist'] != null;
                           final hasContrib = guest['contribution'] != null;
+                          final isWebGuest = guest['isWebGuest'] == true;
+                          final guestEmail = (guest['email'] as String?)?.trim();
+                          final hasFcmToken = guest['fcmToken'] != null;
                           final isSent = _sent.contains(uid);
                           final initials = name.split(' ').map((p) => p.isNotEmpty ? p[0] : '').take(2).join().toUpperCase();
                           const avatarColors = [_purple, _gold, AppColors.green, Color(0xFFE91E8C), Color(0xFF4FC3F7)];
@@ -245,30 +277,62 @@ class _ThankYouScreenState extends State<ThankYouScreen> {
                                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                                   Text(name, style: TextStyle(fontFamily: 'Nunito', fontSize: 15, fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
                                   const SizedBox(height: 5),
-                                  Row(children: [
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                      decoration: BoxDecoration(
-                                        color: statusColor.withValues(alpha: 0.15),
-                                        borderRadius: BorderRadius.circular(20),
+                                  Wrap(
+                                    spacing: 6,
+                                    runSpacing: 4,
+                                    crossAxisAlignment: WrapCrossAlignment.center,
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: statusColor.withValues(alpha: 0.15),
+                                          borderRadius: BorderRadius.circular(20),
+                                        ),
+                                        child: Text(
+                                          status == 'Yes' ? 'Attended' : 'Maybe',
+                                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: statusColor),
+                                        ),
                                       ),
-                                      child: Text(
-                                        status == 'Yes' ? 'Attended' : 'Maybe',
-                                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: statusColor),
-                                      ),
-                                    ),
-                                    if (hasChecklist) ...[
-                                      const SizedBox(width: 6),
-                                      Icon(Icons.shopping_bag_outlined, size: 11, color: _muted),
-                                      const SizedBox(width: 2),
-                                      Text('Brought items', style: TextStyle(fontSize: 11, color: _muted)),
-                                    ] else if (hasContrib) ...[
-                                      const SizedBox(width: 6),
-                                      Icon(Icons.card_giftcard_outlined, size: 11, color: _muted),
-                                      const SizedBox(width: 2),
-                                      Text('Contributed', style: TextStyle(fontSize: 11, color: _muted)),
+                                      // Channel pill — purple "App" when
+                                      // the guest installed the app and
+                                      // granted notifications, gold "Email"
+                                      // when they RSVP'd via the web page,
+                                      // muted "No channel" when there's
+                                      // no way to reach them. Tells the
+                                      // host at a glance which delivery
+                                      // path Send Thanks will use.
+                                      if (!isWebGuest && hasFcmToken)
+                                        _channelPill(
+                                          label: 'App',
+                                          icon: Icons.smartphone,
+                                          color: _purple,
+                                        )
+                                      else if (isWebGuest && guestEmail != null && guestEmail.isNotEmpty)
+                                        _channelPill(
+                                          label: 'Email',
+                                          icon: Icons.mail_outline,
+                                          color: _gold,
+                                        )
+                                      else
+                                        _channelPill(
+                                          label: 'No channel',
+                                          icon: Icons.block,
+                                          color: _muted,
+                                        ),
+                                      if (hasChecklist)
+                                        Row(mainAxisSize: MainAxisSize.min, children: [
+                                          Icon(Icons.shopping_bag_outlined, size: 11, color: _muted),
+                                          const SizedBox(width: 2),
+                                          Text('Brought items', style: TextStyle(fontSize: 11, color: _muted)),
+                                        ])
+                                      else if (hasContrib)
+                                        Row(mainAxisSize: MainAxisSize.min, children: [
+                                          Icon(Icons.card_giftcard_outlined, size: 11, color: _muted),
+                                          const SizedBox(width: 2),
+                                          Text('Contributed', style: TextStyle(fontSize: 11, color: _muted)),
+                                        ]),
                                     ],
-                                  ]),
+                                  ),
                                 ]),
                               ),
                               const SizedBox(width: 10),
@@ -301,6 +365,30 @@ class _ThankYouScreenState extends State<ThankYouScreen> {
               ),
             ]),
       bottomNavigationBar: debugLabel('Screen 8 — Host View'),
+    );
+  }
+
+  /// Compact channel-indicator pill used on each guest tile. Tells
+  /// the host which delivery path Send Thanks will use without
+  /// requiring them to open the sheet first. Three states: App
+  /// (purple), Email (gold), No channel (muted) — see the call site
+  /// in the guest tile for the routing.
+  Widget _channelPill({required String label, required IconData icon, required Color color}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 10, color: color),
+        const SizedBox(width: 3),
+        Text(
+          label,
+          style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: color, letterSpacing: 0.2),
+        ),
+      ]),
     );
   }
 }
@@ -389,13 +477,47 @@ class _ThankYouSheetState extends State<_ThankYouSheet> {
     if (message.isEmpty) return;
     setState(() => _sending = true);
     try {
+      final isWebGuest = widget.guest['isWebGuest'] == true;
+      final email = (widget.guest['email'] as String?)?.trim();
       final token = widget.guest['fcmToken'] as String?;
-      await NotificationService.sendNotification(
-        token != null ? [token] : [],
-        'Thank you from ${widget.eventTitle}',
-        message,
-        eventId: widget.eventId,
-      );
+      // Channel routing:
+      //   • Web guest with an email → write to the `mail` collection
+      //     so the Trigger Email extension delivers it. They have no
+      //     FCM token (never installed the app), so push isn't an
+      //     option.
+      //   • App guest with a token → existing push path via
+      //     NotificationService → notificationQueue → Cloud Function.
+      //   • Anyone else (app guest who never granted notification
+      //     permission, web guest whose email field was somehow
+      //     missing) → bail with a snack so the host knows the send
+      //     didn't actually land.
+      var delivered = false;
+      if (isWebGuest && email != null && email.isNotEmpty) {
+        await _sendThankYouEmail(email: email, message: message);
+        delivered = true;
+      } else if (!isWebGuest && token != null) {
+        await NotificationService.sendNotification(
+          [token],
+          'Thank you from ${widget.eventTitle}',
+          message,
+          eventId: widget.eventId,
+        );
+        delivered = true;
+      }
+
+      if (!delivered) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(isWebGuest
+                ? 'No email on file for this guest — can\'t send a thank you.'
+                : 'This guest hasn\'t enabled push notifications yet.'),
+            backgroundColor: Colors.redAccent,
+          ));
+          setState(() => _sending = false);
+        }
+        return;
+      }
+
       if (mounted) {
         Navigator.pop(context);
         widget.onSent();
@@ -403,6 +525,35 @@ class _ThankYouSheetState extends State<_ThankYouSheet> {
     } catch (_) {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  /// Writes a thank-you email into the `mail` collection consumed by
+  /// the Firebase Trigger Email extension. Mirrors the host-
+  /// notification fallback in HostNotificationsScreen — same
+  /// firestore.rules path requires `eventId` so the create rule can
+  /// verify the host owns the event. Plaintext escaped into HTML so
+  /// emoji + line breaks survive the SMTP hop.
+  Future<void> _sendThankYouEmail({required String email, required String message}) async {
+    final escapedMsg = message
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('\n', '<br>');
+    await FirebaseFirestore.instance.collection('mail').add({
+      'eventId': widget.eventId,
+      'to': [email],
+      'message': {
+        'subject': 'Thank you from ${widget.eventTitle}',
+        'text': message,
+        'html':
+            '<p>$escapedMsg</p>'
+            '<p style="color:#888;font-size:12px;margin-top:24px">'
+            'You\'re receiving this because you RSVP\'d to '
+            '"${widget.eventTitle}" on QR Party. '
+            '<a href="https://partywithqr.com/event/${widget.eventId}">View event</a>'
+            '</p>',
+      },
+    });
   }
 
   @override

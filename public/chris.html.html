@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Klaus Custom Studio</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --cream: #F5F1EA;
+  --cream-dark: #EDE8DF;
+  --ink: #1A1714;
+  --ink-light: #3D3830;
+  --muted: #8A8078;
+  --faint: #D4CFC6;
+  --amber: #C8820A;
+  --amber-light: #F0A820;
+  --amber-bg: rgba(200,130,10,0.08);
+  --purple: #7B5EA7;
+  --purple-bg: rgba(123,94,167,0.08);
+  --orange: #C8520A;
+  --orange-bg: rgba(200,82,10,0.08);
+  --rust: #A84A1A;
+  --rust-bg: rgba(168,74,26,0.08);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--cream);
+  color: var(--ink);
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 400;
+  overflow-x: hidden;
+}
+
+/* ── GRAIN OVERLAY ── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.5;
+}
+
+/* ── NAV ── */
+nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  padding: 20px 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+nav.scrolled {
+  background: rgba(245,241,234,0.95);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 1px 0 var(--faint);
+}
+.nav-logo {
+  font-family: 'Playfair Display', serif;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+.nav-logo span { color: var(--amber); }
+.nav-links { display: flex; gap: 32px; }
+.nav-links a {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+  letter-spacing: 0.02em;
+  transition: color 0.2s;
+}
+.nav-links a:hover { color: var(--ink); }
+.nav-cta {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--amber);
+  text-decoration: none;
+  border-bottom: 1px solid var(--amber);
+  padding-bottom: 1px;
+  transition: opacity 0.2s;
+}
+.nav-cta:hover { opacity: 0.7; }
+
+/* ── HERO ── */
+.hero {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 120px 40px 80px;
+  position: relative;
+  overflow: hidden;
+}
+.hero-location {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--amber);
+  margin-bottom: 28px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  animation: fadeUp 0.8s ease both;
+}
+.hero-location::before { content: ''; width: 24px; height: 1px; background: var(--amber); }
+
+.hero-headline {
+  font-family: 'Playfair Display', serif;
+  font-size: clamp(52px, 9vw, 110px);
+  font-weight: 900;
+  line-height: 0.92;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+  margin-bottom: 0;
+  animation: fadeUp 0.8s ease 0.1s both;
+}
+.hero-headline .accent { color: var(--amber); font-style: italic; }
+
+.hero-sub {
+  font-size: clamp(16px, 2.5vw, 22px);
+  font-weight: 300;
+  color: var(--muted);
+  margin-top: 28px;
+  max-width: 520px;
+  line-height: 1.6;
+  animation: fadeUp 0.8s ease 0.2s both;
+}
+
+.hero-stats {
+  display: flex;
+  gap: 40px;
+  margin-top: 56px;
+  padding-top: 40px;
+  border-top: 1px solid var(--faint);
+  animation: fadeUp 0.8s ease 0.3s both;
+}
+.hero-stat-num {
+  font-family: 'Playfair Display', serif;
+  font-size: 40px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1;
+}
+.hero-stat-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  margin-top: 4px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.hero-bg-text {
+  position: absolute;
+  right: -20px;
+  bottom: -40px;
+  font-family: 'Playfair Display', serif;
+  font-size: clamp(120px, 20vw, 280px);
+  font-weight: 900;
+  color: rgba(200,130,10,0.05);
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+  letter-spacing: -0.05em;
+}
+
+.hero-scroll {
+  position: absolute;
+  bottom: 40px;
+  left: 40px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.hero-scroll::before {
+  content: '';
+  width: 1px;
+  height: 40px;
+  background: linear-gradient(to bottom, transparent, var(--faint));
+}
+
+/* ── SECTION ── */
+.section {
+  padding: 100px 40px;
+}
+.section-alt { background: var(--cream-dark); }
+
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--amber);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.section-label::before { content: ''; width: 24px; height: 1px; background: var(--amber); }
+
+.section-title {
+  font-family: 'Playfair Display', serif;
+  font-size: clamp(36px, 5vw, 60px);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  max-width: 700px;
+}
+
+/* ── APPS ── */
+.apps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 56px;
+}
+
+.app-card {
+  background: white;
+  border-radius: 16px;
+  padding: 32px;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  cursor: default;
+}
+.app-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 60px rgba(26,23,20,0.12);
+}
+.app-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--card-accent, var(--amber));
+}
+
+.app-card.purple { --card-accent: var(--purple); }
+.app-card.orange { --card-accent: var(--orange); }
+.app-card.rust   { --card-accent: var(--rust); }
+.app-card.amber  { --card-accent: var(--amber); }
+
+.app-num {
+  font-family: 'Playfair Display', serif;
+  font-size: 13px;
+  color: var(--faint);
+  font-weight: 700;
+  margin-bottom: 20px;
+  letter-spacing: 0.05em;
+}
+.app-name {
+  font-family: 'Playfair Display', serif;
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+  margin-bottom: 10px;
+  line-height: 1;
+}
+.app-desc {
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-bottom: 24px;
+}
+.app-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 24px;
+}
+.app-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: var(--cream);
+  color: var(--muted);
+  letter-spacing: 0.03em;
+}
+
+.app-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.live { background: #3CB371; box-shadow: 0 0 0 3px rgba(60,179,113,0.2); }
+.status-dot.dev  { background: var(--amber); }
+.status-dot.plan { background: var(--faint); }
+
+.app-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--card-accent, var(--amber));
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+  padding-bottom: 1px;
+  transition: opacity 0.2s;
+}
+.app-link:hover { opacity: 0.7; }
+
+.app-card-bg {
+  position: absolute;
+  bottom: -20px;
+  right: -10px;
+  font-family: 'Playfair Display', serif;
+  font-size: 90px;
+  font-weight: 900;
+  color: rgba(26,23,20,0.03);
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ── ABOUT ── */
+.about-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 80px;
+  margin-top: 56px;
+  align-items: start;
+}
+.about-text p {
+  font-size: 17px;
+  color: var(--ink-light);
+  line-height: 1.8;
+  margin-bottom: 20px;
+  font-weight: 300;
+}
+.about-text p strong {
+  font-weight: 600;
+  color: var(--ink);
+}
+.about-text .highlight {
+  font-family: 'Playfair Display', serif;
+  font-size: 22px;
+  font-style: italic;
+  color: var(--ink);
+  line-height: 1.5;
+  border-left: 3px solid var(--amber);
+  padding-left: 20px;
+  margin: 32px 0;
+}
+
+.about-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.about-fact {
+  padding: 24px 0;
+  border-bottom: 1px solid var(--faint);
+}
+.about-fact:first-child { padding-top: 0; }
+.about-fact-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--amber);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  margin-bottom: 6px;
+}
+.about-fact-value {
+  font-size: 15px;
+  color: var(--ink);
+  font-weight: 500;
+  line-height: 1.5;
+}
+.about-fact-value .sub {
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 400;
+  margin-top: 2px;
+}
+
+/* ── SCAFFOLD TEASER ── */
+.scaffold-block {
+  background: var(--ink);
+  border-radius: 20px;
+  padding: 60px;
+  margin-top: 56px;
+  position: relative;
+  overflow: hidden;
+}
+.scaffold-block::before {
+  content: 'SCAFFOLD';
+  position: absolute;
+  right: -20px;
+  bottom: -30px;
+  font-family: 'Playfair Display', serif;
+  font-size: 120px;
+  font-weight: 900;
+  color: rgba(240,180,41,0.06);
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+  letter-spacing: -0.03em;
+}
+.scaffold-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--amber-light);
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.scaffold-label::before { content: ''; width: 24px; height: 1px; background: var(--amber-light); }
+.scaffold-title {
+  font-family: 'Playfair Display', serif;
+  font-size: clamp(28px, 4vw, 48px);
+  font-weight: 700;
+  color: white;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin-bottom: 16px;
+  max-width: 560px;
+}
+.scaffold-title span { color: var(--amber-light); font-style: italic; }
+.scaffold-desc {
+  font-size: 16px;
+  color: rgba(255,255,255,0.5);
+  line-height: 1.7;
+  max-width: 480px;
+  margin-bottom: 32px;
+  font-weight: 300;
+}
+.scaffold-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--amber-light);
+  background: rgba(240,180,41,0.1);
+  border: 1px solid rgba(240,180,41,0.2);
+  border-radius: 20px;
+  padding: 6px 14px;
+}
+
+/* ── CONTACT ── */
+.contact-block {
+  text-align: center;
+  padding: 100px 40px;
+}
+.contact-title {
+  font-family: 'Playfair Display', serif;
+  font-size: clamp(40px, 7vw, 88px);
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+  line-height: 0.95;
+  margin-bottom: 24px;
+}
+.contact-title span { color: var(--amber); font-style: italic; }
+.contact-sub {
+  font-size: 17px;
+  color: var(--muted);
+  font-weight: 300;
+  margin-bottom: 40px;
+}
+.contact-email {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 2px solid var(--amber);
+  padding-bottom: 2px;
+  transition: color 0.2s;
+}
+.contact-email:hover { color: var(--amber); }
+
+/* ── FOOTER ── */
+footer {
+  border-top: 1px solid var(--faint);
+  padding: 32px 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.footer-logo {
+  font-family: 'Playfair Display', serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.footer-logo span { color: var(--amber); }
+.footer-copy {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* ── ANIMATIONS ── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.7s ease, transform 0.7s ease;
+}
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ── RESPONSIVE ── */
+@media (max-width: 768px) {
+  nav { padding: 16px 24px; }
+  .nav-links { display: none; }
+  .hero { padding: 100px 24px 60px; }
+  .hero-stats { gap: 24px; flex-wrap: wrap; }
+  .section { padding: 64px 24px; }
+  .about-grid { grid-template-columns: 1fr; gap: 48px; }
+  .scaffold-block { padding: 40px 28px; }
+  .contact-block { padding: 64px 24px; }
+  footer { padding: 24px; }
+  .apps-grid { grid-template-columns: 1fr; }
+}
+
+.demo-btn {
+  font-size: 13px; font-weight: 600; color: var(--card-accent, var(--amber));
+  background: none; border: 1.5px solid currentColor; border-radius: 20px;
+  padding: 6px 16px; cursor: pointer; font-family: 'DM Sans', sans-serif;
+  transition: background 0.2s, color 0.2s; letter-spacing: 0.01em;
+}
+.demo-btn:hover { background: var(--card-accent, var(--amber)); color: white; }
+.demo-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(10,9,8,0.93); display: flex; align-items: center;
+  justify-content: center; opacity: 0; pointer-events: none;
+  transition: opacity 0.3s ease; backdrop-filter: blur(8px);
+}
+.demo-overlay.open { opacity: 1; pointer-events: all; }
+.demo-panel {
+  display: flex; flex-direction: column; align-items: center; gap: 24px;
+  padding: 24px; width: 100%; max-width: 380px;
+  transform: translateY(20px); transition: transform 0.35s ease;
+}
+.demo-overlay.open .demo-panel { transform: translateY(0); }
+.demo-header { display: flex; align-items: center; justify-content: space-between; width: 100%; }
+.demo-app-name { font-family: 'Playfair Display', serif; font-size: 22px; font-weight: 700; color: white; letter-spacing: -0.02em; }
+.demo-close {
+  width: 36px; height: 36px; border-radius: 50%; background: rgba(255,255,255,0.1);
+  border: none; color: white; font-size: 18px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; font-family: inherit;
+}
+.demo-close:hover { background: rgba(255,255,255,0.2); }
+.phone-frame {
+  width: 280px; height: 560px; background: #0A0A0C;
+  border-radius: 42px; border: 2px solid rgba(255,255,255,0.1);
+  position: relative; overflow: hidden;
+  box-shadow: 0 40px 80px rgba(0,0,0,0.7), inset 0 0 0 1px rgba(255,255,255,0.04);
+}
+.phone-frame::before {
+  content: ''; position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  width: 90px; height: 26px; background: #0A0A0C; border-radius: 18px;
+  z-index: 20; border: 1.5px solid rgba(255,255,255,0.07);
+}
+.phone-frame::after {
+  content: ''; position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+  width: 90px; height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; z-index: 20;
+}
+.phone-screen { position: absolute; inset: 0; display: flex; flex-direction: column; overflow: hidden; }
+.screen-wrap { position: relative; width: 100%; height: 100%; overflow: hidden; }
+.screen-slide { position: absolute; inset: 0; opacity: 0; transition: opacity 0.35s ease; display: flex; flex-direction: column; }
+.screen-slide.active { opacity: 1; }
+.demo-nav { display: flex; align-items: center; gap: 20px; }
+.nav-arrow {
+  width: 38px; height: 38px; border-radius: 50%; background: rgba(255,255,255,0.1);
+  border: none; color: white; font-size: 16px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; font-family: inherit;
+}
+.nav-arrow:hover { background: rgba(255,255,255,0.18); }
+.nav-arrow:disabled { opacity: 0.2; cursor: default; }
+.nav-dots { display: flex; gap: 6px; }
+.nav-dot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.2); transition: all 0.2s; }
+.nav-dot.active { background: white; transform: scale(1.3); }
+.screen-lbl { font-size: 12px; color: rgba(255,255,255,0.35); font-family: 'DM Sans', sans-serif; }
+.swap-note { font-size: 11px; color: rgba(255,255,255,0.2); text-align: center; font-family: 'DM Sans', sans-serif; }
+.sb { height: 42px; display: flex; align-items: flex-end; justify-content: space-between; padding: 0 18px 6px; font-size: 11px; font-weight: 600; flex-shrink: 0; font-family: 'DM Sans', sans-serif; }
+.sb-t { color: white; }
+.sb-i { color: white; display:flex; gap:3px; align-items:center; }
+.abar { padding: 6px 14px 8px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+.abar-t { font-size: 16px; font-weight: 700; color: white; font-family: 'DM Sans', sans-serif; }
+.sbody { flex: 1; padding: 10px 12px; overflow: hidden; font-family: 'DM Sans', sans-serif; display: flex; flex-direction: column; gap: 7px; }
+.bnav { height: 54px; display: flex; align-items: center; justify-content: space-around; border-top: 1px solid rgba(255,255,255,0.07); padding-bottom: 4px; flex-shrink: 0; }
+.bni { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 9px; font-family: 'DM Sans', sans-serif; }
+.bni-ic { font-size: 17px; }
+.crow { background: rgba(255,255,255,0.06); border-radius: 9px; padding: 9px 10px; display: flex; align-items: center; gap: 8px; }
+.ct { flex:1; }
+.ct-t { font-size: 12px; font-weight: 600; color: white; }
+.ct-s { font-size: 10px; color: rgba(255,255,255,0.4); margin-top:1px; }
+.pb { font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 20px; }
+.inp { background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.11); border-radius:7px; padding:9px 11px; font-size:12px; color:rgba(255,255,255,0.45); }
+.ctab { border-radius:9px; padding:12px; font-size:13px; font-weight:700; color:white; text-align:center; font-family:'DM Sans',sans-serif; }
+.slbl { font-size:9px; font-weight:600; color:rgba(255,255,255,0.3); text-transform:uppercase; letter-spacing:0.1em; margin:2px 0 4px; }
+.bnum { font-family:'Playfair Display',serif; font-size:52px; font-weight:900; color:white; text-align:center; line-height:1; }
+@media(max-width:480px){ .phone-frame{width:248px;height:496px;} .demo-panel{padding:14px;gap:16px;} }
+
+</style>
+</head>
+<body>
+
+
+<div class="demo-overlay" id="demo-overlay" onclick="if(event.target===this)closeDemo()">
+  <div class="demo-panel">
+    <div class="demo-header">
+      <div class="demo-app-name" id="demo-title">Demo</div>
+      <button class="demo-close" onclick="closeDemo()">&#x2715;</button>
+    </div>
+    <div class="phone-frame">
+      <div class="phone-screen">
+        <div class="screen-wrap" id="screen-wrap"></div>
+      </div>
+    </div>
+    <div class="screen-lbl" id="screen-lbl"></div>
+    <div class="demo-nav">
+      <button class="nav-arrow" id="btn-prev" onclick="chg(-1)">&#8592;</button>
+      <div class="nav-dots" id="nav-dots"></div>
+      <button class="nav-arrow" id="btn-next" onclick="chg(1)">&#8594;</button>
+    </div>
+    <div class="swap-note">Tap outside to close &middot; Use arrows to navigate</div>
+  </div>
+</div>
+
+<!-- NAV -->
+<nav id="nav">
+  <div class="nav-logo">Klaus <span>Custom</span> Studio</div>
+  <div class="nav-links">
+    <a href="javascript:void(0)" onclick="smoothTo('apps')">Apps</a>
+    <a href="javascript:void(0)" onclick="smoothTo('about')">About</a>
+    <a href="javascript:void(0)" onclick="smoothTo('contact')">Contact</a>
+  </div>
+  <a href="mailto:admin@partywithqr.com" class="nav-cta">Let's connect</a>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-bg-text">KCS</div>
+  <div class="hero-location">Seaside, California</div>
+  <h1 class="hero-headline">
+    Klaus<br/>
+    <span class="accent">Custom</span><br/>
+    Studio
+  </h1>
+  <p class="hero-sub">Mobile apps for real communities. Built solo — no investors, no team, no shortcuts.</p>
+  <div class="hero-stats">
+    <div>
+      <div class="hero-stat-num">4</div>
+      <div class="hero-stat-label">Apps Built</div>
+    </div>
+    <div>
+      <div class="hero-stat-num">2</div>
+      <div class="hero-stat-label">Stores Live</div>
+    </div>
+    <div>
+      <div class="hero-stat-num">1</div>
+      <div class="hero-stat-label">Builder</div>
+    </div>
+  </div>
+  <div class="hero-scroll" onclick="smoothTo('apps')" style="cursor:pointer">Scroll</div>
+</section>
+
+<!-- APPS -->
+<section class="section" id="apps">
+  <div class="section-label">What I Build</div>
+  <h2 class="section-title">Real apps. Real communities. Shipped.</h2>
+
+  <div class="apps-grid">
+
+    <!-- QR PARTY -->
+    <div class="app-card purple reveal">
+      <div class="app-card-bg">QR</div>
+      <div class="app-num">01</div>
+      <div class="app-status">
+        <div class="status-dot live"></div>
+        <span style="color:#3CB371">Live — Android &amp; iOS coming</span>
+      </div>
+      <div class="app-name">QR Party</div>
+      <div class="app-desc">Event RSVP via QR code. Hosts create an event, generate a code, guests scan to RSVP — no app download required. Real-time headcount for hosts. Built for local businesses, PTAs, and community events.</div>
+      <div class="app-tags">
+        <span class="app-tag">Flutter</span>
+        <span class="app-tag">Firebase</span>
+        <span class="app-tag">Stripe</span>
+        <span class="app-tag">Event Management</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <a href="https://play.google.com/store/apps/details?id=com.qrparty.app" target="_blank" class="app-link" style="--card-accent: var(--purple)">Play Store ↗</a>
+        <button class="demo-btn" onclick="openDemo('qrparty')" style="--card-accent:var(--purple)">View Demo</button>
+      </div>
+    </div>
+
+    <!-- WRENCH MARKET -->
+    <div class="app-card orange reveal" style="transition-delay:0.1s">
+      <div class="app-card-bg">WM</div>
+      <div class="app-num">02</div>
+      <div class="app-status">
+        <div class="status-dot dev"></div>
+        <span style="color:var(--amber)">In Development · 60% complete</span>
+      </div>
+      <div class="app-name">Wrench Market</div>
+      <div class="app-desc">Two-sided automotive repair marketplace for Monterey County. Customers post jobs, verified mechanics bid, escrow protects both sides. AI-generated BAR-compliant service documents. Background-checked techs only.</div>
+      <div class="app-tags">
+        <span class="app-tag">Flutter</span>
+        <span class="app-tag">Firebase</span>
+        <span class="app-tag">Stripe Connect</span>
+        <span class="app-tag">Automotive</span>
+      </div>
+      <button class="demo-btn" onclick="openDemo('wrench')" style="--card-accent:var(--orange)">View Demo</button>
+    </div>
+
+    <!-- ROLLCALL -->
+    <div class="app-card rust reveal" style="transition-delay:0.2s">
+      <div class="app-card-bg">RC</div>
+      <div class="app-num">03</div>
+      <div class="app-status">
+        <div class="status-dot dev"></div>
+        <span style="color:var(--amber)">In Development</span>
+      </div>
+      <div class="app-name">RollCall</div>
+      <div class="app-desc">Ride coordination for the OHV community. Dirt bike, ATV, side-by-side, and 4x4 riders post rides on a live feed. Nearby riders join with one tap. Replaces chaotic Facebook group coordination with something purpose-built.</div>
+      <div class="app-tags">
+        <span class="app-tag">Flutter</span>
+        <span class="app-tag">Supabase</span>
+        <span class="app-tag">Real-time</span>
+        <span class="app-tag">OHV Community</span>
+      </div>
+      <button class="demo-btn" onclick="openDemo('rollcall')" style="--card-accent:var(--rust)">View Demo</button>
+    </div>
+
+    <!-- SCAFFOLD -->
+    <div class="app-card amber reveal" style="transition-delay:0.3s">
+      <div class="app-card-bg">SC</div>
+      <div class="app-num">04</div>
+      <div class="app-status">
+        <div class="status-dot dev"></div>
+        <span style="color:var(--amber)">In Development</span>
+      </div>
+      <div class="app-name">Scaffold</div>
+      <div class="app-desc">The tool I built to build my other tools. Input an app concept, get back a complete build pack — screen map, data model, stack decisions, and Claude Code prompts for every screen. Built from the methodology I learned shipping real apps.</div>
+      <div class="app-tags">
+        <span class="app-tag">Developer Tool</span>
+        <span class="app-tag">AI-Powered</span>
+        <span class="app-tag">Claude API</span>
+        <span class="app-tag">Build Methodology</span>
+      </div>
+      <button class="demo-btn" onclick="openDemo('scaffold')" style="--card-accent:var(--amber)">View Demo</button>
+    </div>
+
+  </div>
+</section>
+
+<!-- ABOUT -->
+<section class="section section-alt" id="about">
+  <div class="section-label">The Builder</div>
+  <h2 class="section-title">One person. One laptop. Four real products.</h2>
+
+  <div class="about-grid">
+    <div class="about-text reveal">
+      <p>I'm Chris — a solo app developer based in <strong>Seaside, CA</strong>, building under Klaus Custom Studio. No investors, no VC, no team. Just a dad with a laptop, a methodology that works, and a habit of shipping things that actually solve problems in the communities I live in.</p>
+
+      <div class="highlight">"I don't build apps for the App Store. I build tools for the brewery down the street, the PTA across town, the riders at the trailhead."</div>
+
+      <p>Every app I build starts with a real problem I've seen up close. QR Party came from watching event hosts manage RSVPs in group texts. Wrench Market came from the chaos of finding a trustworthy mechanic. RollCall came from the mess of coordinating OHV rides on Facebook.</p>
+
+      <p>I build fast using <strong>Flutter, Firebase, and AI-assisted development</strong> — and I've turned that process into its own product called Scaffold, so other developers can build the same way.</p>
+    </div>
+
+    <div class="about-facts reveal" style="transition-delay:0.15s">
+      <div class="about-fact">
+        <div class="about-fact-label">Location</div>
+        <div class="about-fact-value">Seaside, California
+          <div class="sub">Monterey Peninsula</div>
+        </div>
+      </div>
+      <div class="about-fact">
+        <div class="about-fact-label">Stack</div>
+        <div class="about-fact-value">Flutter · Firebase · Supabase
+          <div class="sub">Claude API · Stripe · Go Router</div>
+        </div>
+      </div>
+      <div class="about-fact">
+        <div class="about-fact-label">Business</div>
+        <div class="about-fact-value">QR Party LLC
+          <div class="sub">California · Est. 2025</div>
+        </div>
+      </div>
+      <div class="about-fact">
+        <div class="about-fact-label">Focus</div>
+        <div class="about-fact-value">Local communities
+          <div class="sub">Small businesses · Events · Trades</div>
+        </div>
+      </div>
+      <div class="about-fact">
+        <div class="about-fact-label">Approach</div>
+        <div class="about-fact-value">Ship fast. Iterate in public.
+          <div class="sub">Build the methodology. Then ship that too.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCAFFOLD TEASER -->
+  <div class="scaffold-block reveal">
+    <div class="scaffold-label">Coming Soon</div>
+    <div class="scaffold-title">The tool that builds the <span>tools</span>.</div>
+    <div class="scaffold-desc">Scaffold turns an app concept into a complete build pack — screen map, data model, tech stack decisions, and AI prompts for every screen — in minutes. Built from the methodology I used to ship QR Party, Wrench Market, and RollCall.</div>
+    <div class="scaffold-badge">
+      <span style="width:6px;height:6px;border-radius:50%;background:var(--amber-light)"></span>
+      In development · Beginner, Intermediate, and Expert modes
+    </div>
+  </div>
+</section>
+
+<!-- CONTACT -->
+<section class="contact-block" id="contact">
+  <div class="section-label" style="justify-content:center">Get in Touch</div>
+  <h2 class="contact-title">Let's<br/><span>connect.</span></h2>
+  <p class="contact-sub">Whether you're a local business, a developer, or just curious — I'm always happy to talk.</p>
+  <a href="mailto:admin@partywithqr.com" class="contact-email">
+    admin@partywithqr.com ↗
+  </a>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-logo">Klaus <span>Custom</span> Studio</div>
+  <div class="footer-copy">© 2026 QR Party LLC · Seaside, CA · Built solo.</div>
+</footer>
+
+<script>
+// Smooth scroll helper — works inside iframes and locally
+function smoothTo(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const offset = 60;
+  const top = el.getBoundingClientRect().top + window.pageYOffset - offset;
+  window.scrollTo({ top: top, behavior: 'smooth' });
+}
+
+// Nav scroll effect
+const nav = document.getElementById('nav');
+window.addEventListener('scroll', () => {
+  nav.classList.toggle('scrolled', window.scrollY > 40);
+}, { passive: true });
+
+
+var DEMOS = {
+  qrparty: {
+    title: 'QR Party',
+    screens: [
+      { label: 'Home — Your Events', html: '<div class="sb" style="background:#1A1228"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#1A1228"><div class="abar-t" style="font-family:\'Playfair Display\',serif;font-size:20px;color:#C8A8F0">QR Party</div><div style="font-size:18px">&#128100;</div></div><div class="sbody" style="background:#1A1228"><div class="slbl">Your Events</div><div class="crow"><div style="font-size:22px">&#127881;</div><div class="ct"><div class="ct-t">PGMS Spring Gala</div><div class="ct-s">Sat May 20 &middot; 6:00 PM</div></div><div style="text-align:right"><div style="font-size:17px;font-weight:700;color:#C8A8F0">42</div><div style="font-size:9px;color:rgba(255,255,255,0.3)">guests</div></div></div><div class="crow"><div style="font-size:22px">&#127866;</div><div class="ct"><div class="ct-t">Alvarado Tap Night</div><div class="ct-s">Fri May 31 &middot; 7:00 PM</div></div><div style="text-align:right"><div style="font-size:17px;font-weight:700;color:#C8A8F0">17</div><div style="font-size:9px;color:rgba(255,255,255,0.3)">guests</div></div></div><div class="crow" style="opacity:.4"><div style="font-size:22px">&#127874;</div><div class="ct"><div class="ct-t">Birthday Bash</div><div class="ct-s">Apr 12 &middot; Ended</div></div><div style="text-align:right"><div style="font-size:17px;font-weight:700;color:#C8A8F0">63</div></div></div><div class="ctab" style="background:#7B5EA7;margin-top:2px">+ Create Event</div></div><div class="bnav" style="background:#1A1228"><div class="bni"><div class="bni-ic">&#127881;</div><span style="color:#C8A8F0">Events</span></div><div class="bni"><div class="bni-ic">&#128202;</div><span style="color:rgba(255,255,255,0.3)">Stats</span></div><div class="bni"><div class="bni-ic">&#128100;</div><span style="color:rgba(255,255,255,0.3)">Profile</span></div></div>' },
+      { label: 'Your QR Code', html: '<div class="sb" style="background:#1A1228"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#1A1228"><div style="font-size:18px;color:rgba(255,255,255,0.4)">&#8592;</div><div class="abar-t">PGMS Spring Gala</div><div style="font-size:18px">&#128228;</div></div><div class="sbody" style="background:#1A1228;align-items:center;justify-content:center;gap:14px"><div style="font-size:11px;color:rgba(255,255,255,0.35);text-align:center">Share this QR code with your guests</div><div style="background:white;border-radius:14px;padding:18px"><svg width="130" height="130" viewBox="0 0 140 140"><rect width="140" height="140" fill="white"/><rect x="10" y="10" width="40" height="40" fill="#7B5EA7" rx="4"/><rect x="14" y="14" width="32" height="32" fill="white" rx="2"/><rect x="18" y="18" width="24" height="24" fill="#7B5EA7" rx="2"/><rect x="90" y="10" width="40" height="40" fill="#7B5EA7" rx="4"/><rect x="94" y="14" width="32" height="32" fill="white" rx="2"/><rect x="98" y="18" width="24" height="24" fill="#7B5EA7" rx="2"/><rect x="10" y="90" width="40" height="40" fill="#7B5EA7" rx="4"/><rect x="14" y="94" width="32" height="32" fill="white" rx="2"/><rect x="18" y="98" width="24" height="24" fill="#7B5EA7" rx="2"/><rect x="58" y="10" width="8" height="8" fill="#333"/><rect x="70" y="10" width="8" height="8" fill="#333"/><rect x="58" y="22" width="8" height="8" fill="#333"/><rect x="70" y="22" width="8" height="8" fill="#333"/><rect x="58" y="58" width="8" height="8" fill="#333"/><rect x="70" y="58" width="8" height="8" fill="#333"/><rect x="82" y="58" width="8" height="8" fill="#333"/><rect x="94" y="58" width="8" height="8" fill="#333"/><rect x="58" y="70" width="8" height="8" fill="#333"/><rect x="94" y="70" width="8" height="8" fill="#333"/><rect x="106" y="70" width="8" height="8" fill="#333"/><rect x="70" y="82" width="8" height="8" fill="#333"/><rect x="82" y="82" width="8" height="8" fill="#333"/><rect x="94" y="94" width="8" height="8" fill="#333"/><rect x="118" y="82" width="8" height="8" fill="#333"/><rect x="106" y="94" width="8" height="8" fill="#333"/><rect x="58" y="94" width="8" height="8" fill="#333"/><rect x="70" y="106" width="8" height="8" fill="#333"/><rect x="118" y="106" width="8" height="8" fill="#333"/></svg></div><div style="font-size:10px;color:rgba(255,255,255,0.3);text-align:center">partywithqr.com/rsvp/PGMS24</div><div class="ctab" style="background:#7B5EA7;width:100%">&#128228; Share QR Code</div></div>' },
+      { label: 'Live Headcount', html: '<div class="sb" style="background:#1A1228"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#1A1228"><div style="font-size:18px;color:rgba(255,255,255,0.4)">&#8592;</div><div class="abar-t">PGMS Spring Gala</div></div><div class="sbody" style="background:#1A1228"><div style="background:linear-gradient(135deg,#2D1B5E,#3D2478);border-radius:12px;padding:18px;text-align:center;margin-bottom:6px"><div style="font-size:10px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">Live RSVPs</div><div class="bnum" style="font-size:64px;color:#C8A8F0">42</div><div style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:4px">guests confirmed</div><div style="width:32px;height:2px;background:#C8A8F0;margin:8px auto 0;border-radius:1px"></div></div><div class="slbl" style="margin-top:4px">Recent RSVPs</div><div class="crow"><div style="font-size:16px">&#128100;</div><div class="ct"><div class="ct-t">Sarah M.</div><div class="ct-s">Just now</div></div></div><div class="crow"><div style="font-size:16px">&#128100;</div><div class="ct"><div class="ct-t">James T.</div><div class="ct-s">2 min ago</div></div></div><div class="crow"><div style="font-size:16px">&#128100;</div><div class="ct"><div class="ct-t">Maria L.</div><div class="ct-s">5 min ago</div></div></div></div>' },
+      { label: 'Guest RSVP — No App Needed', html: '<div class="sb" style="background:#0F0D1A"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div style="background:#0F0D1A;padding:10px 14px 6px;text-align:center"><div style="font-size:10px;color:#C8A8F0;font-weight:700;letter-spacing:0.15em;text-transform:uppercase">QR Party</div></div><div class="sbody" style="background:#0F0D1A;gap:10px"><div style="text-align:center;padding:6px 0"><div style="font-size:22px;margin-bottom:6px">&#127881;</div><div style="font-size:16px;font-weight:700;color:white;font-family:\'Playfair Display\',serif">PGMS Spring Gala</div><div style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:3px">Saturday, May 20 &middot; 6:00 PM</div></div><div style="height:1px;background:rgba(255,255,255,0.07)"></div><div style="font-size:12px;font-weight:600;color:white">Your name</div><div class="inp" style="color:white">Chris Klaus</div><div class="ctab" style="background:#7B5EA7;margin-top:6px">I\'m Coming! &#127881;</div><div style="font-size:10px;color:rgba(255,255,255,0.2);text-align:center">No account needed. No app to download.</div></div>' }
+    ]
+  },
+  wrench: {
+    title: 'Wrench Market',
+    screens: [
+      { label: 'Customer Home', html: '<div class="sb" style="background:#120A04"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#120A04"><div class="abar-t" style="font-family:\'Playfair Display\',serif;font-size:19px">Wrench Market</div><div style="font-size:18px">&#128276;</div></div><div class="sbody" style="background:#120A04"><div style="background:linear-gradient(135deg,#2A1208,#3A1A08);border-radius:12px;padding:16px;text-align:center;margin-bottom:4px"><div style="font-size:12px;color:rgba(255,255,255,0.4);margin-bottom:8px">Need a repair?</div><div class="ctab" style="background:#C8520A;font-size:15px">POST A JOB</div></div><div class="slbl" style="margin-top:2px">Active Jobs</div><div class="crow" style="border-left:3px solid #C8520A"><div style="font-size:19px">&#128295;</div><div class="ct"><div class="ct-t">2019 Honda Civic &mdash; Brakes</div><div class="ct-s">Tech en route &middot; ETA 12 min</div></div><span class="pb" style="background:rgba(200,82,10,0.2);color:#C8520A">IN PROG</span></div><div class="slbl" style="margin-top:2px">My Vehicles</div><div class="crow"><div style="font-size:19px">&#128663;</div><div class="ct"><div class="ct-t">2019 Honda Civic</div><div class="ct-s">62,400 mi</div></div></div></div><div class="bnav" style="background:#120A04"><div class="bni"><div class="bni-ic">&#127968;</div><span style="color:#C8520A">Home</span></div><div class="bni"><div class="bni-ic">&#128203;</div><span style="color:rgba(255,255,255,0.3)">Jobs</span></div><div class="bni"><div class="bni-ic">&#128663;</div><span style="color:rgba(255,255,255,0.3)">Garage</span></div><div class="bni"><div class="bni-ic">&#128100;</div><span style="color:rgba(255,255,255,0.3)">Profile</span></div></div>' },
+      { label: 'Tech Dashboard', html: '<div class="sb" style="background:#081208"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#081208"><div class="abar-t" style="font-family:\'Playfair Display\',serif;font-size:19px">Wrench Market</div><span class="pb" style="background:rgba(46,204,113,0.15);color:#2ECC71;padding:4px 10px;border-radius:12px;font-size:10px">ONLINE</span></div><div class="sbody" style="background:#081208"><div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:4px"><div style="background:rgba(46,204,113,0.09);border:1px solid rgba(46,204,113,0.18);border-radius:9px;padding:10px;text-align:center"><div style="font-size:22px;font-weight:700;color:#2ECC71;font-family:\'Playfair Display\',serif">$847</div><div style="font-size:9px;color:rgba(255,255,255,0.3);text-transform:uppercase;letter-spacing:0.05em">This Week</div></div><div style="background:rgba(200,82,10,0.09);border:1px solid rgba(200,82,10,0.18);border-radius:9px;padding:10px;text-align:center"><div style="font-size:22px;font-weight:700;color:#C8520A;font-family:\'Playfair Display\',serif">4.9&#9733;</div><div style="font-size:9px;color:rgba(255,255,255,0.3);text-transform:uppercase;letter-spacing:0.05em">Rating</div></div></div><div class="slbl">New Jobs Near You</div><div class="crow" style="border-left:3px solid #2ECC71"><div style="font-size:18px">&#128665;</div><div class="ct"><div class="ct-t">2021 RAV4 &mdash; AC Repair</div><div class="ct-s">1.2 mi &middot; 4 min ago</div></div><div class="ctab" style="background:#2ECC71;font-size:10px;padding:5px 9px;border-radius:6px">BID</div></div><div class="crow"><div style="font-size:18px">&#128653;</div><div class="ct"><div class="ct-t">2018 Sprinter &mdash; Oil Change</div><div class="ct-s">0.8 mi &middot; 9 min ago</div></div><div class="ctab" style="background:#2ECC71;font-size:10px;padding:5px 9px;border-radius:6px">BID</div></div></div><div class="bnav" style="background:#081208"><div class="bni"><div class="bni-ic">&#127968;</div><span style="color:#2ECC71">Home</span></div><div class="bni"><div class="bni-ic">&#128203;</div><span style="color:rgba(255,255,255,0.3)">Jobs</span></div><div class="bni"><div class="bni-ic">&#11088;</div><span style="color:rgba(255,255,255,0.3)">Reviews</span></div><div class="bni"><div class="bni-ic">&#128100;</div><span style="color:rgba(255,255,255,0.3)">Profile</span></div></div>' },
+      { label: 'Job Tracker', html: '<div class="sb" style="background:#120A04"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#120A04"><div style="font-size:18px;color:rgba(255,255,255,0.4)">&#8592;</div><div class="abar-t">Job Tracker</div></div><div class="sbody" style="background:#120A04;gap:8px"><div class="crow"><div style="font-size:18px">&#128119;</div><div class="ct"><div class="ct-t">Marcus R.</div><div class="ct-s">&#9733;&#9733;&#9733;&#9733;&#9733; Level 3 Tech &middot; ETA 12 min</div></div></div><div style="background:rgba(200,82,10,0.09);border:1px solid rgba(200,82,10,0.18);border-radius:10px;padding:10px"><div style="font-size:9px;color:rgba(255,255,255,0.3);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:7px">Job Status</div><div style="display:flex;align-items:center;gap:7px;padding:3px 0"><div style="width:7px;height:7px;border-radius:50%;background:#C8520A"></div><div style="font-size:11px;color:white">Posted &#10003;</div></div><div style="display:flex;align-items:center;gap:7px;padding:3px 0"><div style="width:7px;height:7px;border-radius:50%;background:#C8520A"></div><div style="font-size:11px;color:white">Bid Accepted &#10003;</div></div><div style="display:flex;align-items:center;gap:7px;padding:3px 0"><div style="width:7px;height:7px;border-radius:50%;background:#C8520A"></div><div style="font-size:11px;color:white">Tech En Route &#10003;</div></div><div style="display:flex;align-items:center;gap:7px;padding:3px 0"><div style="width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,0.15)"></div><div style="font-size:11px;color:rgba(255,255,255,0.3)">In Progress</div></div><div style="display:flex;align-items:center;gap:7px;padding:3px 0"><div style="width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,0.15)"></div><div style="font-size:11px;color:rgba(255,255,255,0.3)">Complete</div></div></div><div style="background:rgba(255,255,255,0.04);border-radius:9px;padding:10px;display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:10px;color:rgba(255,255,255,0.35)">Escrow held</div><div style="font-size:17px;font-weight:700;color:white">$95.00</div></div><span class="pb" style="background:rgba(200,82,10,0.2);color:#C8520A;padding:4px 10px;border-radius:12px">SECURED</span></div></div>' }
+    ]
+  },
+  rollcall: {
+    title: 'RollCall',
+    screens: [
+      { label: 'Ride Feed', html: '<div class="sb" style="background:#111009"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#111009"><div class="abar-t" style="font-family:\'Playfair Display\',serif;font-size:20px">RollCall</div><div style="font-size:18px">&#128276;</div></div><div style="background:#111009;padding:0 12px 8px;display:flex;gap:5px;flex-shrink:0"><span style="background:rgba(196,92,26,0.3);color:#E8A857;padding:4px 10px;border-radius:20px;font-size:10px;font-weight:700;white-space:nowrap">All</span><span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.35);padding:4px 10px;border-radius:20px;font-size:10px;font-weight:700;white-space:nowrap">&#128693; Dirt</span><span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.35);padding:4px 10px;border-radius:20px;font-size:10px;font-weight:700;white-space:nowrap">&#128698; ATV</span><span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.35);padding:4px 10px;border-radius:20px;font-size:10px;font-weight:700;white-space:nowrap">4x4</span></div><div class="sbody" style="background:#111009;gap:7px;padding-top:2px"><div style="border-left:3px solid #c45c1a;background:#1e1608;border-radius:9px;padding:10px 10px 10px 12px"><div style="display:flex;align-items:center;gap:6px;margin-bottom:5px"><span style="font-size:20px">&#128693;</span><span class="pb" style="background:rgba(74,124,63,0.2);color:#4a7c3f;padding:2px 8px;border-radius:20px">Beginner</span></div><div style="font-size:16px;font-weight:700;color:#f0e8d8;font-family:\'Playfair Display\',serif;line-height:1">Hollister Hills SVRA</div><div style="display:flex;justify-content:space-between;margin-top:6px"><div style="font-size:10px;color:#9a8870">SAT JUN 14 &middot; 8:00 AM</div><div style="font-size:10px;color:#9a8870">5 Riders In</div></div></div><div style="border-left:3px solid #c45c1a;background:#1e1608;border-radius:9px;padding:10px 10px 10px 12px"><div style="display:flex;align-items:center;gap:6px;margin-bottom:5px"><span style="font-size:20px">&#128665;</span><span class="pb" style="background:rgba(200,130,10,0.2);color:#e8a857;padding:2px 8px;border-radius:20px">Intermediate</span></div><div style="font-size:16px;font-weight:700;color:#f0e8d8;font-family:\'Playfair Display\',serif;line-height:1">Dumont Dunes OHV</div><div style="display:flex;justify-content:space-between;margin-top:6px"><div style="font-size:10px;color:#9a8870">SUN JUN 22 &middot; 7:00 AM</div><div style="font-size:10px;color:#9a8870">3 Riders In</div></div></div></div><div style="position:absolute;bottom:58px;left:50%;transform:translateX(-50%)"><div class="ctab" style="background:#c45c1a;padding:10px 20px;border-radius:22px;font-size:12px;white-space:nowrap;box-shadow:0 6px 20px rgba(196,92,26,0.4)">&#65291; Post a Ride</div></div><div class="bnav" style="background:#111009"><div class="bni"><div class="bni-ic">&#128693;</div><span style="color:#c45c1a">Rides</span></div><div class="bni"><div class="bni-ic">&#128100;</div><span style="color:rgba(255,255,255,0.3)">Profile</span></div></div>' },
+      { label: 'Ride Detail — Live Count', html: '<div class="sb" style="background:#111009"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#111009"><div style="font-size:18px;color:rgba(255,255,255,0.4)">&#8592;</div><div class="abar-t">Hollister Hills</div></div><div class="sbody" style="background:#111009"><div style="display:flex;align-items:center;gap:8px;padding:2px 0"><span style="font-size:26px">&#128693;</span><div><div style="font-size:16px;font-weight:700;color:#f0e8d8;font-family:\'Playfair Display\',serif">Hollister Hills SVRA</div><div style="font-size:10px;color:#9a8870;margin-top:2px">SAT JUN 14 &middot; 8:00 AM &middot; Beginner</div></div></div><div style="height:1px;background:rgba(255,255,255,0.07);margin:6px 0"></div><div style="background:linear-gradient(135deg,#2A1208,#3A1A08);border-radius:11px;padding:14px;text-align:center"><div style="font-size:10px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px">Live Riders In</div><div class="bnum" style="font-size:50px;color:#e8a857">5</div></div><div class="crow"><div style="font-size:16px">&#128693;</div><div class="ct"><div class="ct-t">Mike D. &mdash; Poster</div><div class="ct-s">Intermediate</div></div></div><div class="crow"><div style="font-size:16px">&#128693;</div><div class="ct"><div class="ct-t">Sarah K.</div><div class="ct-s">Joined 4 min ago</div></div></div><div class="ctab" style="background:#c45c1a;margin-top:4px">I\'m In &#129304;</div></div>' },
+      { label: 'Post a Ride', html: '<div class="sb" style="background:#111009"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#111009"><div style="font-size:18px;color:rgba(255,255,255,0.4)">&#10005;</div><div class="abar-t">Post a Ride</div></div><div class="sbody" style="background:#111009;gap:8px"><div class="slbl">Trail / Area</div><div class="inp" style="color:#f0e8d8">Hollister Hills SVRA</div><div class="slbl">Vehicle Type</div><div style="display:flex;gap:5px;flex-wrap:wrap"><span style="background:rgba(196,92,26,0.3);color:#e8a857;padding:5px 10px;border-radius:20px;font-size:11px;font-weight:700">&#128693; Dirt</span><span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.3);padding:5px 10px;border-radius:20px;font-size:11px;font-weight:700">&#128698; ATV</span><span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.3);padding:5px 10px;border-radius:20px;font-size:11px;font-weight:700">&#128665; SxS</span><span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.3);padding:5px 10px;border-radius:20px;font-size:11px;font-weight:700">&#127956; 4x4</span></div><div class="slbl">Skill Level</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;border-radius:7px;overflow:hidden;border:1px solid rgba(255,255,255,0.08)"><div style="padding:7px;text-align:center;background:rgba(255,255,255,0.04);font-size:10px;color:rgba(255,255,255,0.3)">Beginner</div><div style="padding:7px;text-align:center;background:#c45c1a;font-size:10px;color:white;font-weight:700">Intermediate</div><div style="padding:7px;text-align:center;background:rgba(255,255,255,0.04);font-size:10px;color:rgba(255,255,255,0.3)">Advanced</div></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:7px"><div><div class="slbl">Date</div><div class="inp" style="color:#f0e8d8">Jun 14, 2026</div></div><div><div class="slbl">Meet Time</div><div class="inp" style="color:#f0e8d8">8:00 AM</div></div></div><div class="ctab" style="background:#c45c1a;margin-top:2px">POST RIDE</div></div>' }
+    ]
+  },
+  scaffold: {
+    title: 'Scaffold',
+    screens: [
+      { label: 'Intake Form', html: '<div class="sb" style="background:#09090B"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#09090B"><div style="color:#F0B429;font-size:12px;font-weight:700;letter-spacing:0.18em">SCAFFOLD</div></div><div class="sbody" style="background:#09090B;gap:9px;padding-top:2px"><div style="font-size:14px;font-weight:700;color:white;font-family:\'Playfair Display\',serif;line-height:1.2">Turn your idea<br/>into a build pack.</div><div style="font-size:11px;color:#555;line-height:1.5;margin-bottom:2px">5 questions. Full structured pack.<br/>Screens, stack, data model, prompts.</div><div class="slbl" style="color:#F0B429">01 &#8212; App Concept *</div><div class="inp" style="color:rgba(255,255,255,0.6);font-size:11px;line-height:1.5">Event RSVP app where hosts create events and generate QR codes. Guests scan to RSVP instantly...</div><div class="slbl" style="color:#F0B429">02 &#8212; Platform</div><div class="inp" style="color:#E8E4DC;font-size:12px">iOS and Android</div><div class="slbl" style="color:#F0B429">06 &#8212; Skill Level</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;border-radius:7px;overflow:hidden;border:1px solid rgba(240,180,41,0.18)"><div style="padding:7px;text-align:center;background:rgba(255,255,255,0.03);font-size:9px;color:rgba(255,255,255,0.3)">Beginner</div><div style="padding:7px;text-align:center;background:#F0B429;font-size:9px;color:#09090B;font-weight:700">Intermediate</div><div style="padding:7px;text-align:center;background:rgba(255,255,255,0.03);font-size:9px;color:rgba(255,255,255,0.3)">Expert</div></div><div class="ctab" style="background:#F0B429;color:#09090B;margin-top:2px">Generate Build Pack &#8594;</div></div>' },
+      { label: 'Generated Build Pack', html: '<div class="sb" style="background:#09090B"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div style="background:#09090B;padding:6px 12px;border-bottom:1px solid #1E1E2A;display:flex;align-items:center;justify-content:space-between;flex-shrink:0"><div style="color:#F0B429;font-size:11px;font-weight:700;letter-spacing:0.15em">SCAFFOLD</div><div style="font-size:10px;color:#555">Prompts: <span style="color:#F0B429">0/14</span></div></div><div class="sbody" style="background:#09090B;gap:5px;padding-top:8px"><div style="font-size:9px;color:#F0B429;text-transform:uppercase;letter-spacing:0.15em;margin-bottom:1px">QR Party &#183; Build Pack</div><div style="font-size:15px;font-weight:700;color:white;font-family:\'Playfair Display\',serif;line-height:1">QR Party</div><div style="font-size:10px;color:#555;margin-bottom:5px">Flutter 3.41.7 &#183; Firebase &#183; Intermediate</div><div style="height:1px;background:#1E1E2A;margin-bottom:5px"></div><div style="font-size:8px;color:#F0B429;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">Prompt Pack &#8212; 14 prompts</div><div style="background:#0f0f13;border:1px solid #1E1E2A;border-radius:5px;padding:7px 9px;display:flex;align-items:center;gap:7px"><div style="width:14px;height:14px;border-radius:3px;border:1.5px solid #2a2a2a;flex-shrink:0"></div><span style="font-size:9px;color:#555;min-width:18px">#01</span><span style="font-size:11px;color:#E8E4DC;flex:1">Flutter Project Setup</span><span style="font-size:8px;padding:1px 6px;border-radius:2px;background:#1a2535;color:#4B9EFF;font-weight:700">SETUP</span></div><div style="background:#0f0f13;border:1px solid #1E1E2A;border-radius:5px;padding:7px 9px;display:flex;align-items:center;gap:7px"><div style="width:14px;height:14px;border-radius:3px;border:1.5px solid #2a2a2a;flex-shrink:0"></div><span style="font-size:9px;color:#555;min-width:18px">#02</span><span style="font-size:11px;color:#E8E4DC;flex:1">AppColors &amp; Theme</span><span style="font-size:8px;padding:1px 6px;border-radius:2px;background:#251a35;color:#B47FFF;font-weight:700">THEME</span></div><div style="background:#0f0f13;border:1px solid #1E1E2A;border-radius:5px;padding:7px 9px;display:flex;align-items:center;gap:7px"><div style="width:14px;height:14px;border-radius:3px;border:1.5px solid #2a2a2a;flex-shrink:0"></div><span style="font-size:9px;color:#555;min-width:18px">#03</span><span style="font-size:11px;color:#E8E4DC;flex:1">Firestore Schema</span><span style="font-size:8px;padding:1px 6px;border-radius:2px;background:#1a2520;color:#52C78B;font-weight:700">DATABASE</span></div><div style="background:#0f0f13;border:1px solid #1E1E2A;border-radius:5px;padding:7px 9px;display:flex;align-items:center;gap:7px"><div style="width:14px;height:14px;border-radius:3px;border:1.5px solid #2a2a2a;flex-shrink:0"></div><span style="font-size:9px;color:#555;min-width:18px">#04</span><span style="font-size:11px;color:#E8E4DC;flex:1">Data Models</span><span style="font-size:8px;padding:1px 6px;border-radius:2px;background:#1a2520;color:#52C78B;font-weight:700">MODEL</span></div></div>' },
+      { label: 'Prompt — Copy and Build', html: '<div class="sb" style="background:#09090B"><span class="sb-t">9:41</span><span class="sb-i">&#9679;&#9679;&#9679; 100%</span></div><div class="abar" style="background:#09090B"><div style="font-size:18px;color:rgba(255,255,255,0.4)">&#8592;</div><div class="abar-t" style="font-size:13px">#02 AppColors &amp; Theme</div><span style="font-size:8px;padding:1px 6px;border-radius:2px;background:#251a35;color:#B47FFF;font-weight:700">THEME</span></div><div class="sbody" style="background:#09090B;gap:7px;padding-top:6px"><div style="font-size:8px;color:#F0B42980;text-transform:uppercase;letter-spacing:0.1em">Context</div><div style="background:#0f0f13;border:1px solid #131313;border-radius:5px;padding:8px;font-size:9px;color:#444;line-height:1.6">App: QR Party &#183; Flutter 3.41.7 &#183; Firebase&#10;Stack: google_fonts&#10;Context: Project init. Theme before any UI.&#10;Rule: Always use AppColors &mdash; never hex.</div><div style="font-size:8px;color:#F0B42980;text-transform:uppercase;letter-spacing:0.1em">Prompt</div><div style="background:#0f0f13;border:1px solid #131313;border-radius:5px;padding:8px;font-size:9px;color:#777;line-height:1.6;flex:1">Create lib/core/theme/app_theme.dart and app_colors.dart.&#10;&#10;AppColors: background #0F0D1A, purple #9C7FD4, gold #C8922A, fg #E8E4F0...&#10;&#10;Fonts: Fredoka One for display, Nunito for body.&#10;&#10;Apply globally in app.dart.</div><div style="font-size:10px;color:#F0B429;padding:5px 8px;background:#1a1200;border:1px solid #2a2000;border-radius:4px">Do not build any screens yet.</div><div class="ctab" style="background:#0f0f13;border:1px solid #1E1E2A;color:#52C78B;font-size:12px">&#10003; Copied to clipboard</div></div>' }
+    ]
+  }
+};
+
+var curApp = null;
+var curScreen = 0;
+
+function openDemo(id) {
+  curApp = id;
+  curScreen = 0;
+  var d = DEMOS[id];
+  document.getElementById('demo-title').textContent = d.title;
+  var wrap = document.getElementById('screen-wrap');
+  wrap.innerHTML = d.screens.map(function(s,i){ return '<div class="screen-slide' + (i===0?' active':'') + '">' + s.html + '</div>'; }).join('');
+  updNav(d);
+  document.getElementById('demo-overlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function updNav(d) {
+  var dots = document.getElementById('nav-dots');
+  dots.innerHTML = d.screens.map(function(_,i){ return '<div class="nav-dot' + (i===curScreen?' active':'') + '"></div>'; }).join('');
+  document.getElementById('screen-lbl').textContent = d.screens[curScreen].label;
+  document.getElementById('btn-prev').disabled = curScreen === 0;
+  document.getElementById('btn-next').disabled = curScreen === d.screens.length - 1;
+}
+
+function chg(dir) {
+  if (!curApp) return;
+  var d = DEMOS[curApp];
+  var next = curScreen + dir;
+  if (next < 0 || next >= d.screens.length) return;
+  var slides = document.querySelectorAll('.screen-slide');
+  slides[curScreen].classList.remove('active');
+  curScreen = next;
+  slides[curScreen].classList.add('active');
+  updNav(d);
+}
+
+function closeDemo() {
+  document.getElementById('demo-overlay').classList.remove('open');
+  document.body.style.overflow = '';
+  curApp = null;
+  curScreen = 0;
+}
+
+document.addEventListener('keydown', function(e) {
+  if (!curApp) return;
+  if (e.key === 'ArrowRight') chg(1);
+  if (e.key === 'ArrowLeft') chg(-1);
+  if (e.key === 'Escape') closeDemo();
+});
+
+// Reveal on scroll
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      e.target.classList.add('visible');
+      observer.unobserve(e.target);
+    }
+  });
+}, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+</script>
+
+</body>
+</html>

@@ -10,7 +10,7 @@ import 'order_status_screen.dart';
 import '../services/empty_events_cleanup.dart';
 
 // Flip to `false` to re-enable real purchases.
-const bool kTestingMode = true;
+const bool kTestingMode = false;
 
 // ── Theme palette ──────────────────────────────────────────────
 const _bgDark      = Color(0xFF2D3047);
@@ -253,13 +253,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _card([
               ValueListenableBuilder<ThemeMode>(
                 valueListenable: ThemeNotifier.instance,
-                builder: (context, mode, _) => _toggleTile(
-                  mode == ThemeMode.dark ? Icons.dark_mode_outlined : Icons.light_mode_outlined,
-                  'Dark Mode',
-                  mode == ThemeMode.dark ? 'Using dark theme' : 'Using light theme',
-                  mode == ThemeMode.dark,
-                  (_) => ThemeNotifier.instance.toggle(),
-                ),
+                builder: (context, mode, _) {
+                  // For mode==system, fall back to the device brightness
+                  // so the toggle reflects what the user actually sees.
+                  // Without this, a fresh install on a dark-themed phone
+                  // would show "Using light theme" even though the app
+                  // is rendering dark.
+                  final effectiveDark = mode == ThemeMode.dark
+                      || (mode == ThemeMode.system
+                          && MediaQuery.platformBrightnessOf(context) == Brightness.dark);
+                  return _toggleTile(
+                    effectiveDark ? Icons.dark_mode_outlined : Icons.light_mode_outlined,
+                    'Dark Mode',
+                    mode == ThemeMode.system
+                        ? (effectiveDark ? 'Following system (dark)' : 'Following system (light)')
+                        : (effectiveDark ? 'Using dark theme' : 'Using light theme'),
+                    effectiveDark,
+                    (_) { ThemeNotifier.instance.toggle(currentlyDark: effectiveDark); },
+                  );
+                },
               ),
             ]),
 
@@ -319,9 +331,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   title: const Text('Log Out', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w600, fontSize: 15)),
                   onTap: () async {
                     await FirebaseAuth.instance.signOut();
-                    // Don't carry the previous session's dark toggle into
-                    // the next user's first launch.
-                    ThemeNotifier.instance.resetToLight();
+                    // Theme preference is per-device, not per-account, so
+                    // we leave the dark/light state alone on logout. Next
+                    // sign-in inherits whatever the previous user picked.
                     if (context.mounted) {
                       Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const WelcomeScreen()), (_) => false);
                     }
@@ -388,8 +400,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ── PROFILE / ACCOUNT EDIT DIALOGS ─────────────────────────────
 
   Future<void> _showEditProfileDialog() async {
+    final accountType = _userData['accountType'] as String?;
+    final isPersonal  = accountType != 'business' && accountType != 'businessPlus';
     final firstCtrl = TextEditingController(text: (_userData['firstName'] as String?) ?? '');
     final lastCtrl  = TextEditingController(text: (_userData['lastName']  as String?) ?? '');
+    final orgCtrl   = TextEditingController(text: (_userData['name']      as String?) ?? '');
     String? localError;
 
     final result = await showDialog<String>(
@@ -400,9 +415,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           title: Text('Edit Profile', style: TextStyle(fontWeight: FontWeight.w700, color: _isDark ? Colors.white : AppColors.dark)),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
-            _dialogField(firstCtrl, 'First name', Icons.person_outline, textCapitalization: TextCapitalization.words),
-            const SizedBox(height: 12),
-            _dialogField(lastCtrl, 'Last name', Icons.person_outline, textCapitalization: TextCapitalization.words),
+            if (isPersonal) ...[
+              _dialogField(firstCtrl, 'First name', Icons.person_outline, textCapitalization: TextCapitalization.words),
+              const SizedBox(height: 12),
+              _dialogField(lastCtrl, 'Last name', Icons.person_outline, textCapitalization: TextCapitalization.words),
+            ] else
+              _dialogField(
+                orgCtrl,
+                accountType == 'business' ? 'Business name' : 'Organization name',
+                Icons.business_outlined,
+                textCapitalization: TextCapitalization.words,
+              ),
             if (localError != null) ...[
               const SizedBox(height: 8),
               Text(localError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
@@ -412,21 +435,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
             TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: TextStyle(color: _muted))),
             TextButton(
               onPressed: () async {
-                final first = firstCtrl.text.trim();
-                final last  = lastCtrl.text.trim();
-                if (first.isEmpty || last.isEmpty) {
-                  setLocal(() => localError = 'Both fields required');
-                  return;
+                final first   = firstCtrl.text.trim();
+                final last    = lastCtrl.text.trim();
+                final orgName = orgCtrl.text.trim();
+                if (isPersonal) {
+                  if (first.isEmpty || last.isEmpty) {
+                    setLocal(() => localError = 'Both fields required');
+                    return;
+                  }
+                } else {
+                  if (orgName.isEmpty) {
+                    setLocal(() => localError = 'Name required');
+                    return;
+                  }
                 }
                 try {
                   final user = FirebaseAuth.instance.currentUser;
                   if (user == null) { Navigator.pop(ctx, 'error'); return; }
-                  final fullName = '$first $last';
-                  await user.updateDisplayName(fullName);
+                  final displayName = isPersonal ? '$first $last' : orgName;
+                  await user.updateDisplayName(displayName);
                   await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
-                    'firstName': first,
-                    'lastName':  last,
-                    'name':      fullName,
+                    'firstName': isPersonal ? first : '',
+                    'lastName':  isPersonal ? last  : '',
+                    'name':      displayName,
                   });
                   if (ctx.mounted) Navigator.pop(ctx, 'saved');
                 } catch (e) {
@@ -442,6 +473,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     firstCtrl.dispose();
     lastCtrl.dispose();
+    orgCtrl.dispose();
     if (result == 'saved' && mounted) _snack('✓ Profile updated', ok: true);
   }
 
