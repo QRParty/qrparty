@@ -2390,7 +2390,15 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
               _fetchZipFromPlaceId(placeId);
             }
             _scheduleDraftSave();
-            _locationFocusNode.unfocus();
+            // iOS doesn't reliably close the autocomplete overlay on
+            // focus loss alone — also nudge the system primary focus
+            // so the keyboard drops. Microtask defers the unfocus past
+            // the text assignment above so the package's internal
+            // onChanged handler doesn't re-open the overlay.
+            Future.microtask(() {
+              _locationFocusNode.unfocus();
+              FocusManager.instance.primaryFocus?.unfocus();
+            });
           },
           // Render each suggestion with the same look as the old custom
           // list: pin icon + main text (street) + secondary (city/state).
