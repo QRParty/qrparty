@@ -70,6 +70,16 @@ service cloud.firestore {
       allow write:     if isSignedIn() && isUser(uid);
     }
 
+    // ── CONTACT GROUPS (Gmail-style labels on the business Contacts tab) ─────
+    // Per-user subcollection — owner reads/writes their own groups only.
+    // Group docs hold {name, memberEmails: list<string>}. Written from the
+    // Contacts tab in business_home_feed_screen.dart; the Add-to-Group
+    // sheet uses arrayUnion/arrayRemove on memberEmails.
+
+    match /users/{userId}/contactGroups/{groupId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
     // ── EVENTS ────────────────────────────────────────────────────────────────
     // Any authenticated user can read any event (required for the QR scan guest
     // flow and the Explore tab).  Only the document owner (host) can mutate it,

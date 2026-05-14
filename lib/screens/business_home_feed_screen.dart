@@ -58,6 +58,18 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
   String _contactsSearch = '';
   final TextEditingController _contactsSearchCtrl = TextEditingController();
 
+  // Swipe-to-remove is UI-only — contacts re-derive from RSVPs on every
+  // build, so any removal resets when the source RSVPs stream re-emits.
+  // Persisting hides would need a `hiddenContacts` doc; out of scope.
+  final Set<String> _removedEmails = {};
+
+  // Contact groups (Gmail-style labels — a contact can be in many).
+  // Subscribed from users/{uid}/contactGroups; 'all' selects no filter.
+  // Entries shape: {id, name, memberEmails: Set<String>}.
+  List<Map<String, dynamic>> _groups = [];
+  String _selectedGroupId = 'all';
+  StreamSubscription<QuerySnapshot>? _groupsSub;
+
   // Organization banner state — businessPlus owners see their org card; business
   // accounts see an upgrade nudge; only fetched once per session.
   StreamSubscription<DocumentSnapshot>? _userSub;
@@ -89,6 +101,7 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     _tabController.addListener(_onTabChanged);
     _subscribeToEvents();
     _subscribeToOrg();
+    _subscribeToContactGroups();
   }
 
   void _onTabChanged() {
@@ -105,10 +118,46 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     _userSub?.cancel();
     _orgSub?.cancel();
     _invitesSub?.cancel();
+    _groupsSub?.cancel();
     for (final sub in _rsvpSubs.values) { sub.cancel(); }
     _rsvpSubs.clear();
     _contactsSearchCtrl.dispose();
     super.dispose();
+  }
+
+  void _subscribeToContactGroups() {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    _groupsSub = FirebaseFirestore.instance
+        .collection('users').doc(uid)
+        .collection('contactGroups')
+        .snapshots()
+        .listen((snap) {
+      if (!mounted) return;
+      final next = snap.docs.map((d) {
+        final data = d.data();
+        final rawName = (data['name'] as String?)?.trim() ?? '';
+        return <String, dynamic>{
+          'id': d.id,
+          'name': rawName.isNotEmpty ? rawName : 'Untitled',
+          'memberEmails': Set<String>.from(
+            ((data['memberEmails'] as List?) ?? const []).whereType<String>(),
+          ),
+        };
+      }).toList()
+        ..sort((a, b) => (a['name'] as String).toLowerCase()
+            .compareTo((b['name'] as String).toLowerCase()));
+      setState(() {
+        _groups = next;
+        // If the previously-selected group was deleted, fall back to All.
+        if (_selectedGroupId != 'all'
+            && !_groups.any((g) => g['id'] == _selectedGroupId)) {
+          _selectedGroupId = 'all';
+        }
+      });
+    }, onError: (Object e) {
+      debugPrint('[BusinessFeed] contactGroups stream ERROR: $e');
+    });
   }
 
   void _subscribeToOrg() {
@@ -501,6 +550,9 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
       final eventId = entry.key;
       for (final emailEntry in entry.value.entries) {
         final email = emailEntry.key;
+        // Locally swipe-removed contacts are dropped here; the set
+        // resets when the RSVP stream re-emits, by design.
+        if (_removedEmails.contains(email)) continue;
         final data  = emailEntry.value;
         final rawName = (data['name'] as String?)?.trim() ?? '';
         final name = rawName.isNotEmpty ? rawName : 'Guest';
@@ -513,12 +565,23 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
         }
       }
     }
+    // Group filter — when a non-"all" chip is selected, restrict to its members.
+    Set<String>? groupMembers;
+    if (_selectedGroupId != 'all') {
+      final g = _groups.firstWhere(
+        (g) => g['id'] == _selectedGroupId,
+        orElse: () => const <String, dynamic>{},
+      );
+      final members = g['memberEmails'];
+      if (members is Set<String>) groupMembers = members;
+    }
     final query = _contactsSearch.trim().toLowerCase();
     final filtered = byEmail.values.where((c) {
+      final email = c['email'] as String;
+      if (groupMembers != null && !groupMembers.contains(email)) return false;
       if (query.isEmpty) return true;
-      final n = (c['name']  as String).toLowerCase();
-      final e = (c['email'] as String).toLowerCase();
-      return n.contains(query) || e.contains(query);
+      final n = (c['name'] as String).toLowerCase();
+      return n.contains(query) || email.toLowerCase().contains(query);
     }).toList();
     filtered.sort((a, b) =>
         (a['name'] as String).toLowerCase().compareTo((b['name'] as String).toLowerCase()));
@@ -1548,6 +1611,7 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
           ),
         ]),
       ),
+      _buildGroupChipsRow(),
       Expanded(
         child: contacts.isEmpty
             ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -1567,6 +1631,157 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     ]);
   }
 
+  Widget _buildGroupChipsRow() {
+    return SizedBox(
+      height: 40,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+        children: [
+          _groupChip(id: 'all', label: 'All', selected: _selectedGroupId == 'all'),
+          for (final g in _groups)
+            _groupChip(
+              id: g['id'] as String,
+              label: g['name'] as String,
+              selected: _selectedGroupId == g['id'],
+              onLongPress: () => _confirmDeleteGroup(g),
+            ),
+          _newGroupChip(),
+        ],
+      ),
+    );
+  }
+
+  Widget _groupChip({
+    required String id,
+    required String label,
+    required bool selected,
+    VoidCallback? onLongPress,
+  }) {
+    final fg = _isDark ? Colors.white : AppColors.dark;
+    return GestureDetector(
+      onTap: () => setState(() => _selectedGroupId = id),
+      onLongPress: onLongPress,
+      child: Container(
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected ? _purple : _card,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: selected ? _purple : _border),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Colors.white : fg,
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _newGroupChip() {
+    return GestureDetector(
+      onTap: () => _promptCreateGroup(),
+      child: Container(
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: _card,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: _border),
+        ),
+        alignment: Alignment.center,
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.add, size: 14, color: _muted),
+          const SizedBox(width: 4),
+          Text(
+            'New Group',
+            style: TextStyle(color: _muted, fontSize: 13, fontWeight: FontWeight.w700),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  void _showAddToGroupSheet(String email, String name) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _card,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => _AddToGroupSheet(
+        uid: uid,
+        contactEmail: email,
+        contactName: name,
+        groups: List<Map<String, dynamic>>.from(_groups),
+        onCreateNew: () {
+          Navigator.pop(context);
+          _promptCreateGroup(autoAddEmail: email);
+        },
+      ),
+    );
+  }
+
+  void _promptCreateGroup({String? autoAddEmail}) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => _CreateGroupDialog(uid: uid, autoAddEmail: autoAddEmail),
+    );
+  }
+
+  Future<void> _confirmDeleteGroup(Map<String, dynamic> g) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    final name = g['name'] as String;
+    final id = g['id'] as String;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Delete group?'),
+        content: Text(
+          'Delete "$name"? Contacts in this group stay in your list — only the label is removed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              'Delete',
+              style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await FirebaseFirestore.instance
+          .collection('users').doc(uid)
+          .collection('contactGroups').doc(id).delete();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not delete: $e'),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
+    }
+  }
+
   // ── _NotifyAllSheet wrapper widget defined at end of file ────
   // (extracted as a StatefulWidget so its TextEditingControllers /
   //  FocusNodes can dispose in State.dispose() — the
@@ -1579,39 +1794,95 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
     final name  = contact['name']  as String;
     final email = contact['email'] as String;
     final eventCount = (contact['eventIds'] as Set<String>).length;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: _card,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _border),
+    return Dismissible(
+      key: ValueKey('contact-$email'),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        decoration: BoxDecoration(
+          color: Colors.redAccent,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: const Icon(Icons.delete_outline, color: Colors.white, size: 22),
       ),
-      child: Row(children: [
-        Container(
-          width: 38, height: 38,
-          alignment: Alignment.center,
+      confirmDismiss: (_) async {
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: const Text('Remove contact?'),
+            content: Text('Remove "$name" from your contacts list?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text(
+                  'Delete',
+                  style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+        );
+        return ok ?? false;
+      },
+      onDismissed: (_) {
+        setState(() => _removedEmails.add(email));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text('Contact removed'),
+          duration: const Duration(seconds: 4),
+          action: SnackBarAction(
+            label: 'Undo',
+            textColor: Colors.white,
+            onPressed: () {
+              if (mounted) setState(() => _removedEmails.remove(email));
+            },
+          ),
+        ));
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onLongPress: () => _showAddToGroupSheet(email, name),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: _purple.withValues(alpha: 0.18),
-            borderRadius: BorderRadius.circular(10),
+            color: _card,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: _border),
           ),
-          child: Text(
-            name.isNotEmpty ? name.substring(0, 1).toUpperCase() : '?',
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: _purple),
-          ),
+          child: Row(children: [
+            Container(
+              width: 38, height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: _purple.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                name.isNotEmpty ? name.substring(0, 1).toUpperCase() : '?',
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: _purple),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(name,  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: fg), maxLines: 1, overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 2),
+              Text(email, style: TextStyle(fontSize: 12, color: _muted),                          maxLines: 1, overflow: TextOverflow.ellipsis),
+            ])),
+            const SizedBox(width: 8),
+            Text(
+              '$eventCount ${eventCount == 1 ? 'event' : 'events'}',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _muted),
+            ),
+          ]),
         ),
-        const SizedBox(width: 12),
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(name,  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: fg), maxLines: 1, overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 2),
-          Text(email, style: TextStyle(fontSize: 12, color: _muted),                          maxLines: 1, overflow: TextOverflow.ellipsis),
-        ])),
-        const SizedBox(width: 8),
-        Text(
-          '$eventCount ${eventCount == 1 ? 'event' : 'events'}',
-          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _muted),
-        ),
-      ]),
+      ),
     );
   }
 }
@@ -1825,6 +2096,203 @@ class _NotifyAllSheetState extends State<_NotifyAllSheet> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Bottom-sheet body for the Contacts tab's "Add to Group" long-press.
+/// Extracted as a StatefulWidget so any disposable resources (none yet,
+/// but matches the _NotifyAllSheet pattern) tear down cleanly.
+/// Checkbox toggles write directly to Firestore via arrayUnion / arrayRemove
+/// with optimistic local state.
+class _AddToGroupSheet extends StatefulWidget {
+  final String uid;
+  final String contactEmail;
+  final String contactName;
+  final List<Map<String, dynamic>> groups;
+  final VoidCallback onCreateNew;
+  const _AddToGroupSheet({
+    required this.uid,
+    required this.contactEmail,
+    required this.contactName,
+    required this.groups,
+    required this.onCreateNew,
+  });
+  @override
+  State<_AddToGroupSheet> createState() => _AddToGroupSheetState();
+}
+
+class _AddToGroupSheetState extends State<_AddToGroupSheet> {
+  late final Map<String, bool> _checked;
+
+  @override
+  void initState() {
+    super.initState();
+    _checked = {
+      for (final g in widget.groups)
+        g['id'] as String:
+            (g['memberEmails'] as Set<String>).contains(widget.contactEmail),
+    };
+  }
+
+  Future<void> _toggle(String groupId, bool? value) async {
+    final isAdding = value ?? false;
+    setState(() => _checked[groupId] = isAdding);
+    try {
+      await FirebaseFirestore.instance
+          .collection('users').doc(widget.uid)
+          .collection('contactGroups').doc(groupId)
+          .update({
+        'memberEmails': isAdding
+            ? FieldValue.arrayUnion([widget.contactEmail])
+            : FieldValue.arrayRemove([widget.contactEmail]),
+      });
+    } catch (_) {
+      if (mounted) setState(() => _checked[groupId] = !isAdding);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fg = isDark ? Colors.white : AppColors.dark;
+    final muted = isDark ? _mutedDark : _mutedLight;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(child: Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: muted.withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            )),
+            const SizedBox(height: 14),
+            Text('Add to Group',
+                style: TextStyle(fontFamily: 'FredokaOne', fontSize: 20, color: fg)),
+            const SizedBox(height: 4),
+            Text(widget.contactName,
+                style: TextStyle(fontSize: 13, color: muted)),
+            const SizedBox(height: 12),
+            if (widget.groups.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                child: Text(
+                  'No groups yet — create your first below.',
+                  style: TextStyle(color: muted, fontSize: 13),
+                ),
+              )
+            else
+              ...widget.groups.map((g) => CheckboxListTile(
+                value: _checked[g['id']] ?? false,
+                onChanged: (v) => _toggle(g['id'] as String, v),
+                controlAffinity: ListTileControlAffinity.leading,
+                contentPadding: EdgeInsets.zero,
+                activeColor: _purple,
+                title: Text(
+                  g['name'] as String,
+                  style: TextStyle(color: fg, fontSize: 14, fontWeight: FontWeight.w700),
+                ),
+              )),
+            const Divider(height: 24),
+            ListTile(
+              leading: const Icon(Icons.add, color: _purple),
+              title: const Text(
+                'Create new group',
+                style: TextStyle(color: _purple, fontSize: 14, fontWeight: FontWeight.w800),
+              ),
+              contentPadding: EdgeInsets.zero,
+              onTap: widget.onCreateNew,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Name-input dialog for new contact groups. When `autoAddEmail` is
+/// supplied the new group is created with that email already in its
+/// memberEmails — used when the dialog is reached via the long-press
+/// "Add to Group" sheet so the user doesn't have to re-check the box.
+class _CreateGroupDialog extends StatefulWidget {
+  final String uid;
+  final String? autoAddEmail;
+  const _CreateGroupDialog({required this.uid, this.autoAddEmail});
+  @override
+  State<_CreateGroupDialog> createState() => _CreateGroupDialogState();
+}
+
+class _CreateGroupDialogState extends State<_CreateGroupDialog> {
+  final _name = TextEditingController();
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  Future<void> _create() async {
+    final name = _name.text.trim();
+    if (name.isEmpty || _saving) return;
+    setState(() => _saving = true);
+    try {
+      await FirebaseFirestore.instance
+          .collection('users').doc(widget.uid)
+          .collection('contactGroups').add({
+        'name': name,
+        'memberEmails': widget.autoAddEmail != null
+            ? <String>[widget.autoAddEmail!]
+            : <String>[],
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not create: $e'),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      title: const Text('New group'),
+      content: TextField(
+        controller: _name,
+        autofocus: true,
+        textInputAction: TextInputAction.done,
+        onSubmitted: (_) => _create(),
+        decoration: const InputDecoration(hintText: 'Group name'),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: _saving ? null : _create,
+          child: _saving
+              ? const SizedBox(
+                  width: 16, height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text(
+                  'Create',
+                  style: TextStyle(color: _purple, fontWeight: FontWeight.w800),
+                ),
+        ),
+      ],
     );
   }
 }

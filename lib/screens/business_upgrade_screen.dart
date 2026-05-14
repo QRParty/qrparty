@@ -34,10 +34,10 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
   Map<String, ProductDetails> _products = {};
   StreamSubscription<DocumentSnapshot>? _userSub;
 
-  static const _monthlyId      = 'business_monthly';
-  static const _yearlyId       = 'business_yearly';
-  static const _plusMonthlyId  = 'business_plus_monthly';
-  static const _plusYearlyId   = 'business_plus_yearly';
+  static const _monthlyId   = 'business_monthly';
+  static const _yearlyId    = 'business_yearly';
+  static const _hqMonthlyId = 'business_plus_monthly';
+  static const _hqYearlyId  = 'business_plus_yearly';
 
   // Theme-aware colors — resolve light vs dark variant from the current Theme.
   bool  get _isDark => Theme.of(context).brightness == Brightness.dark;
@@ -85,7 +85,7 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
       return;
     }
     final response = await InAppPurchase.instance.queryProductDetails({
-      _monthlyId, _yearlyId, _plusMonthlyId, _plusYearlyId,
+      _monthlyId, _yearlyId, _hqMonthlyId, _hqYearlyId,
     });
     if (mounted) {
       setState(() {
@@ -114,10 +114,21 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
     if (tier == 'business') {
       productId = _selectedBusinessPlan == 'monthly' ? _monthlyId : _yearlyId;
     } else {
-      productId = _selectedPlusPlan == 'monthly' ? _plusMonthlyId : _plusYearlyId;
+      productId = _selectedPlusPlan == 'monthly' ? _hqMonthlyId : _hqYearlyId;
     }
     final product = _products[productId];
-    if (product == null) return;
+    if (product == null) {
+      // Surface the failure instead of silently no-op'ing — without
+      // this, a Play Console misconfiguration (product not yet propagated,
+      // tester role not granted, etc.) looks like an unresponsive button.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Subscription "$productId" is not available right now. Try again in a few minutes.'),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
+      return;
+    }
     setState(() => _purchasing = true);
     try {
       await InAppPurchase.instance.buyNonConsumable(purchaseParam: PurchaseParam(productDetails: product));
@@ -322,48 +333,19 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Full-width Coming Soon strip — sits flush to the top of
-          // the card, no rounded inner corners, gold so it reads as
-          // an announcement rather than a warning. Subtitle line tells
-          // users their reading the page IS still useful (they're
-          // previewing what they'll get) — without this, the banner
-          // looks like a "go away" sign on top of the pricing.
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            color: _gold,
-            child: const Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Text(
-                  'COMING SOON',
-                  style: TextStyle(
-                    fontFamily: 'Nunito',
-                    fontSize: 13,
-                    fontWeight: FontWeight.w900,
-                    color: Color(0xFF1A1A1A),
-                    letterSpacing: 1.6,
-                  ),
-                ),
-                SizedBox(height: 2),
-                Text(
-                  'Not yet available — preview the plan below',
-                  style: TextStyle(
-                    fontFamily: 'Nunito',
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF1A1A1A),
-                  ),
-                ),
-              ],
-            ),
-          ),
           Padding(
             padding: const EdgeInsets.all(20),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
+                // Wrap (rather than Row) so HEADQUARTERS — which carries
+                // both LAUNCH PRICING and MOST POWERFUL pills — gracefully
+                // breaks to a second line on narrow phones instead of
+                // overflowing.
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     Text(
                       label,
@@ -375,8 +357,15 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
                         letterSpacing: 2,
                       ),
                     ),
-                    if (featured) ...[
-                      const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(color: AppColors.green, borderRadius: BorderRadius.circular(20)),
+                      child: const Text(
+                        'LAUNCH PRICING',
+                        style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: .8),
+                      ),
+                    ),
+                    if (featured)
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                         decoration: BoxDecoration(color: accent, borderRadius: BorderRadius.circular(20)),
@@ -385,7 +374,6 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
                           style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: .8),
                         ),
                       ),
-                    ],
                   ],
                 ),
                 const SizedBox(height: 6),

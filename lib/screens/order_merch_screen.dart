@@ -6,6 +6,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:gal/gal.dart';
+import 'package:flutter_stripe/flutter_stripe.dart';
 import '../utils.dart';
 import '../models/merch_order.dart';
 import '../services/merch_order_service.dart';
@@ -106,6 +107,13 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
 
   MerchShipping _shipping = MerchShipping.standard;
 
+  // Stripe card form on the summary step. The controller's details.complete
+  // gates the Pay button via _canContinue. A listener in initState forces
+  // a rebuild on every card-field edit so the gate is reactive — without
+  // it _canContinue is only re-evaluated when something else triggers a
+  // setState, which would leave Pay disabled after a valid card is typed.
+  final _cardController = CardFormEditController();
+
   bool _placing = false;
   String? _orderId;
   DateTime? _estDelivery;
@@ -150,6 +158,14 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
     if (_shortCode == null || _shortCode!.isEmpty) {
       _resolveShortCode();
     }
+    // Force the bottom bar to re-evaluate _canContinue() each time the
+    // card form updates so the Pay button enables as soon as the card
+    // becomes complete.
+    _cardController.addListener(_onCardChanged);
+  }
+
+  void _onCardChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _resolveShortCode() async {
@@ -168,6 +184,8 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
   void dispose() {
     _name.dispose(); _line1.dispose(); _line2.dispose();
     _city.dispose(); _zip.dispose();
+    _cardController.removeListener(_onCardChanged);
+    _cardController.dispose();
     super.dispose();
   }
 
@@ -364,8 +382,8 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
       case _StepKind.theme:    return _themeKey.isNotEmpty;
       case _StepKind.pack:     return _packSize != null;
       case _StepKind.address:  return _address.isComplete;
+      case _StepKind.summary:  return _cardController.details.complete;
       case _StepKind.shipping:
-      case _StepKind.summary:
       case _StepKind.confirmation:
         return true;
     }
@@ -1138,6 +1156,21 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
           Text('SHIP TO', style: TextStyle(color: _muted, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.4)),
           const SizedBox(height: 6),
           Text(addr.formatted, style: TextStyle(color: _fg, fontSize: 13.5, height: 1.45)),
+        ]),
+        const SizedBox(height: 12),
+        _cardBox(children: [
+          Text('PAYMENT', style: TextStyle(color: _muted, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.4)),
+          const SizedBox(height: 10),
+          CardFormField(
+            controller: _cardController,
+            style: CardFormStyle(
+              backgroundColor: Colors.transparent,
+              textColor: _fg,
+              placeholderColor: _muted,
+              borderColor: _border,
+              borderRadius: 10,
+            ),
+          ),
         ]),
         if (kTestingMode) ...[
           const SizedBox(height: 14),

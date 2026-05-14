@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import '../utils.dart';
 import '../widgets/rsvp_live_counts.dart';
+import '../widgets/hold_to_delete_dialog.dart';
 import 'create_event_screen.dart';
 import 'guest_event_screen.dart';
 import 'settings_screen.dart';
@@ -999,8 +1000,6 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
         ? const Color(0xFF4A4E6B)
         : Colors.black.withValues(alpha: 0.05);
     final Color titleColor = isDark ? Colors.white : AppColors.dark;
-    final int rsvpTotal = ((event['yes'] as int? ?? 0) + (event['maybe'] as int? ?? 0) + (event['no'] as int? ?? 0));
-    final bool canDelete = isPast || rsvpTotal == 0;
     final months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     final String eventId = event['id'] as String;
     final bool inSelectMode = _selectMode && isPast;
@@ -1183,14 +1182,12 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
                     style: OutlinedButton.styleFrom(side: const BorderSide(color: AppColors.green), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)), padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 12)),
                     child: const Icon(Icons.edit_outlined, color: AppColors.green, size: 18),
                   ),
-                  if (canDelete) ...[
-                    const SizedBox(width: 8),
-                    OutlinedButton(
-                      onPressed: () => _confirmDelete(context, event['id'] as String, event['title'] as String),
-                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.redAccent), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)), padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 12)),
-                      child: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 18),
-                    ),
-                  ],
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: () => _confirmDelete(context, event['id'] as String, event['title'] as String),
+                    style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.redAccent), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)), padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 12)),
+                    child: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 18),
+                  ),
                 ],
                 if (isPast) ...[
                   const SizedBox(width: 8),
@@ -1300,25 +1297,12 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
     }
   }
 
-  void _confirmDelete(BuildContext context, String eventId, String title) {
-    showDialog(
+  Future<void> _confirmDelete(BuildContext context, String eventId, String title) async {
+    final confirmed = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Delete event?'),
-        content: Text('Are you sure you want to delete "$title"? This will permanently remove all RSVPs, photos, and data.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _deleteEvent(eventId, title);
-            },
-            child: const Text('Delete', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w700)),
-          ),
-        ],
-      ),
+      builder: (_) => HoldToDeleteDialog(eventTitle: title),
     );
+    if (confirmed == true && mounted) _deleteEvent(eventId, title);
   }
 
   Future<void> _deleteSubcollection(CollectionReference ref) async {
@@ -1410,3 +1394,4 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
         child: Text(text, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600)),
       );
 }
+
