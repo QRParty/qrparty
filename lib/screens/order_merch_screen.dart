@@ -246,23 +246,15 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
       (widget.eventType ?? '').toLowerCase() == 'birthday';
 
   // ── Vistaprint hand-off for invitations ──────────────────────
-  /// Maps the source event's type → the right Vistaprint catalog
-  /// landing page. Falls through to the general "party invitations"
-  /// page for anything we don't have a dedicated match for so the
-  /// host always lands somewhere usable rather than a 404.
+  /// Vistaprint catalog landing page for invitations. Previously
+  /// branched per event type (birthday / wedding / baby shower /
+  /// generic party) but Vistaprint retired the per-category URLs and
+  /// every old path now 404s; the single /cards-stationery/invitations
+  /// page is the working entry point. Function shape preserved so
+  /// callers don't need to change and so per-type branching can be
+  /// restored if Vistaprint brings the category URLs back.
   String _vistaprintUrlForEventType() {
-    final t = (widget.eventType ?? '').toLowerCase().trim();
-    if (t.contains('birthday')) {
-      return 'https://www.vistaprint.com/invitations-announcements/birthday-party-invitations';
-    }
-    if (t.contains('wedding')) {
-      return 'https://www.vistaprint.com/invitations-announcements/wedding-invitations';
-    }
-    // Match "baby shower" / "baby_shower" / "babyShower" / etc.
-    if (t.contains('baby') && t.contains('shower')) {
-      return 'https://www.vistaprint.com/invitations-announcements/baby-shower-invitations';
-    }
-    return 'https://www.vistaprint.com/invitations-announcements/party-invitations';
+    return 'https://www.vistaprint.com/cards-stationery/invitations';
   }
 
   /// Captures the rendered QR widget (via the [_vistaprintQrKey]
@@ -1161,13 +1153,19 @@ class _OrderMerchScreenState extends State<OrderMerchScreen> {
         _cardBox(children: [
           Text('PAYMENT', style: TextStyle(color: _muted, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.4)),
           const SizedBox(height: 10),
+          // Stripe's native CardFormField renders on the platform side
+          // (iOS UIKit / Android EditText), so it doesn't pick up the
+          // app's dark/light theme automatically. Forcing a white field
+          // with dark text in BOTH themes is safer than passing _fg /
+          // _card here, which produced white-on-white (light) or
+          // dark-on-dark (dark) and made typed digits invisible.
           CardFormField(
             controller: _cardController,
             style: CardFormStyle(
-              backgroundColor: Colors.transparent,
-              textColor: _fg,
-              placeholderColor: _muted,
-              borderColor: _border,
+              backgroundColor: Colors.white,
+              textColor: AppColors.dark,
+              placeholderColor: const Color(0xFF8892A4),
+              borderColor: const Color(0xFFE0E8E0),
               borderRadius: 10,
             ),
           ),

@@ -180,6 +180,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
   StreamSubscription<List<PurchaseDetails>>? _purchaseSub;
   StreamSubscription<String>? _shareSub;
   StreamSubscription<User?>? _authSub;
+  StreamSubscription<String>? _tokenRefreshSub;
 
   /// Holds a deep-link target (shortCode or docId) that arrived while the
   /// user wasn't signed in yet. Drained by [_setupPendingDeepLinkDrain]
@@ -196,6 +197,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
   void initState() {
     super.initState();
     _setupMessaging();
+    _setupTokenRefreshListener();
     _setupDeepLinks();
     _setupBilling();
     _setupSharedUrls();
@@ -208,6 +210,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
     _purchaseSub?.cancel();
     _shareSub?.cancel();
     _authSub?.cancel();
+    _tokenRefreshSub?.cancel();
     super.dispose();
   }
 
@@ -307,6 +310,26 @@ class _QRPartyAppState extends State<QRPartyApp> {
         alert: true, badge: true, sound: true,
       );
       debugPrint('[FCM] permission uid=${user.uid} status=${settings.authorizationStatus}');
+
+      // iOS: getToken() returns null until APNs has handed Firebase a
+      // device token. Permission granted ≠ APNs ready — the OS does the
+      // APNs handshake asynchronously after registerForRemoteNotifications.
+      // Poll getAPNSToken with a short backoff so first-launch isn't a
+      // race. Android has no equivalent dependency; skip the poll there.
+      if (Platform.isIOS) {
+        String? apns;
+        for (int attempt = 1; attempt <= 6; attempt++) {
+          apns = await FirebaseMessaging.instance.getAPNSToken();
+          debugPrint('[FCM] APNs poll attempt=$attempt uid=${user.uid} apns=${apns == null || apns.isEmpty ? "null" : "ok"}');
+          if (apns != null && apns.isNotEmpty) break;
+          if (attempt < 6) await Future.delayed(const Duration(milliseconds: 500));
+        }
+        if (apns == null || apns.isEmpty) {
+          debugPrint('[FCM] APNs token never arrived after 6 attempts uid=${user.uid} — skipping registration; onTokenRefresh will retry if it lands later');
+          return;
+        }
+      }
+
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null || token.isEmpty) {
         debugPrint('[FCM] getToken() returned null/empty uid=${user.uid} authStatus=${settings.authorizationStatus} — likely APNs not registered or permission denied');
@@ -321,6 +344,36 @@ class _QRPartyAppState extends State<QRPartyApp> {
     } catch (e, st) {
       debugPrint('[FCM] token registration FAILED uid=${user.uid}: $e\n$st');
     }
+  }
+
+  /// Catches FCM tokens that arrive after the initial registration —
+  /// most commonly on iOS when getToken() lost the APNs race in
+  /// _registerFcmTokenForUser, or when Firebase rotates the token. The
+  /// listener is global (set up once in initState), so it captures
+  /// refreshes for whatever user happens to be signed in at the time.
+  /// Best-effort: failures are logged, never thrown.
+  void _setupTokenRefreshListener() {
+    _tokenRefreshSub = FirebaseMessaging.instance.onTokenRefresh.listen((token) async {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        debugPrint('[FCM] onTokenRefresh fired but no user signed in — skipping write tokenSuffix=…${token.length >= 8 ? token.substring(token.length - 8) : token}');
+        return;
+      }
+      if (token.isEmpty) {
+        debugPrint('[FCM] onTokenRefresh fired with empty token uid=${user.uid} — skipping');
+        return;
+      }
+      debugPrint('[FCM] onTokenRefresh writing token uid=${user.uid} tokenLen=${token.length} tokenSuffix=…${token.length >= 8 ? token.substring(token.length - 8) : token}');
+      try {
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .set({'fcmToken': token}, SetOptions(merge: true));
+        debugPrint('[FCM] onTokenRefresh write succeeded uid=${user.uid}');
+      } catch (e, st) {
+        debugPrint('[FCM] onTokenRefresh write FAILED uid=${user.uid}: $e\n$st');
+      }
+    });
   }
 
   /// while the user was on the welcome / login screen. When auth flips to

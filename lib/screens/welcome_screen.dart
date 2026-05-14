@@ -455,12 +455,23 @@ class _SignUpScreenState extends State<SignUpScreen> {
             width: 1.5,
           ),
         ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 13.5,
-            fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
-            color: selected ? Colors.white : _muted,
+        // FittedBox keeps "Personal" / "Business" at their native size
+        // (they fit a ~104 dp chip slot comfortably) and only scales
+        // "Headquarters" down on narrow phones / large system font
+        // scaling, instead of wrapping it across two lines and making
+        // that chip taller than the other two. maxLines: 1 is a
+        // belt-and-suspenders guard for any future label that's even
+        // wider than the chip can shrink-fit.
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            label,
+            maxLines: 1,
+            style: TextStyle(
+              fontSize: 13.5,
+              fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+              color: selected ? Colors.white : _muted,
+            ),
           ),
         ),
       ),
