@@ -114,6 +114,10 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
 
   Map<String, dynamic>? _weatherData;
   bool _weatherLoading = false;
+  // True when the event is >7 days out — Open-Meteo's free tier only
+  // forecasts 7 days, so instead of silently dropping the widget we
+  // surface a small "check back closer to the date" placeholder card.
+  bool _weatherTooFarOut = false;
 
   List<Map<String, dynamic>> _rsvps = [];
   StreamSubscription<QuerySnapshot>? _rsvpsSub;
@@ -1675,7 +1679,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                 // outer switch.
                 if (_isOutdoor) ...[
                   _buildWeatherWidget(),
-                  if (_weatherLoading || _weatherData != null) const SizedBox(height: 16),
+                  if (_weatherLoading || _weatherData != null || _weatherTooFarOut) const SizedBox(height: 16),
                 ],
                 // RSVP counts as a single row of stat boxes. Hosts/co-hosts can
                 // tap Yes / Maybe to see an adults+children breakdown; the No
@@ -2102,8 +2106,18 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       return DateTime(n.year, n.month, n.day);
     }();
     final daysUntil = eventDay.difference(today).inDays;
-    if (daysUntil < 0 || daysUntil > 7) {
-      debugPrint('[Weather] $daysUntil days out — outside 0..7 forecast window');
+    if (daysUntil < 0) {
+      // Past event — silently drop. A "check back closer" placeholder
+      // would be wrong here; the event already happened.
+      debugPrint('[Weather] $daysUntil days out — past event, aborting');
+      return;
+    }
+    if (daysUntil > 7) {
+      // Outside Open-Meteo's 7-day forecast window. Flip the flag so
+      // _buildWeatherWidget renders a friendly "check back later" card
+      // instead of silently rendering nothing.
+      debugPrint('[Weather] $daysUntil days out — outside forecast window, showing too-far placeholder');
+      if (mounted) setState(() => _weatherTooFarOut = true);
       return;
     }
 
@@ -2451,6 +2465,39 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
           const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: _purple)),
           const SizedBox(width: 12),
           Text('Fetching weather…', style: TextStyle(fontSize: 13, color: _muted)),
+        ]),
+      );
+    }
+    if (_weatherTooFarOut) {
+      // Same chrome as the real forecast card (color/border/radius/padding),
+      // emoji on the left + text on the right — minus the temperature
+      // column since there's no data to show yet.
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: _card,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: _border),
+        ),
+        child: Row(children: [
+          const Text('🌤️', style: TextStyle(fontSize: 38)),
+          const SizedBox(width: 14),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(
+              'EVENT DAY FORECAST',
+              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: _muted, letterSpacing: 0.8),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              'Weather forecast available closer to the event date',
+              style: TextStyle(
+                fontFamily: 'Nunito',
+                fontSize: 13,
+                color: _isDark ? Colors.white : AppColors.dark,
+                height: 1.35,
+              ),
+            ),
+          ])),
         ]),
       );
     }

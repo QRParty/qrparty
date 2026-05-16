@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -747,17 +748,24 @@ class _StorageUpgradeSheetState extends State<_StorageUpgradeSheet> {
   }
 
   Future<void> _loadProducts() async {
-    final available = await InAppPurchase.instance.isAvailable();
-    if (!available) {
+    try {
+      final available = await InAppPurchase.instance.isAvailable();
+      if (!available) {
+        if (mounted) setState(() => _loading = false);
+        return;
+      }
+      final response = await InAppPurchase.instance.queryProductDetails({'storage_25_events', 'storage_50_events'});
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _products = {for (final p in response.productDetails) p.id: p};
+        });
+      }
+    } catch (_) {
+      // Any throw (store unavailable, network blip, plugin error) lands
+      // in the same empty-products branch as a clean "not available"
+      // — the iOS-specific friendly message in build() handles both.
       if (mounted) setState(() => _loading = false);
-      return;
-    }
-    final response = await InAppPurchase.instance.queryProductDetails({'storage_25_events', 'storage_50_events'});
-    if (mounted) {
-      setState(() {
-        _loading = false;
-        _products = {for (final p in response.productDetails) p.id: p};
-      });
     }
   }
 
@@ -793,9 +801,36 @@ class _StorageUpgradeSheetState extends State<_StorageUpgradeSheet> {
           const SizedBox(height: 24),
           if (_loading)
             const CircularProgressIndicator(color: AppColors.green)
-          else if (_products.isEmpty)
-            Text('Store unavailable. Try again later.', style: TextStyle(color: _muted))
-          else ...[
+          else if (_products.isEmpty) ...[
+            // iOS storage IAP isn't live yet — every failure mode
+            // (store unavailable, products not propagated, plugin
+            // error) routes through this same empty-products branch,
+            // so a single iOS-aware friendly message covers them all.
+            // Android keeps the original "try again later" copy since
+            // there the empty branch really does mean a transient
+            // store/network problem.
+            Text(
+              Platform.isIOS
+                  ? 'Storage upgrades are coming soon to iOS! Available now on Android.'
+                  : 'Store unavailable. Try again later.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, color: _muted, height: 1.4),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.green,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                child: const Text('Got it', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+              ),
+            ),
+          ] else ...[
             _optionTile('storage_25_events', '25 Events', '+5 more archived events'),
             const SizedBox(height: 12),
             _optionTile('storage_50_events', '50 Events', '+30 more archived events · Best value'),
