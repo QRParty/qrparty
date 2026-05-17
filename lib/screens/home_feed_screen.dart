@@ -85,6 +85,29 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
   ///   • Past / archived / draft events are filtered client-side.
   ///   • collectionGroup query on a single field (uid) — Firestore
   ///     auto-creates this index, no console-link error on first run.
+  /// Pull-to-refresh handler. Streams already auto-update on Firestore
+  /// changes, but a manual pull cancels and re-subscribes so the user
+  /// sees a real round-trip + spinner. Also rescues the rare case
+  /// where a stream silently stalls (network change mid-session, etc.).
+  Future<void> _onRefresh() async {
+    _eventsSub?.cancel();
+    _publicEventsSub?.cancel();
+    _attendingSub?.cancel();
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _exploreLoading = true;
+        _attendingLoaded = false;
+      });
+    }
+    _subscribeToEvents();
+    _subscribeToPublicEvents();
+    _subscribeToAttendingEvents();
+    // Hold the spinner ~700ms so it doesn't snap shut before the
+    // first snapshot lands — a sub-100ms refresh feels broken.
+    await Future.delayed(const Duration(milliseconds: 700));
+  }
+
   void _subscribeToAttendingEvents() {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -457,36 +480,44 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
                                 if (drafts.isEmpty
                                     && filteredEvents.isEmpty
                                     && attending.isEmpty) return _buildEmptyState();
-                                return ListView(
-                                  padding: EdgeInsets.fromLTRB(16, 8, 16, _selectMode ? 100 : 80),
-                                  children: [
-                                    if (attending.isNotEmpty) ...[
-                                      _attendingSectionHeader(attending.length),
-                                      ...attending.map((a) => _buildAttendingCard(context, a)),
-                                      const SizedBox(height: 8),
+                                return RefreshIndicator(
+                                  onRefresh: _onRefresh,
+                                  color: AppColors.green,
+                                  child: ListView(
+                                    padding: EdgeInsets.fromLTRB(16, 8, 16, _selectMode ? 100 : 80),
+                                    children: [
+                                      if (attending.isNotEmpty) ...[
+                                        _attendingSectionHeader(attending.length),
+                                        ...attending.map((a) => _buildAttendingCard(context, a)),
+                                        const SizedBox(height: 8),
+                                      ],
+                                      // Show the UPCOMING header only when
+                                      // there's an Attending list above it —
+                                      // otherwise the hosted-events list IS
+                                      // the page and a header is redundant.
+                                      if (filteredEvents.isNotEmpty && attending.isNotEmpty)
+                                        _upcomingSectionHeader(filteredEvents.length),
+                                      ...filteredEvents.map((e) => _buildEventCard(context, e)),
+                                      if (filteredEvents.isNotEmpty && drafts.isNotEmpty)
+                                        const SizedBox(height: 8),
+                                      if (drafts.isNotEmpty) ...[
+                                        _draftsSectionHeader(drafts.length),
+                                        ...drafts.map((d) => _buildEventCard(context, d)),
+                                      ],
                                     ],
-                                    // Show the UPCOMING header only when
-                                    // there's an Attending list above it —
-                                    // otherwise the hosted-events list IS
-                                    // the page and a header is redundant.
-                                    if (filteredEvents.isNotEmpty && attending.isNotEmpty)
-                                      _upcomingSectionHeader(filteredEvents.length),
-                                    ...filteredEvents.map((e) => _buildEventCard(context, e)),
-                                    if (filteredEvents.isNotEmpty && drafts.isNotEmpty)
-                                      const SizedBox(height: 8),
-                                    if (drafts.isNotEmpty) ...[
-                                      _draftsSectionHeader(drafts.length),
-                                      ...drafts.map((d) => _buildEventCard(context, d)),
-                                    ],
-                                  ],
+                                  ),
                                 );
                               }
                               // Past tab — unchanged behaviour.
                               if (filteredEvents.isEmpty) return _buildEmptyState();
-                              return ListView.builder(
-                                padding: EdgeInsets.fromLTRB(16, 8, 16, _selectMode ? 100 : 80),
-                                itemCount: filteredEvents.length,
-                                itemBuilder: (context, index) => _buildEventCard(context, filteredEvents[index]),
+                              return RefreshIndicator(
+                                onRefresh: _onRefresh,
+                                color: AppColors.green,
+                                child: ListView.builder(
+                                  padding: EdgeInsets.fromLTRB(16, 8, 16, _selectMode ? 100 : 80),
+                                  itemCount: filteredEvents.length,
+                                  itemBuilder: (context, index) => _buildEventCard(context, filteredEvents[index]),
+                                ),
                               );
                             }),
                           ),
@@ -601,10 +632,14 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
                         const Text('Public events created by hosts will appear here', style: TextStyle(fontSize: 13, color: AppColors.muted)),
                       ]),
                     )
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 80),
-                      itemCount: events.length,
-                      itemBuilder: (context, index) => _buildExploreCard(context, events[index]),
+                  : RefreshIndicator(
+                      onRefresh: _onRefresh,
+                      color: AppColors.green,
+                      child: ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 80),
+                        itemCount: events.length,
+                        itemBuilder: (context, index) => _buildExploreCard(context, events[index]),
+                      ),
                     ),
         ),
       ],
