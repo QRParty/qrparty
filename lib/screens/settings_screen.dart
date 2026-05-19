@@ -802,16 +802,16 @@ class _StorageUpgradeSheetState extends State<_StorageUpgradeSheet> {
           if (_loading)
             const CircularProgressIndicator(color: AppColors.green)
           else if (_products.isEmpty) ...[
-            // iOS storage IAP isn't live yet — every failure mode
-            // (store unavailable, products not propagated, plugin
-            // error) routes through this same empty-products branch,
-            // so a single iOS-aware friendly message covers them all.
-            // Android keeps the original "try again later" copy since
-            // there the empty branch really does mean a transient
-            // store/network problem.
+            // Empty-products branch covers all IAP failure modes
+            // uniformly: store unavailable, products not yet
+            // propagated through review, plugin error. App Store
+            // reviewer rejected the prior platform-specific copy
+            // ("…coming soon to iOS…") under Guideline 2.3.10 (no
+            // mentions of other platforms). Keep the message generic
+            // on both platforms.
             Text(
               Platform.isIOS
-                  ? 'Storage upgrades are coming soon to iOS! Available now on Android.'
+                  ? 'Upgrade your storage to archive more events.'
                   : 'Store unavailable. Try again later.',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 14, color: _muted, height: 1.4),
