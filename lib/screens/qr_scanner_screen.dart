@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../utils.dart';
 import 'guest_event_screen.dart';
+import 'public_org_screen.dart';
 
 // ─── SCREEN: QR SCANNER ──────────────────────────────────────
 class QRScannerScreen extends StatefulWidget {
@@ -32,34 +33,72 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
     final raw = barcode!.rawValue!;
     debugPrint('[QRScanner] scanned raw="$raw"');
 
-    // Pull the lookup token out of the URL. QR Party encodes events
-    // as `https://partywithqr.com/event/{shortCode}` — the segment
-    // after `/event/` is a 4–8 char uppercase shortCode (NOT a
-    // Firestore doc id, which is much longer). The legacy form
-    // `?id={docId}` is also accepted so older printed QR codes
-    // still work. Bare scanned text (no scheme) is treated as the
-    // lookup token directly — handy for QR codes someone made by
-    // typing just the shortCode.
+    // QR Party encodes three URL shapes the scanner has to disambiguate:
+    //   • `https://partywithqr.com/event/{shortCode}` (or legacy
+    //     `?id={docId}`) → resolve to an event and push GuestEventScreen
+    //   • `https://partywithqr.com/org/{orgId}` → push PublicOrgScreen
+    //     directly (no Firestore lookup needed — orgId IS the doc id)
+    //   • `https://partywithqr.com/biz/{slug}` → no in-app counterpart
+    //     yet, surface a friendly snackbar pointing to the browser
+    // Bare scanned text (no scheme) falls through to the event path
+    // when it looks like a shortCode (4–8 char alphanumeric) — handy
+    // for QR codes someone made by typing just the shortCode.
     final uri = Uri.tryParse(raw);
-    String? lookup;
+    String? eventLookup;
+    String? orgId;
+    bool isBizUrl = false;
     if (uri != null) {
       final segs = uri.pathSegments;
       final eventIdx = segs.indexOf('event');
+      final orgIdx   = segs.indexOf('org');
+      final bizIdx   = segs.indexOf('biz');
       if (eventIdx != -1 && eventIdx + 1 < segs.length) {
-        lookup = segs[eventIdx + 1];
+        eventLookup = segs[eventIdx + 1];
+      } else if (orgIdx != -1 && orgIdx + 1 < segs.length) {
+        orgId = segs[orgIdx + 1];
+      } else if (bizIdx != -1 && bizIdx + 1 < segs.length) {
+        isBizUrl = true;
       } else {
-        lookup = uri.queryParameters['id'];
+        eventLookup = uri.queryParameters['id'];
       }
     }
-    // No URL match — fall back to treating the raw scan as a
-    // shortCode if it looks like one.
-    if ((lookup == null || lookup.isEmpty)
+    if ((eventLookup == null || eventLookup.isEmpty)
+        && orgId == null
+        && !isBizUrl
         && RegExp(r'^[A-Za-z0-9]{4,8}$').hasMatch(raw.trim())) {
-      lookup = raw.trim();
+      eventLookup = raw.trim();
     }
-    debugPrint('[QRScanner] parsed lookup="$lookup"');
+    debugPrint('[QRScanner] parsed eventLookup="$eventLookup" orgId="$orgId" isBizUrl=$isBizUrl');
 
-    if (lookup == null || lookup.isEmpty) {
+    // /biz/ — no in-app screen yet; route the user to the browser.
+    if (isBizUrl) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Business QR codes aren't supported in-app yet — visit the URL in your browser"),
+          backgroundColor: Colors.redAccent,
+          duration: Duration(seconds: 4),
+        ),
+      );
+      setState(() => _processing = false);
+      await _controller.start();
+      return;
+    }
+
+    // /org/ — push the public org screen directly (no Firestore
+    // resolve needed; the orgId IS the doc id). Mirrors main.dart's
+    // _pushOrgScreen in the deep-link path so a scanned org QR and a
+    // tapped org URL land on the same screen.
+    if (orgId != null && orgId.isNotEmpty) {
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => PublicOrgScreen(orgId: orgId!)),
+      );
+      return;
+    }
+
+    if (eventLookup == null || eventLookup.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Not a valid QR Party code'), backgroundColor: Colors.redAccent),
@@ -68,6 +107,7 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
       await _controller.start();
       return;
     }
+    final lookup = eventLookup;
 
     try {
       // Mirror main.dart's _resolveAndPushEvent: short tokens that

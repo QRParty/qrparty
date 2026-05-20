@@ -181,6 +181,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
   StreamSubscription<String>? _shareSub;
   StreamSubscription<User?>? _authSub;
   StreamSubscription<String>? _tokenRefreshSub;
+  AppLifecycleListener? _lifecycleListener;
 
   /// Holds a deep-link target (shortCode or docId) that arrived while the
   /// user wasn't signed in yet. Drained by [_setupPendingDeepLinkDrain]
@@ -202,6 +203,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
     _setupBilling();
     _setupSharedUrls();
     _setupPendingDeepLinkDrain();
+    _setupLifecycleListener();
   }
 
   @override
@@ -211,7 +213,36 @@ class _QRPartyAppState extends State<QRPartyApp> {
     _shareSub?.cancel();
     _authSub?.cancel();
     _tokenRefreshSub?.cancel();
+    _lifecycleListener?.dispose();
     super.dispose();
+  }
+
+  /// Refreshes the cached FirebaseAuth user object every time the app
+  /// resumes from background. Fixes a stale-auth class of bugs that
+  /// shows up after TestFlight / Play Store auto-updates: the cached
+  /// User object survives the swap, but its claims, custom token, and
+  /// disabled-state become stale relative to the server. Without this,
+  /// users hit "permission denied" on operations that should work, and
+  /// the only workaround was sign-out + back in. `currentUser?.reload()`
+  /// pulls the fresh user record on resume so the cached object catches
+  /// up silently.
+  ///
+  /// Best-effort: any failure (network blip, token expired, user
+  /// deleted server-side) is logged and swallowed. The auth-state
+  /// listener handles user-deleted as a separate sign-out flow.
+  void _setupLifecycleListener() {
+    _lifecycleListener = AppLifecycleListener(
+      onResume: () async {
+        final user = FirebaseAuth.instance.currentUser;
+        if (user == null) return;
+        try {
+          await user.reload();
+          debugPrint('[Lifecycle] resumed — reloaded auth for uid=${user.uid}');
+        } catch (e) {
+          debugPrint('[Lifecycle] resume reload FAILED uid=${user.uid}: $e');
+        }
+      },
+    );
   }
 
   /// Two delivery paths for shared URLs:
