@@ -233,20 +233,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ]);
                 }),
               ),
-              _divider(),
-              Builder(builder: (ctx) {
-                final purchase = _userData['storagePurchase'] as String?;
-                if (purchase == 'storage_50_events') {
-                  return _tile(ctx, Icons.workspace_premium_outlined, 'Storage Upgraded', '50 events · Max tier', null);
-                }
-                return _tile(
-                  ctx,
-                  Icons.workspace_premium_outlined,
-                  'Upgrade Storage',
-                  purchase == 'storage_25_events' ? '25 events · Tap to upgrade to 50' : 'More archived events · from \$4.99',
-                  () => _showStorageUpgrade(ctx),
-                );
-              }),
+              // Storage upgrade IAP products aren't live on iOS yet — hide
+              // the entire Upgrade Storage row (and its leading divider so
+              // there's no orphan rule between the progress card and the
+              // next section). The events-used progress bar above stays
+              // visible on both platforms so users can still see their
+              // archived-event count.
+              if (!Platform.isIOS) ...[
+                _divider(),
+                Builder(builder: (ctx) {
+                  final purchase = _userData['storagePurchase'] as String?;
+                  if (purchase == 'storage_50_events') {
+                    return _tile(ctx, Icons.workspace_premium_outlined, 'Storage Upgraded', '50 events · Max tier', null);
+                  }
+                  return _tile(
+                    ctx,
+                    Icons.workspace_premium_outlined,
+                    'Upgrade Storage',
+                    purchase == 'storage_25_events' ? '25 events · Tap to upgrade to 50' : 'More archived events · from \$4.99',
+                    () => _showStorageUpgrade(ctx),
+                  );
+                }),
+              ],
             ]),
 
             // ── APPEARANCE ───────────────────────────────────
