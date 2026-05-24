@@ -157,22 +157,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 );
               }),
-              _divider(),
-              Builder(builder: (ctx) {
-                final accountType = _userData['accountType'] as String?;
-                final isBusinessLike = accountType == 'business' || accountType == 'businessPlus';
-                if (isBusinessLike) {
-                  // Already on a business plan — no upsell needed.
-                  return const SizedBox.shrink();
-                }
-                return ListTile(
-                  leading: const Text('✨', style: TextStyle(fontSize: 20)),
-                  title: const Text('Upgrade to Business ✨', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: _purple)),
-                  subtitle: Text('Unlock pro tools & analytics', style: TextStyle(fontSize: 12, color: _muted)),
-                  trailing: const Icon(Icons.chevron_right, color: _purple, size: 20),
-                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BusinessUpgradeScreen())),
-                );
-              }),
+              // Business / Headquarters IAP subscriptions aren't live on
+              // iOS yet — hide the upsell tile + its leading divider so
+              // there's no orphan rule between the prior content and the
+              // next section. Same gate-pattern as the storage section.
+              if (!Platform.isIOS) ...[
+                _divider(),
+                Builder(builder: (ctx) {
+                  final accountType = _userData['accountType'] as String?;
+                  final isBusinessLike = accountType == 'business' || accountType == 'businessPlus';
+                  if (isBusinessLike) {
+                    // Already on a business plan — no upsell needed.
+                    return const SizedBox.shrink();
+                  }
+                  return ListTile(
+                    leading: const Text('✨', style: TextStyle(fontSize: 20)),
+                    title: const Text('Upgrade to Business ✨', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: _purple)),
+                    subtitle: Text('Unlock pro tools & analytics', style: TextStyle(fontSize: 12, color: _muted)),
+                    trailing: const Icon(Icons.chevron_right, color: _purple, size: 20),
+                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BusinessUpgradeScreen())),
+                  );
+                }),
+              ],
             ]),
 
             // ── ORDERS ──────────────────────────────────────
