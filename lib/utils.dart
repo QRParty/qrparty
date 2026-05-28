@@ -119,7 +119,7 @@ const bool kWishlistEnabled = true;
 /// are gated. Existing orders placed before the flag flipped continue
 /// to surface in the user's order history; this flag only blocks
 /// NEW order creation paths.
-const bool kMerchOrderingEnabled = true;
+const bool kMerchOrderingEnabled = false;
 
 class AppNotifications {
   static final List<Map<String, dynamic>> sentNotifications = [];
