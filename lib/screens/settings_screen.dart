@@ -157,28 +157,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 );
               }),
-              // Business / Headquarters IAP subscriptions aren't live on
-              // iOS yet — hide the upsell tile + its leading divider so
-              // there's no orphan rule between the prior content and the
-              // next section. Same gate-pattern as the storage section.
-              if (!Platform.isIOS) ...[
-                _divider(),
-                Builder(builder: (ctx) {
-                  final accountType = _userData['accountType'] as String?;
-                  final isBusinessLike = accountType == 'business' || accountType == 'businessPlus';
-                  if (isBusinessLike) {
-                    // Already on a business plan — no upsell needed.
-                    return const SizedBox.shrink();
-                  }
-                  return ListTile(
-                    leading: const Text('✨', style: TextStyle(fontSize: 20)),
-                    title: const Text('Upgrade to Business ✨', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: _purple)),
-                    subtitle: Text('Unlock pro tools & analytics', style: TextStyle(fontSize: 12, color: _muted)),
-                    trailing: const Icon(Icons.chevron_right, color: _purple, size: 20),
-                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BusinessUpgradeScreen())),
-                  );
-                }),
-              ],
+              _divider(),
+              Builder(builder: (ctx) {
+                final accountType = _userData['accountType'] as String?;
+                final isBusinessLike = accountType == 'business' || accountType == 'businessPlus';
+                if (isBusinessLike) {
+                  // Already on a business plan — no upsell needed.
+                  return const SizedBox.shrink();
+                }
+                return ListTile(
+                  leading: const Text('✨', style: TextStyle(fontSize: 20)),
+                  title: const Text('Upgrade to Business ✨', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: _purple)),
+                  subtitle: Text('Unlock pro tools & analytics', style: TextStyle(fontSize: 12, color: _muted)),
+                  trailing: const Icon(Icons.chevron_right, color: _purple, size: 20),
+                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BusinessUpgradeScreen())),
+                );
+              }),
             ]),
 
             // ── ORDERS ──────────────────────────────────────
@@ -239,28 +233,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ]);
                 }),
               ),
-              // Storage upgrade IAP products aren't live on iOS yet — hide
-              // the entire Upgrade Storage row (and its leading divider so
-              // there's no orphan rule between the progress card and the
-              // next section). The events-used progress bar above stays
-              // visible on both platforms so users can still see their
-              // archived-event count.
-              if (!Platform.isIOS) ...[
-                _divider(),
-                Builder(builder: (ctx) {
-                  final purchase = _userData['storagePurchase'] as String?;
-                  if (purchase == 'storage_50_events') {
-                    return _tile(ctx, Icons.workspace_premium_outlined, 'Storage Upgraded', '50 events · Max tier', null);
-                  }
-                  return _tile(
-                    ctx,
-                    Icons.workspace_premium_outlined,
-                    'Upgrade Storage',
-                    purchase == 'storage_25_events' ? '25 events · Tap to upgrade to 50' : 'More archived events · from \$4.99',
-                    () => _showStorageUpgrade(ctx),
-                  );
-                }),
-              ],
+              _divider(),
+              Builder(builder: (ctx) {
+                final purchase = _userData['storagePurchase'] as String?;
+                if (purchase == 'storage_50_events') {
+                  return _tile(ctx, Icons.workspace_premium_outlined, 'Storage Upgraded', '50 events · Max tier', null);
+                }
+                return _tile(
+                  ctx,
+                  Icons.workspace_premium_outlined,
+                  'Upgrade Storage',
+                  purchase == 'storage_25_events' ? '25 events · Tap to upgrade to 50' : 'More archived events · from \$4.99',
+                  () => _showStorageUpgrade(ctx),
+                );
+              }),
             ]),
 
             // ── APPEARANCE ───────────────────────────────────

@@ -379,25 +379,20 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
             style: TextStyle(fontSize: 14, color: _muted, height: 1.5),
           ),
           const SizedBox(height: 22),
-          // Headquarters subscription isn't available on iOS yet — hide
-          // the CTA there so the screen can't reach BusinessUpgradeScreen.
-          // The descriptive text above stays so iOS users still know what
-          // Headquarters is and can subscribe later when iOS IAP ships.
-          if (!Platform.isIOS)
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BusinessUpgradeScreen())),
-                icon: const Text('✨', style: TextStyle(fontSize: 18)),
-                label: Text(isBusiness ? 'Upgrade to Headquarters' : 'See Headquarters',
-                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _purple, foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BusinessUpgradeScreen())),
+              icon: const Text('✨', style: TextStyle(fontSize: 18)),
+              label: Text(isBusiness ? 'Upgrade to Headquarters' : 'See Headquarters',
+                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _purple, foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
               ),
             ),
+          ),
         ]),
       ),
     );
