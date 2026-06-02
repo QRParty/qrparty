@@ -1179,6 +1179,29 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
                 () => Navigator.push(context, MaterialPageRoute(builder: (_) => GuestEventScreen(eventId: event['id'] as String)))),
             const SizedBox(width: 8),
             _actionBtn('Template', Icons.bookmark_add_outlined, _gold, () => _saveAsTemplate(event)),
+            // Inline trash button — only on cards the current user can
+            // actually delete (host or org owner). Hidden on co-hosted
+            // events so the row stays consistent with the permission
+            // model already used by the long-press / 3-dot menu paths.
+            // Routes through EventDeleteHelper.confirmAndDelete (same
+            // hold-to-delete dialog + CF-cascade machinery) to keep
+            // delete behavior identical regardless of entry point.
+            if (_canDeleteEvent(event)) ...[
+              const SizedBox(width: 8),
+              OutlinedButton(
+                onPressed: () => EventDeleteHelper.confirmAndDelete(
+                  context,
+                  eventId: event['id'] as String,
+                  eventTitle: (event['title'] as String?) ?? 'this event',
+                ),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Colors.redAccent),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+                ),
+                child: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 16),
+              ),
+            ],
           ]),
         ]),
       ),

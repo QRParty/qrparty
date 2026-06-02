@@ -49,13 +49,32 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
   bool _attendingLoaded = false;
   StreamSubscription<QuerySnapshot>? _attendingSub;
 
+  // Auth-state listener — keeps host + attending streams in sync with
+  // whoever is currently signed in. Covers two scenarios the root
+  // StreamBuilder can't handle on its own:
+  //   1. Cold-start race: initState reads currentUser before
+  //      FirebaseAuth finishes hydrating it, so the synchronous
+  //      _subscribeToEvents call sees a null user, bails out, and
+  //      leaves the feed permanently empty until a manual sign-out
+  //      and back-in forces a fresh mount.
+  //   2. Same-session account change: user signs out and back in
+  //      (or as a different account) without the parent route
+  //      tearing this widget down.
+  // _subscribedUid tracks which uid the active subscriptions are
+  // wired to, so the listener's first emission (which replays the
+  // current user — usually matches initState's read) is a no-op.
+  StreamSubscription<User?>? _authSub;
+  String? _subscribedUid;
+
   @override
   void initState() {
     super.initState();
     print('[HomeFeed] initState — calling _subscribeToPublicEvents()');
+    _subscribedUid = FirebaseAuth.instance.currentUser?.uid;
     _subscribeToEvents();
     _subscribeToPublicEvents();
     _subscribeToAttendingEvents();
+    _setupAuthListener();
     // FCM token registration moved to main.dart's auth listener so
     // deep-link-only users (who never visit this screen) also register.
   }
@@ -65,8 +84,54 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
     _eventsSub?.cancel();
     _publicEventsSub?.cancel();
     _attendingSub?.cancel();
+    _authSub?.cancel();
     _exploreSearchController.dispose();
     super.dispose();
+  }
+
+  void _setupAuthListener() {
+    _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
+      final newUid = user?.uid;
+      // Most calls are no-ops: the first emission replays the current
+      // user (matches what initState already subscribed for), and
+      // unrelated emissions (token refresh on the same uid) fire here
+      // too. Only act when the uid actually changes.
+      if (newUid == _subscribedUid) return;
+      debugPrint('[HomeFeed] auth user changed $_subscribedUid → $newUid — refreshing feed');
+      _subscribedUid = newUid;
+      _eventsSub?.cancel();
+      _attendingSub?.cancel();
+      if (newUid == null) {
+        // Signed out — the root StreamBuilder will swap to WelcomeScreen
+        // and unmount this widget. Clear local state defensively in
+        // case there's a frame between sign-out and that swap.
+        if (mounted) {
+          setState(() {
+            _events = [];
+            _attendingEvents = [];
+            _loading = false;
+            _attendingLoaded = true;
+          });
+        }
+        return;
+      }
+      // Different signed-in user (or first real user after a cold-start
+      // race). Clear the previous user's events so they don't flash
+      // under the new account, then re-subscribe with the new uid. The
+      // brief loading state here is the only spinner — the common
+      // path (single sign-in, initState picked up the right user)
+      // never reaches this branch.
+      if (mounted) {
+        setState(() {
+          _events = [];
+          _attendingEvents = [];
+          _loading = true;
+          _attendingLoaded = false;
+        });
+      }
+      _subscribeToEvents();
+      _subscribeToAttendingEvents();
+    });
   }
 
   /// Listens to RSVP docs across every event subcollection where the

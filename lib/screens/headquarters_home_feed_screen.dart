@@ -654,6 +654,31 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
                 );
               },
             ),
+            // Inline trash button — only on cards the current user can
+            // actually delete. Linked-Business events shown on the HQ
+            // feed have hostId == businessOwnerUid; _canDeleteEvent
+            // returns false for them so the affordance stays hidden.
+            // Routes through EventDeleteHelper.confirmAndDelete (same
+            // hold-to-delete dialog + CF-cascade machinery as the
+            // long-press and 3-dot menu paths).
+            if (_canDeleteEvent(event)) ...[
+              const SizedBox(height: 12),
+              Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                OutlinedButton(
+                  onPressed: () => EventDeleteHelper.confirmAndDelete(
+                    context,
+                    eventId: eventId,
+                    eventTitle: title,
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.redAccent),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+                  ),
+                  child: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 16),
+                ),
+              ]),
+            ],
           ],
         ),
       ),
