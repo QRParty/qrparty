@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../utils.dart';
 import 'welcome_screen.dart';
 import 'business_upgrade_screen.dart';
@@ -79,6 +80,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ));
     // Return to HomeRouter; ValueListenableBuilder there picks up the change.
     Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
+  Future<void> _openExternalUrl(String url) async {
+    final uri = Uri.parse(url);
+    try {
+      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!launched && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("Couldn't open $url"),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("Couldn't open link: $e"),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
+    }
   }
 
   Future<void> _showStorageUpgrade(BuildContext context) {
@@ -314,9 +335,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _card([
               _tile(context, Icons.info_outline,          'App Version',       '1.0.0',         null),
               _divider(),
-              _tile(context, Icons.privacy_tip_outlined,  'Privacy Policy',    null,            () => showComingSoon(context, 'Privacy Policy')),
+              _tile(context, Icons.privacy_tip_outlined,  'Privacy Policy',    null,            () => _openExternalUrl('https://partywithqr.com/privacy')),
               _divider(),
-              _tile(context, Icons.gavel_outlined,        'Terms of Service',  null,            () => showComingSoon(context, 'Terms of Service')),
+              _tile(context, Icons.gavel_outlined,        'Terms of Service',  null,            () => _openExternalUrl('https://partywithqr.com/terms')),
               _divider(),
               _tile(context, Icons.mail_outline,          'Contact Us',        'privacy@partywithqr.com', () => showComingSoon(context, 'Contact Us')),
             ]),

@@ -271,7 +271,7 @@ class _BusinessUpgradeScreenState extends State<BusinessUpgradeScreen> {
                 subtitle: 'Everything in Business, plus:',
                 features: _plusExtraFeatures,
                 monthlyPrice: '\$19.99',
-                yearlyPrice: '\$159.99',
+                yearlyPrice: '\$179.99',
                 selectedPlan: _selectedPlusPlan,
                 onPlanChanged: (p) => setState(() => _selectedPlusPlan = p),
                 onSubscribe: () => kTestingMode ? _testUpgrade('businessPlus') : _subscribe('businessPlus'),

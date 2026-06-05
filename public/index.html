@@ -10,7 +10,7 @@
     :root {
       --green: #52796F; --green-light: #84A98C; --green-pale: #CAD2C5;
       --purple: #9C7FD4; --purple-pale: #EDE7F6;
-      --gold: #E9C46A; --dark: #2D3047; --dark2: #242638; --dark3: #1e1f30;
+      --gold: #C8922A; --gold-light: #E9C46A; --dark: #2D3047; --dark2: #242638; --dark3: #1e1f30;
       --surface: #F8F7FC; --muted: #8892A4;
     }
     html { scroll-behavior: smooth; }
@@ -31,6 +31,13 @@
     nav ul { display: flex; gap: 36px; list-style: none; }
     nav ul a { text-decoration: none; font-size: 14px; font-weight: 500; color: rgba(255,255,255,.5); transition: color .2s; }
     nav ul a:hover { color: var(--green-light); }
+    .nav-live-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(82,121,111,.2); color: var(--green-light);
+      font-size: 11px; font-weight: 700; padding: 4px 12px; border-radius: 50px;
+      border: 1px solid rgba(82,121,111,.4); margin-left: 10px; letter-spacing: .5px;
+    }
+    .nav-live-dot { width: 6px; height: 6px; background: var(--green-light); border-radius: 50%; animation: blink 2s infinite; display: inline-block; }
 
     /* ── HERO ─────────────────────────────────────────── */
     .hero {
@@ -55,13 +62,14 @@
 
     .hero-badge {
       display: inline-flex; align-items: center; gap: 8px;
-      background: rgba(156,127,212,.18); color: #c4a6f0;
-      font-size: 13px; font-weight: 600; padding: 6px 18px; border-radius: 50px;
-      border: 1px solid rgba(156,127,212,.3);
+      background: rgba(82,121,111,.18); color: var(--green-light);
+      font-size: 13px; font-weight: 700; padding: 6px 18px; border-radius: 50px;
+      border: 1px solid rgba(82,121,111,.35);
       margin-bottom: 28px;
       animation: fadeUp .5s ease both;
+      letter-spacing: .4px;
     }
-    .badge-dot { width: 7px; height: 7px; background: var(--purple); border-radius: 50%; animation: blink 2s infinite; }
+    .badge-dot { width: 7px; height: 7px; background: var(--green-light); border-radius: 50%; animation: blink 2s infinite; }
     @keyframes blink { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(1.6)} }
 
     .hero-brand {
@@ -90,6 +98,7 @@
     }
 
     /* ── HERO BUTTONS ────────────────────────────────── */
+    .hero-btns { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; margin-bottom: 16px; animation: fadeUp .5s .22s ease both; }
     .btn-primary-hero {
       background: var(--purple); color: white; border: none; padding: 18px 52px; border-radius: 50px;
       font: 800 18px 'DM Sans', sans-serif; cursor: pointer; text-decoration: none; display: inline-block;
@@ -98,13 +107,18 @@
       transition: transform .2s, box-shadow .2s;
     }
     .btn-primary-hero:hover { transform: translateY(-3px); box-shadow: 0 0 32px rgba(156,127,212,.6), 0 16px 48px rgba(156,127,212,.4); }
-    .btn-secondary-hero {
-      background: transparent; color: rgba(255,255,255,.85); border: 1.5px solid rgba(255,255,255,.25);
-      padding: 18px 44px; border-radius: 50px;
-      font: 600 17px 'DM Sans', sans-serif; cursor: pointer; text-decoration: none; display: inline-block;
-      transition: transform .2s, background .2s, border-color .2s;
+
+    /* Store download buttons in hero */
+    .store-btns { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-bottom: 16px; animation: fadeUp .5s .26s ease both; }
+    .store-btn {
+      display: inline-flex; align-items: center; gap: 10px;
+      padding: 12px 24px; border-radius: 50px; text-decoration: none;
+      font: 700 14px 'DM Sans', sans-serif; transition: transform .2s, box-shadow .2s;
+      border: 1.5px solid rgba(255,255,255,.2);
+      background: rgba(255,255,255,.08); color: white;
     }
-    .btn-secondary-hero:hover { transform: translateY(-3px); background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.5); }
+    .store-btn:hover { transform: translateY(-2px); background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.4); box-shadow: 0 8px 24px rgba(0,0,0,.3); }
+    .store-btn svg { flex-shrink: 0; }
 
     /* ── HERO STEPS ──────────────────────────────────── */
     .hero-steps {
@@ -164,15 +178,13 @@
     .business-features { background: var(--dark); padding: 110px 24px; }
     .business-features-inner { max-width: 1100px; margin: 0 auto; }
     .business-features .feat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
-    .business-features .feat-card {
-      background: #383B56; border: 1px solid #4A4E6B;
-    }
+    .business-features .feat-card { background: #383B56; border: 1px solid #4A4E6B; }
     .business-features .feat-card:hover { background: #424565; }
     .tier-header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 56px 0 24px; }
     .tier-header.first { margin-top: 36px; }
     .tier-name { font-family: 'Bebas Neue', sans-serif; font-size: 44px; line-height: 1; letter-spacing: 2px; }
     .tier-name.business { color: #9C7FD4; }
-    .tier-name.plus     { color: #C8922A; }
+    .tier-name.plus { color: #C8922A; }
     .tier-price { font-size: 16px; font-weight: 700; color: rgba(255,255,255,.65); }
 
     /* ── PRICING ──────────────────────────────────────── */
@@ -193,118 +205,60 @@
     }
     .plan-badge {
       position: absolute; top: -14px; left: 50%; transform: translateX(-50%);
-      background: var(--gold); color: #1A1A1A;
+      background: var(--gold); color: white;
       font-family: 'DM Sans', sans-serif;
       font-size: 11px; font-weight: 900; letter-spacing: 1.2px;
       padding: 6px 14px; border-radius: 50px;
       box-shadow: 0 8px 20px rgba(200,146,42,.35);
     }
-    /* Inline "Coming Soon" tag for individual feature rows (Business tier
-       has a single coming-soon item; Headquarters card uses the larger
-       banner below). Same gold/dark colorway as .plan-badge, just smaller
-       and inline next to the feature text. */
-    .coming-soon-pill {
-      display: inline-block; margin-left: 8px;
-      background: var(--gold); color: #1A1A1A;
-      font: 900 9.5px 'DM Sans', sans-serif; letter-spacing: .8px;
-      padding: 2px 8px; border-radius: 50px;
-      text-transform: uppercase; vertical-align: middle;
-      white-space: nowrap;
-    }
-    /* Full-width "COMING SOON" banner across the top of the Headquarters
-       card. Uses negative margins to break out of the card's 32px/28px
-       padding and span edge-to-edge, with rounded top corners that match
-       the card's 24px radius so the seam disappears. */
-    .plan-coming-banner {
-      margin: -32px -28px 24px;
-      background: var(--gold); color: #1A1A1A;
-      padding: 14px 16px; text-align: center;
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: 22px; letter-spacing: 5px;
-      border-radius: 24px 24px 0 0;
-      box-shadow: 0 8px 24px rgba(200,146,42,.3);
-    }
-    /* In-card footer block that sits below the features list. Used on
-       both paid tiers so it's unambiguous that Personal is the only plan
-       available today. The 1px gold divider above separates it from the
-       feature bullets without breaking the dashed-row rhythm. */
-    .plan-coming-footer {
-      margin-top: 18px; padding-top: 18px;
-      border-top: 1px solid rgba(200,146,42,.45);
-      text-align: center;
-    }
-    .plan-coming-footer .lock {
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 32px; height: 32px; border-radius: 50%;
-      background: rgba(200,146,42,.18);
-      color: var(--gold); font-size: 16px;
-      margin-bottom: 8px;
-    }
-    .plan-coming-footer .heading {
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: 16px; letter-spacing: 3px;
-      color: var(--gold); margin-bottom: 4px;
-    }
-    .plan-coming-footer .sub {
-      font-family: 'DM Sans', sans-serif;
-      font-size: 12.5px; line-height: 1.5;
-      color: rgba(255,255,255,.65);
-    }
-    .plan-name {
-      font-family: 'Bebas Neue', sans-serif; font-size: 28px;
-      color: white; letter-spacing: 1.5px; margin-bottom: 10px; line-height: 1;
-    }
-    .plan-price {
-      font-family: 'Bebas Neue', sans-serif; font-size: 56px;
-      color: white; line-height: 1; letter-spacing: 1px; margin-bottom: 4px;
-    }
-    .plan-featured .plan-price { color: var(--gold); }
-    .plan-price-sub { font-size: 14px; color: rgba(255,255,255,.5); font-weight: 500; margin-bottom: 24px; }
-    .plan-features { list-style: none; padding: 0; margin: 0 0 8px; flex: 1; }
+    .plan-name { font-family: 'Bebas Neue', sans-serif; font-size: 28px; color: white; letter-spacing: 1.5px; margin-bottom: 6px; line-height: 1; }
+    .plan-tagline { font-size: 13px; color: rgba(255,255,255,.45); margin-bottom: 16px; font-weight: 500; }
+
+    /* Pricing toggle area */
+    .plan-price-block { margin-bottom: 8px; }
+    .plan-price { font-family: 'Bebas Neue', sans-serif; font-size: 52px; color: white; line-height: 1; letter-spacing: 1px; }
+    .plan-featured .plan-price { color: var(--gold-light); }
+    .plan-price-period { font-size: 14px; color: rgba(255,255,255,.5); font-weight: 500; margin-bottom: 4px; }
+    .plan-price-annual { font-size: 13px; color: var(--green-light); font-weight: 600; margin-bottom: 20px; }
+    .plan-trial { font-size: 12px; color: rgba(255,255,255,.5); margin-bottom: 20px; }
+
+    .plan-features { list-style: none; padding: 0; margin: 0 0 24px; flex: 1; }
     .plan-features li {
       font-size: 14.5px; color: rgba(255,255,255,.8); line-height: 1.55;
       padding: 8px 0; padding-left: 24px; position: relative;
       border-top: 1px solid rgba(255,255,255,.06);
     }
     .plan-features li:first-child { border-top: none; }
-    .plan-features li::before {
-      content: '✓'; position: absolute; left: 0; top: 8px;
-      color: var(--green-light); font-weight: 800;
+    .plan-features li::before { content: '✓'; position: absolute; left: 0; top: 8px; color: var(--green-light); font-weight: 800; }
+    .plan-featured .plan-features li::before { color: var(--gold-light); }
+
+    /* CTA buttons inside plan cards */
+    .plan-cta {
+      display: block; text-align: center; padding: 14px 24px; border-radius: 50px;
+      font: 700 15px 'DM Sans', sans-serif; text-decoration: none; transition: transform .2s, box-shadow .2s;
+      margin-top: auto;
     }
-    .plan-featured .plan-features li::before { color: var(--gold); }
+    .plan-cta-purple { background: var(--purple); color: white; box-shadow: 0 6px 20px rgba(156,127,212,.4); }
+    .plan-cta-purple:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(156,127,212,.55); }
+    .plan-cta-gold { background: var(--gold); color: white; box-shadow: 0 6px 20px rgba(200,146,42,.4); }
+    .plan-cta-gold:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(200,146,42,.55); }
+    .plan-cta-outline { background: transparent; color: rgba(255,255,255,.7); border: 1.5px solid rgba(255,255,255,.2); }
+    .plan-cta-outline:hover { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.4); }
+
     .plan-footnote { text-align: center; font-size: 13px; color: rgba(255,255,255,.4); margin-top: 32px; }
 
     /* ── EVENT TYPES ──────────────────────────────────── */
     .event-types { background: var(--dark2); padding: 110px 24px; }
     .event-types-inner { max-width: 1100px; margin: 0 auto; }
-    .type-grid {
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 20px;
-      margin-top: 40px;
-    }
-    .type-row-2 {
-      display: flex;
-      justify-content: center;
-      gap: 20px;
-      margin-top: 20px;
-    }
+    .type-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px; margin-top: 40px; }
+    .type-row-2 { display: flex; justify-content: center; gap: 20px; margin-top: 20px; }
     .type-row-2 .type-card { width: calc(20% - 16px); }
     .type-card {
-      background: #383B56;
-      border: 1px solid #4A4E6B;
-      border-radius: 22px;
-      padding: 28px 20px;
-      display: flex; flex-direction: column; align-items: center; gap: 12px;
-      text-align: center;
-      transition: transform .3s, background .3s, box-shadow .3s, border-color .3s;
+      background: #383B56; border: 1px solid #4A4E6B; border-radius: 22px;
+      padding: 28px 20px; display: flex; flex-direction: column; align-items: center; gap: 12px;
+      text-align: center; transition: transform .3s, background .3s, box-shadow .3s, border-color .3s;
     }
-    .type-card:hover {
-      transform: translateY(-4px);
-      background: #3E4163;
-      border-color: rgba(156,127,212,.45);
-      box-shadow: 0 18px 40px rgba(0,0,0,.3);
-    }
+    .type-card:hover { transform: translateY(-4px); background: #3E4163; border-color: rgba(156,127,212,.45); box-shadow: 0 18px 40px rgba(0,0,0,.3); }
     .type-card .emoji { font-size: 36px; line-height: 1; }
     .type-card .name { font-size: 15px; font-weight: 700; color: white; letter-spacing: .2px; }
 
@@ -329,17 +283,9 @@
     .cta-title { font-family: 'Bebas Neue', sans-serif; font-size: clamp(52px, 9vw, 100px); line-height: 1; color: white; margin-bottom: 20px; position: relative; }
     .cta-desc { font-size: 20px; color: rgba(255,255,255,.75); max-width: 440px; margin: 0 auto 48px; line-height: 1.7; position: relative; }
     .cta-btns { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; position: relative; }
-    .btn-white {
-      background: white; color: var(--green); border: none; padding: 18px 48px; border-radius: 50px;
-      font: 700 17px 'DM Sans', sans-serif; cursor: pointer;
-      transition: transform .2s, box-shadow .2s; text-decoration: none; display: inline-block;
-    }
+    .btn-white { background: white; color: var(--green); border: none; padding: 18px 48px; border-radius: 50px; font: 700 17px 'DM Sans', sans-serif; cursor: pointer; transition: transform .2s, box-shadow .2s; text-decoration: none; display: inline-block; }
     .btn-white:hover { transform: translateY(-3px); box-shadow: 0 18px 44px rgba(0,0,0,.25); }
-    .btn-outline-white {
-      background: transparent; color: white; border: 2px solid rgba(255,255,255,.4);
-      padding: 18px 48px; border-radius: 50px; font: 600 17px 'DM Sans', sans-serif;
-      cursor: pointer; transition: all .2s; text-decoration: none; display: inline-block;
-    }
+    .btn-outline-white { background: transparent; color: white; border: 2px solid rgba(255,255,255,.4); padding: 18px 48px; border-radius: 50px; font: 600 17px 'DM Sans', sans-serif; cursor: pointer; transition: all .2s; text-decoration: none; display: inline-block; }
     .btn-outline-white:hover { border-color: white; background: rgba(255,255,255,.1); }
 
     /* ── FOOTER ───────────────────────────────────────── */
@@ -354,15 +300,20 @@
     footer p { font-size: 13px; color: rgba(255,255,255,.3); }
 
     /* ── ANIMATIONS ──────────────────────────────────── */
-    @keyframes bounceDown { 0%,100%{transform:translateY(0)} 50%{transform:translateY(5px)} }
     @keyframes fadeUp { from{opacity:0;transform:translateY(24px)} to{opacity:1;transform:translateY(0)} }
-    @keyframes pulse { 0%,100%{box-shadow:0 0 0 3px rgba(82,121,111,.2)} 50%{box-shadow:0 0 0 7px rgba(82,121,111,.0)} }
+    @keyframes floatB { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-28px)} }
 
     /* ── RESPONSIVE ───────────────────────────────────── */
     @media (max-width: 768px) {
       nav { padding: 14px 20px; }
       nav ul { display: none; }
       .hero-headline { font-size: clamp(48px, 13vw, 80px); }
+      .type-grid { grid-template-columns: repeat(3, 1fr); }
+      .type-row-2 .type-card { width: auto; flex: 1; min-width: 100px; }
+    }
+    @media (max-width: 480px) {
+      .type-grid { grid-template-columns: repeat(2, 1fr); }
+      .store-btns { flex-direction: column; align-items: center; }
     }
   </style>
   <!-- Google tag (gtag.js) -->
@@ -379,10 +330,10 @@
 
 <!-- NAV -->
 <nav>
-  <a class="nav-logo" href="#"><span class="qr">QR</span><span class="party">Party</span><span class="tm">™</span></a>
-  <span style="display:inline-flex;align-items:center;gap:6px;background:rgba(156,127,212,.18);color:#c4a6f0;font-size:11px;font-weight:600;padding:4px 12px;border-radius:50px;border:1px solid rgba(156,127,212,.3);margin-left:10px;">
-    <span style="width:6px;height:6px;background:var(--purple);border-radius:50%;animation:blink 2s infinite;display:inline-block;"></span>Coming Soon
-  </span>
+  <div style="display:flex;align-items:center;">
+    <a class="nav-logo" href="#"><span class="qr">QR</span><span class="party">Party</span><span class="tm">™</span></a>
+    <span class="nav-live-badge"><span class="nav-live-dot"></span>NOW LIVE</span>
+  </div>
   <ul>
     <li><a href="#how">How It Works</a></li>
     <li><a href="#features">Features</a></li>
@@ -396,7 +347,7 @@
   <div class="blob blob1"></div>
   <div class="blob blob2"></div>
 
-  <div class="hero-badge"><span class="badge-dot"></span>Coming soon to Google Play &amp; App Store</div>
+  <div class="hero-badge"><span class="badge-dot"></span>Now available on iOS &amp; Android</div>
 
   <div class="hero-brand"><span class="qr">QR</span><span class="party">Party</span><span class="tm">™</span></div>
 
@@ -411,11 +362,22 @@
     QR Party turns any event into a seamless experience. Create your event, share one QR code, and watch your guests RSVP, claim checklist items, and contribute to wishlists — all from a single scan.
   </p>
 
-  <div style="display:flex;gap:16px;flex-wrap:wrap;justify-content:center;margin-bottom:16px;animation:fadeUp .5s .22s ease both;">
+  <div style="display:flex;gap:16px;flex-wrap:wrap;justify-content:center;margin-bottom:20px;animation:fadeUp .5s .22s ease both;">
     <a href="https://partywithqr.com/event/demo-event" class="btn-primary-hero">Try the Live Demo →</a>
-    <a href="https://play.google.com/store/apps/developer?id=QR+Party+LLC" class="btn-secondary-hero">Coming Soon to Google Play</a>
   </div>
-  <p style="font-size:13px;color:rgba(255,255,255,.4);margin-bottom:40px;animation:fadeUp .5s .28s ease both;">Free for personal use · No credit card required · Works on any phone</p>
+
+  <div class="store-btns">
+    <a href="https://apps.apple.com/app/qr-party/id6766116501" class="store-btn">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+      Download on the App Store
+    </a>
+    <a href="https://play.google.com/store/apps/details?id=com.qrparty.app" class="store-btn">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M3.18 23.76c.3.17.64.24.99.19l.09-.05 11.24-6.49-2.44-2.44-9.88 8.79zm-1.12-20.4C2.01 3.6 2 3.86 2 4.14v15.72c0 .28.01.54.06.79l.05.08 8.8-8.8v-.2L2.06 3.28l-.05.08zM20.49 10.7l-2.52-1.46-2.74 2.74 2.74 2.73 2.55-1.47c.73-.42.73-1.11-.03-1.54zm-17.31 12.06l.07-.04 9.65-9.65-2.44-2.44L2.06 20.1l.07.08c.29.28.65.44 1.05.58z"/></svg>
+      Get it on Google Play
+    </a>
+  </div>
+
+  <p style="font-size:13px;color:rgba(255,255,255,.4);margin-bottom:40px;animation:fadeUp .5s .32s ease both;">Free for personal use · No credit card required · Works on any phone</p>
 
   <div class="hero-steps">
     <div class="hero-step">
@@ -530,65 +492,75 @@
     <p class="section-desc">Free forever for personal events. Upgrade when your team needs more firepower.</p>
     <div class="plans-grid">
 
+      <!-- PERSONAL -->
       <div class="plan-card">
         <div class="plan-name">Personal</div>
-        <div class="plan-price">Free</div>
-        <div class="plan-price-sub">forever</div>
+        <div class="plan-tagline">Free forever — all the essentials</div>
+        <div class="plan-price-block">
+          <div class="plan-price">Free</div>
+          <div class="plan-price-period">forever</div>
+        </div>
         <ul class="plan-features">
           <li>Unlimited events</li>
           <li>QR code RSVPs</li>
           <li>Wishlist &amp; checklist</li>
           <li>Shared photo wall</li>
+          <li>Guest notifications</li>
           <li>20 archived events</li>
-          <li>1-year photo storage</li>
+          <li>6-month photo storage</li>
         </ul>
+        <a href="/download" class="plan-cta plan-cta-outline">Download Free →</a>
       </div>
 
+      <!-- BUSINESS -->
       <div class="plan-card">
         <div class="plan-name">Business</div>
-        <div class="plan-price">Coming Soon</div>
-        <div class="plan-price-sub">Business plan launching soon</div>
+        <div class="plan-tagline">Everything in Personal, plus pro tools</div>
+        <div class="plan-price-block">
+          <div class="plan-price">$9.99</div>
+          <div class="plan-price-period">/month</div>
+          <div class="plan-price-annual">or $79.99/year — save 33%</div>
+        </div>
+        <div class="plan-trial">14-day free trial · Cancel anytime</div>
         <ul class="plan-features">
-          <li>Everything in Personal</li>
+          <li>One QR code for your whole business</li>
+          <li>Recurring events — weekly, monthly, custom</li>
           <li>Co-hosting with your team</li>
           <li>Event templates</li>
           <li>Cross-event analytics</li>
           <li>Custom branding</li>
           <li>100 archived events</li>
+          <li>1-year photo storage</li>
           <li>Priority support</li>
-          <li>Business QR Code — one QR code for your business location</li>
         </ul>
-        <div class="plan-coming-footer">
-          <div class="lock">🔒</div>
-          <div class="heading">COMING SOON</div>
-          <div class="sub">Paid plans coming soon.<br>Personal is always free.</div>
-        </div>
+        <a href="/download" class="plan-cta plan-cta-purple">Start Free Trial →</a>
       </div>
 
+      <!-- HEADQUARTERS -->
       <div class="plan-card plan-featured">
-        <div class="plan-coming-banner">COMING SOON</div>
+        <div class="plan-badge">MOST POWERFUL</div>
         <div class="plan-name">Headquarters</div>
-        <div class="plan-price">Coming Soon</div>
-        <div class="plan-price-sub">Headquarters plan launching soon</div>
+        <div class="plan-tagline">Everything in Business, plus:</div>
+        <div class="plan-price-block">
+          <div class="plan-price">$19.99</div>
+          <div class="plan-price-period">/month</div>
+          <div class="plan-price-annual">or $159.99/year — save 33%</div>
+        </div>
+        <div class="plan-trial">14-day free trial · Cancel anytime</div>
         <ul class="plan-features">
           <li>Everything in Business</li>
-          <li>Organization Page — one QR code for your entire brand</li>
+          <li>Organization page — one QR for your entire brand</li>
           <li>Link Business accounts under your HQ</li>
-          <li>View and monitor all linked location events</li>
-          <li>White-label stickers with your logo</li>
+          <li>White-label stickers — your logo, not ours</li>
           <li>Unlimited archived events</li>
-          <li>2 year photo storage</li>
+          <li>2-year photo storage</li>
           <li>Priority support</li>
         </ul>
-        <div class="plan-coming-footer">
-          <div class="lock">🔒</div>
-          <div class="heading">COMING SOON</div>
-          <div class="sub">Paid plans coming soon.<br>Personal is always free.</div>
-        </div>
+        <a href="/download" class="plan-cta plan-cta-gold">Start Free Trial →</a>
       </div>
 
     </div>
-    <p class="plan-footnote">Both Business tiers include a 14-day free trial. Cancel anytime.</p>
+    <p class="plan-footnote">Both paid tiers include a 14-day free trial. Cancel anytime. Personal is always free.</p>
   </div>
 </section>
 
@@ -601,7 +573,7 @@
 
     <div class="tier-header first">
       <span class="tier-name business">BUSINESS</span>
-      <span class="tier-price">Coming Soon</span>
+      <span class="tier-price">$9.99/mo</span>
     </div>
     <div class="feat-grid">
       <div class="feat-card">
@@ -638,7 +610,7 @@
 
     <div class="tier-header">
       <span class="tier-name plus">HEADQUARTERS</span>
-      <span class="tier-price">Coming Soon</span>
+      <span class="tier-price">$19.99/mo</span>
     </div>
     <div class="feat-grid">
       <div class="feat-card">
@@ -658,7 +630,7 @@
       </div>
       <div class="feat-card">
         <div class="feat-icon" style="background:rgba(200,146,42,.2)">📅</div>
-        <div class="feat-title">2 Year Photo Storage</div>
+        <div class="feat-title">2-Year Photo Storage</div>
         <div class="feat-desc">Your memories stay longer.</div>
       </div>
       <div class="feat-card">
@@ -717,7 +689,7 @@
   <p class="cta-desc">Create your first event in under a minute. Your guests will thank you.</p>
   <div class="cta-btns">
     <a href="https://partywithqr.com/event/demo-event" class="btn-white">Try the Live Demo →</a>
-    <a href="https://play.google.com/store/apps/developer?id=QR+Party+LLC" class="btn-outline-white">Coming Soon to Google Play</a>
+    <a href="/download" class="btn-outline-white">Download the App</a>
   </div>
 </section>
 
@@ -742,7 +714,6 @@
 </footer>
 
 <script>
-  // Scroll reveal for below-the-fold sections
   const observer = new IntersectionObserver(entries => {
     entries.forEach(e => {
       if (e.isIntersecting) {
