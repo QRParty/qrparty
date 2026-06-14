@@ -4,7 +4,12 @@
     "details": [
       {
         "appID": "BJ9E46C874.com.qrparty.app",
-        "paths": ["/event/*", "/org/*", "/biz/*"]
+        "paths": ["/event/*", "/org/*", "/biz/*"],
+        "components": [
+          { "/": "/event/*" },
+          { "/": "/org/*" },
+          { "/": "/biz/*" }
+        ]
       }
     ]
   }

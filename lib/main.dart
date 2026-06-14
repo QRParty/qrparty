@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -168,13 +169,80 @@ class NotificationBridge {
 
 final _navigatorKey = GlobalKey<NavigatorState>();
 
+/// Writes the device's FCM token to `users/{uid}.fcmToken` so the
+/// host-push paths (Running Late, RSVP confirmations, mass notifs)
+/// can find the right device. Fired on every non-anonymous sign-in
+/// via the auth listener — runs regardless of which screen the user
+/// lands on, so deep-link-only users still register. Best-effort:
+/// any failure (denied permission, network blip, prefs unavailable)
+/// is swallowed so it can never block sign-in or app startup.
+///
+/// Anonymous users are skipped on purpose — a deep-link guest
+/// shouldn't see the iOS push-permission prompt the moment they tap
+/// an invite, and Firestore would only end up with a throwaway
+/// `users/{anonUid}` doc holding a single `fcmToken` field. When
+/// the guest later upgrades to a real account via linkWithCredential
+/// in welcome_screen.dart, that flow manually re-invokes this
+/// function — linkWithCredential keeps the same User instance and
+/// does NOT fire authStateChanges, so the auth-state listener
+/// otherwise never sees the transition.
+///
+/// Top-level (not a State method) so welcome_screen.dart's link
+/// path can call it without poking at private members on
+/// QRPartyAppState.
+Future<void> registerFcmTokenForUser(User user) async {
+  if (user.isAnonymous) {
+    debugPrint('[FCM] skipping token registration for anonymous user uid=${user.uid}');
+    return;
+  }
+  try {
+    final settings = await FirebaseMessaging.instance.requestPermission(
+      alert: true, badge: true, sound: true,
+    );
+    debugPrint('[FCM] permission uid=${user.uid} status=${settings.authorizationStatus}');
+
+    // iOS: getToken() returns null until APNs has handed Firebase a
+    // device token. Permission granted ≠ APNs ready — the OS does the
+    // APNs handshake asynchronously after registerForRemoteNotifications.
+    // Poll getAPNSToken with a short backoff so first-launch isn't a
+    // race. Android has no equivalent dependency; skip the poll there.
+    if (Platform.isIOS) {
+      String? apns;
+      for (int attempt = 1; attempt <= 6; attempt++) {
+        apns = await FirebaseMessaging.instance.getAPNSToken();
+        debugPrint('[FCM] APNs poll attempt=$attempt uid=${user.uid} apns=${apns == null || apns.isEmpty ? "null" : "ok"}');
+        if (apns != null && apns.isNotEmpty) break;
+        if (attempt < 6) await Future.delayed(const Duration(milliseconds: 500));
+      }
+      if (apns == null || apns.isEmpty) {
+        debugPrint('[FCM] APNs token never arrived after 6 attempts uid=${user.uid} — skipping registration; onTokenRefresh will retry if it lands later');
+        return;
+      }
+    }
+
+    final token = await FirebaseMessaging.instance.getToken();
+    if (token == null || token.isEmpty) {
+      debugPrint('[FCM] getToken() returned null/empty uid=${user.uid} authStatus=${settings.authorizationStatus} — likely APNs not registered or permission denied');
+      return;
+    }
+    debugPrint('[FCM] writing token uid=${user.uid} tokenLen=${token.length} tokenSuffix=…${token.length >= 8 ? token.substring(token.length - 8) : token}');
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .set({'fcmToken': token}, SetOptions(merge: true));
+    debugPrint('[FCM] token write succeeded uid=${user.uid}');
+  } catch (e, st) {
+    debugPrint('[FCM] token registration FAILED uid=${user.uid}: $e\n$st');
+  }
+}
+
 class QRPartyApp extends StatefulWidget {
   const QRPartyApp({super.key});
   @override
-  State<QRPartyApp> createState() => _QRPartyAppState();
+  State<QRPartyApp> createState() => QRPartyAppState();
 }
 
-class _QRPartyAppState extends State<QRPartyApp> {
+class QRPartyAppState extends State<QRPartyApp> {
   final _appLinks = AppLinks();
   StreamSubscription<Uri>? _linkSub;
   StreamSubscription<List<PurchaseDetails>>? _purchaseSub;
@@ -193,6 +261,12 @@ class _QRPartyAppState extends State<QRPartyApp> {
   /// `/org/{orgId}` deep link. Mutually exclusive in practice — a
   /// single incoming URL writes to one OR the other.
   String? _pendingDeepLinkOrgId;
+
+  /// Last short-code we surfaced the clipboard-resume prompt for.
+  /// Tracked so the same code doesn't re-prompt on every resume after
+  /// the user has already decided (Open or Not now). Reset by app
+  /// relaunch — not persisted, this is intentional.
+  String? _lastClipboardCodePrompted;
 
   @override
   void initState() {
@@ -234,13 +308,19 @@ class _QRPartyAppState extends State<QRPartyApp> {
     _lifecycleListener = AppLifecycleListener(
       onResume: () async {
         final user = FirebaseAuth.instance.currentUser;
-        if (user == null) return;
-        try {
-          await user.reload();
-          debugPrint('[Lifecycle] resumed — reloaded auth for uid=${user.uid}');
-        } catch (e) {
-          debugPrint('[Lifecycle] resume reload FAILED uid=${user.uid}: $e');
+        if (user != null) {
+          try {
+            await user.reload();
+            debugPrint('[Lifecycle] resumed — reloaded auth for uid=${user.uid}');
+          } catch (e) {
+            debugPrint('[Lifecycle] resume reload FAILED uid=${user.uid}: $e');
+          }
         }
+        // Peek the clipboard for a partywithqr.com/event/<code> URL or
+        // a bare 4–8 char alphanumeric. If found AND we haven't already
+        // prompted for the same code this session, surface a confirm
+        // dialog. Failures are swallowed inside the helper.
+        await _maybePromptFromClipboard();
       },
     );
   }
@@ -327,59 +407,9 @@ class _QRPartyAppState extends State<QRPartyApp> {
     _linkSub = _appLinks.uriLinkStream.listen(_handleDeepLink, onError: (_) {});
   }
 
-  /// Watches the auth stream so we can re-fire a deep link that arrived
-  /// Writes the device's FCM token to `users/{uid}.fcmToken` so the
-  /// host-push paths (Running Late, RSVP confirmations, mass notifs)
-  /// can find the right device. Fired on every sign-in via the auth
-  /// listener below — runs regardless of which screen the user lands
-  /// on, so deep-link-only users still register. Best-effort: any
-  /// failure (denied permission, network blip, prefs unavailable) is
-  /// swallowed so it can never block sign-in or app startup.
-  Future<void> _registerFcmTokenForUser(User user) async {
-    try {
-      final settings = await FirebaseMessaging.instance.requestPermission(
-        alert: true, badge: true, sound: true,
-      );
-      debugPrint('[FCM] permission uid=${user.uid} status=${settings.authorizationStatus}');
-
-      // iOS: getToken() returns null until APNs has handed Firebase a
-      // device token. Permission granted ≠ APNs ready — the OS does the
-      // APNs handshake asynchronously after registerForRemoteNotifications.
-      // Poll getAPNSToken with a short backoff so first-launch isn't a
-      // race. Android has no equivalent dependency; skip the poll there.
-      if (Platform.isIOS) {
-        String? apns;
-        for (int attempt = 1; attempt <= 6; attempt++) {
-          apns = await FirebaseMessaging.instance.getAPNSToken();
-          debugPrint('[FCM] APNs poll attempt=$attempt uid=${user.uid} apns=${apns == null || apns.isEmpty ? "null" : "ok"}');
-          if (apns != null && apns.isNotEmpty) break;
-          if (attempt < 6) await Future.delayed(const Duration(milliseconds: 500));
-        }
-        if (apns == null || apns.isEmpty) {
-          debugPrint('[FCM] APNs token never arrived after 6 attempts uid=${user.uid} — skipping registration; onTokenRefresh will retry if it lands later');
-          return;
-        }
-      }
-
-      final token = await FirebaseMessaging.instance.getToken();
-      if (token == null || token.isEmpty) {
-        debugPrint('[FCM] getToken() returned null/empty uid=${user.uid} authStatus=${settings.authorizationStatus} — likely APNs not registered or permission denied');
-        return;
-      }
-      debugPrint('[FCM] writing token uid=${user.uid} tokenLen=${token.length} tokenSuffix=…${token.length >= 8 ? token.substring(token.length - 8) : token}');
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .set({'fcmToken': token}, SetOptions(merge: true));
-      debugPrint('[FCM] token write succeeded uid=${user.uid}');
-    } catch (e, st) {
-      debugPrint('[FCM] token registration FAILED uid=${user.uid}: $e\n$st');
-    }
-  }
-
   /// Catches FCM tokens that arrive after the initial registration —
   /// most commonly on iOS when getToken() lost the APNs race in
-  /// _registerFcmTokenForUser, or when Firebase rotates the token. The
+  /// registerFcmTokenForUser, or when Firebase rotates the token. The
   /// listener is global (set up once in initState), so it captures
   /// refreshes for whatever user happens to be signed in at the time.
   /// Best-effort: failures are logged, never thrown.
@@ -407,6 +437,7 @@ class _QRPartyAppState extends State<QRPartyApp> {
     });
   }
 
+  /// Watches the auth stream so we can re-fire a deep link that arrived
   /// while the user was on the welcome / login screen. When auth flips to
   /// a signed-in user we drain `_pendingDeepLinkEventLookup` once and
   /// route to the matching event. Harmless on warm-state sign-ins because
@@ -418,8 +449,10 @@ class _QRPartyAppState extends State<QRPartyApp> {
       // behind HomeFeedScreen.initState, which meant deep-link-only
       // users (deep link → guest event screen, never visiting the
       // home feed) silently never registered — they couldn't receive
-      // host pushes like Running Late or RSVP confirmations.
-      _registerFcmTokenForUser(user);
+      // host pushes like Running Late or RSVP confirmations. Anonymous
+      // users are no-op'd inside registerFcmTokenForUser; their post-
+      // link transition is handled manually in welcome_screen.dart.
+      registerFcmTokenForUser(user);
       final pendingEvent = _pendingDeepLinkEventLookup;
       final pendingOrg   = _pendingDeepLinkOrgId;
       if ((pendingEvent == null || pendingEvent.isEmpty) &&
@@ -461,9 +494,12 @@ class _QRPartyAppState extends State<QRPartyApp> {
     if (segs.length >= 2 && segs[0] == 'org' && segs[1].isNotEmpty) {
       final orgId = segs[1];
       if (FirebaseAuth.instance.currentUser == null) {
-        debugPrint('[DeepLink] org=$orgId — not signed in, queuing for drain');
-        _pendingDeepLinkOrgId = orgId;
-        return;
+        final signedIn = await _signInAnonymouslyForDeepLink();
+        if (!signedIn) {
+          debugPrint('[DeepLink] org=$orgId — anon sign-in failed, queuing for drain');
+          _pendingDeepLinkOrgId = orgId;
+          return;
+        }
       }
       _pushOrgScreen(orgId);
       return;
@@ -480,11 +516,40 @@ class _QRPartyAppState extends State<QRPartyApp> {
     debugPrint('[DeepLink] event lookup=$lookup');
 
     if (FirebaseAuth.instance.currentUser == null) {
-      debugPrint('[DeepLink] not signed in — queuing for post-login drain');
-      _pendingDeepLinkEventLookup = lookup;
-      return;
+      final signedIn = await _signInAnonymouslyForDeepLink();
+      if (!signedIn) {
+        debugPrint('[DeepLink] event lookup=$lookup — anon sign-in failed, queuing for post-login drain');
+        _pendingDeepLinkEventLookup = lookup;
+        return;
+      }
     }
     await _resolveAndPushEvent(lookup);
+  }
+
+  /// Silently signs the guest in as an anonymous Firebase user so a
+  /// deep link can resolve + push the event without an account. Mirrors
+  /// what event.html does on the web (no sign-up wall for invited
+  /// guests). Returns true on success — the caller should then proceed
+  /// to resolve and push as if the user had always been signed in.
+  /// Returns false if anonymous auth is unavailable (offline / Firebase
+  /// outage / not enabled in console); the caller falls back to the
+  /// pending-queue drain so the link isn't lost when the user later
+  /// signs up the long way.
+  ///
+  /// The auth-state listener in [_setupPendingDeepLinkDrain] fires the
+  /// moment this succeeds, which would normally drain the pending
+  /// queue — but we only populate the queue when this returns false,
+  /// so the drain is a no-op on the happy path and we avoid a double
+  /// resolve/push.
+  Future<bool> _signInAnonymouslyForDeepLink() async {
+    try {
+      final cred = await FirebaseAuth.instance.signInAnonymously();
+      debugPrint('[DeepLink] anonymous sign-in ok uid=${cred.user?.uid}');
+      return cred.user != null;
+    } catch (e) {
+      debugPrint('[DeepLink] anonymous sign-in FAILED: $e');
+      return false;
+    }
   }
 
   /// Pushes [PublicOrgScreen] for the given orgId. Org doc fetch and
@@ -498,12 +563,32 @@ class _QRPartyAppState extends State<QRPartyApp> {
     ));
   }
 
-  /// shortCode → docId lookup. A 4–8 char uppercase alphanumeric input
-  /// is almost certainly a shortCode, so the where() runs first; on a
-  /// miss (or for any longer input) we fall back to a literal doc.get().
-  Future<void> _resolveAndPushEvent(String input) async {
+  /// Deep-link entry point — kept for the existing handler call sites
+  /// (`_handleDeepLink`, `_setupPendingDeepLinkDrain`). The actual
+  /// shortCode → docId → push logic lives in [openEventByCode] so the
+  /// home-feed "Enter Code" dialog and the clipboard-resume prompt
+  /// can reuse it without duplicating the Firestore queries.
+  Future<void> _resolveAndPushEvent(String input) => openEventByCode(input);
+
+  /// Public shortCode → event resolver. Accepts either a 4–8 char
+  /// uppercase alphanumeric shortCode OR a literal Firestore doc id.
+  /// Whitespace is trimmed and the shortCode regex check runs against
+  /// the uppercased form, so callers don't need to normalize first.
+  ///
+  /// On success pushes [GuestEventScreen] onto the root navigator. On
+  /// any failure (not found, permission-denied, exception) logs and
+  /// returns silently — never throws to the caller.
+  ///
+  /// Reused by:
+  ///   • [_resolveAndPushEvent] — deep link handler
+  ///   • [_maybePromptFromClipboard] — clipboard-resume prompt
+  ///   • home_feed_screen.dart "Enter Code" dialog — via
+  ///     `context.findAncestorStateOfType<QRPartyAppState>()`
+  Future<void> openEventByCode(String input) async {
+    final trimmed = input.trim();
+    if (trimmed.isEmpty) return;
     try {
-      final upper = input.toUpperCase();
+      final upper = trimmed.toUpperCase();
       final looksLikeShortCode = RegExp(r'^[A-Z0-9]{4,8}$').hasMatch(upper);
       DocumentSnapshot? snap;
       if (looksLikeShortCode) {
@@ -515,9 +600,9 @@ class _QRPartyAppState extends State<QRPartyApp> {
         if (qs.docs.isNotEmpty) snap = qs.docs.first;
       }
       final resolved = snap
-          ?? await FirebaseFirestore.instance.collection('events').doc(input).get();
+          ?? await FirebaseFirestore.instance.collection('events').doc(trimmed).get();
       if (!resolved.exists) {
-        debugPrint('[DeepLink] no event for input=$input (shortCode? $looksLikeShortCode)');
+        debugPrint('[EventResolver] no event for input=$trimmed (shortCode? $looksLikeShortCode)');
         return;
       }
       _navigatorKey.currentState?.push(MaterialPageRoute(
@@ -527,7 +612,85 @@ class _QRPartyAppState extends State<QRPartyApp> {
         ),
       ));
     } catch (e) {
-      debugPrint('[DeepLink] resolve failed for input=$input: $e');
+      debugPrint('[EventResolver] resolve failed for input=$trimmed: $e');
+    }
+  }
+
+  /// Foreground-resume clipboard peek. Called from the lifecycle
+  /// listener's `onResume:` callback. Workflow:
+  ///   1. Bail if no navigator is mounted (no UI to attach a dialog to).
+  ///   2. `Clipboard.hasStrings()` first — silent on iOS 14+, avoids
+  ///      the "QR Party pasted from X" toast when the clipboard is
+  ///      empty or non-text.
+  ///   3. If there IS text, `getData()` — this DOES surface the paste
+  ///      toast on iOS, which is acceptable because we're about to
+  ///      prompt the user anyway.
+  ///   4. Parse for either `partywithqr.com/event/<code>` or a bare
+  ///      4–8 char alphanumeric.
+  ///   5. De-dupe against [_lastClipboardCodePrompted] so the same
+  ///      code doesn't re-prompt every resume.
+  ///   6. Show a confirmation dialog — never silent navigation.
+  ///   7. On user confirm, hand off to [openEventByCode].
+  /// All errors are caught and swallowed — a clipboard read failure
+  /// must never block the rest of the resume path.
+  Future<void> _maybePromptFromClipboard() async {
+    try {
+      if (_navigatorKey.currentState == null) return;
+      final hasStrings = await Clipboard.hasStrings();
+      if (!hasStrings) return;
+      final ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
+      final text = data?.text?.trim();
+      if (text == null || text.isEmpty) return;
+
+      // Try URL form first, fall back to bare token.
+      String? code;
+      final uri = Uri.tryParse(text);
+      if (uri != null && uri.host == 'partywithqr.com') {
+        final segs = uri.pathSegments;
+        if (segs.length >= 2 && segs[0] == 'event' && segs[1].isNotEmpty) {
+          code = segs[1].trim().toUpperCase();
+        }
+      }
+      if (code == null) {
+        final upper = text.toUpperCase();
+        if (RegExp(r'^[A-Z0-9]{4,8}$').hasMatch(upper)) {
+          code = upper;
+        }
+      }
+      if (code == null) return;
+
+      // De-dupe: don't re-prompt for the same code on every resume.
+      if (code == _lastClipboardCodePrompted) return;
+      _lastClipboardCodePrompted = code;
+
+      final ctx = _navigatorKey.currentContext;
+      if (ctx == null || !ctx.mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: ctx,
+        builder: (dialogCtx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('Open this event?'),
+          content: Text('We found an event code in your clipboard: $code'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(false),
+              child: const Text('Not now'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(true),
+              child: const Text(
+                'Open',
+                style: TextStyle(color: AppColors.purple, fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (confirmed == true) {
+        await openEventByCode(code);
+      }
+    } catch (e) {
+      debugPrint('[Clipboard] prompt error: $e');
     }
   }
 

@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import '../main.dart' show registerFcmTokenForUser;
 import '../utils.dart';
 import 'qr_scanner_screen.dart';
 import 'home_router.dart';
@@ -202,13 +203,74 @@ class _SignUpScreenState extends State<SignUpScreen> {
     }
     setState(() { _isLoading = true; _error = null; });
     try {
-      final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
-      );
+      // If the user is already signed in anonymously (e.g. they tapped
+      // a Smart App Banner / Universal Link and the deep-link handler
+      // anon-signed them in to read the event), UPGRADE that anonymous
+      // session in place via linkWithCredential so the UID + any
+      // RSVP / wishlist-claim docs they wrote during the anon session
+      // carry over to the real account. Without linking, this branch
+      // would create a SECOND uid and orphan their anon work.
+      //
+      // Fallback: if the email is already registered, linkWithCredential
+      // throws credential-already-in-use / email-already-in-use; we
+      // sign into the existing account instead and skip the new-user
+      // post-processing (their users/{uid} + org docs already exist).
+      final currentAnon = FirebaseAuth.instance.currentUser;
+      UserCredential cred;
+      bool fellBackToExistingAccount = false;
+      if (currentAnon != null && currentAnon.isAnonymous) {
+        final credential = EmailAuthProvider.credential(
+          email: _emailController.text.trim(),
+          password: _passwordController.text.trim(),
+        );
+        try {
+          cred = await currentAnon.linkWithCredential(credential);
+          debugPrint('[SignUp] linked anon uid=${cred.user?.uid} to email/password');
+          // linkWithCredential keeps the same User instance and does
+          // NOT fire authStateChanges, so the auth-state listener in
+          // main.dart never sees the anon→real transition and won't
+          // register the FCM token on its own. Fire it manually now
+          // that the user is no longer anonymous (the function early-
+          // returns for anon users) so host pushes work without
+          // waiting for the next app launch / token refresh.
+          if (cred.user != null) {
+            await registerFcmTokenForUser(cred.user!);
+          }
+        } on FirebaseAuthException catch (e) {
+          if (e.code == 'credential-already-in-use' || e.code == 'email-already-in-use') {
+            debugPrint('[SignUp] link failed (${e.code}) — signing into existing account');
+            cred = await FirebaseAuth.instance.signInWithEmailAndPassword(
+              email: _emailController.text.trim(),
+              password: _passwordController.text.trim(),
+            );
+            fellBackToExistingAccount = true;
+          } else {
+            rethrow;
+          }
+        }
+      } else {
+        cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: _emailController.text.trim(),
+          password: _passwordController.text.trim(),
+        );
+      }
       final newUser = cred.user;
       if (newUser == null) {
         throw FirebaseAuthException(code: 'user-null', message: 'Could not create user. Please try again.');
+      }
+      if (fellBackToExistingAccount) {
+        // The email already belonged to an account — they're signed in
+        // to that one now. Skip the new-account post-processing
+        // (displayName, users/{uid} doc, org auto-create, email verify
+        // send) — the existing account already has all of that
+        // provisioned at its original signup. Route directly to home.
+        await FirebaseAuth.instance.authStateChanges().firstWhere((u) => u != null);
+        if (!mounted) return;
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const HomeRouter()),
+          (_) => false,
+        );
+        return;
       }
       final firstName = isPersonal ? _firstNameController.text.trim() : '';
       final lastName  = isPersonal ? _lastNameController.text.trim()  : '';
@@ -839,10 +901,42 @@ class _LoginScreenState extends State<LoginScreen> {
     }
     setState(() { _isLoading = true; _error = null; });
     try {
-      await FirebaseAuth.instance.signInWithEmailAndPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
-      );
+      // If the user is already signed in anonymously (deep-link guest),
+      // try linkWithCredential FIRST so their anon UID + RSVP history
+      // carries over to the real account. Falls back to plain sign-in
+      // when the email is already registered — in that case the anon
+      // session's UID is orphaned, which is the right call since the
+      // user explicitly asked to use the existing identity.
+      final currentAnon = FirebaseAuth.instance.currentUser;
+      if (currentAnon != null && currentAnon.isAnonymous) {
+        final credential = EmailAuthProvider.credential(
+          email: _emailController.text.trim(),
+          password: _passwordController.text.trim(),
+        );
+        try {
+          await currentAnon.linkWithCredential(credential);
+          debugPrint('[Login] linked anon uid=${currentAnon.uid} to email/password');
+          // linkWithCredential doesn't fire authStateChanges, so the
+          // auth-state listener in main.dart won't register the FCM
+          // token for the freshly-non-anon user. Fire it manually.
+          await registerFcmTokenForUser(currentAnon);
+        } on FirebaseAuthException catch (e) {
+          if (e.code == 'credential-already-in-use' || e.code == 'email-already-in-use') {
+            debugPrint('[Login] link failed (${e.code}) — signing in normally');
+            await FirebaseAuth.instance.signInWithEmailAndPassword(
+              email: _emailController.text.trim(),
+              password: _passwordController.text.trim(),
+            );
+          } else {
+            rethrow;
+          }
+        }
+      } else {
+        await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: _emailController.text.trim(),
+          password: _passwordController.text.trim(),
+        );
+      }
       // Wait for the auth-state stream to fire, then push HomeRouter
       // explicitly so the user lands on the correct home feed regardless of
       // any timing race with MaterialApp.home rebuilding.

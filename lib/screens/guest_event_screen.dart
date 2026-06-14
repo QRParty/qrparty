@@ -794,9 +794,92 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     });
   }
 
-  Future<void> _saveRsvp(String newStatus, {bool switchTab = false}) async {
-    setState(() { rsvpStatus = newStatus; _pendingStatus = newStatus; });
+  /// Shows a single-field "Your name?" dialog for anonymous deep-link
+  /// guests so the host's RSVP list reads "Sarah Chen" instead of
+  /// "Guest". Persists the entered name via [User.updateDisplayName]
+  /// so subsequent RSVPs, wishlist claims, contributions, etc. in the
+  /// same session (and after relaunch) pick it up automatically
+  /// without re-prompting.
+  ///
+  /// Returns the trimmed entered name on success, or null when the
+  /// user dismissed the dialog. Callers must treat null as "abort the
+  /// RSVP" rather than falling back to "Guest" — the guest can re-tap
+  /// Yes/Maybe/No and type their name on the next attempt.
+  Future<String?> _promptAnonGuestName(User user) async {
+    final controller = TextEditingController();
+    String? error;
+    try {
+      final entered = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogCtx) => StatefulBuilder(
+          builder: (innerCtx, setLocal) {
+            void submit() {
+              final trimmed = controller.text.trim();
+              if (trimmed.isEmpty) {
+                setLocal(() => error = 'Please enter your name');
+                return;
+              }
+              Navigator.of(dialogCtx).pop(trimmed);
+            }
+            return AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              title: const Text('Your name?'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "We'll show this to the host so they know who's RSVP'd.",
+                    style: TextStyle(color: _muted, fontSize: 13),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    textCapitalization: TextCapitalization.words,
+                    textInputAction: TextInputAction.go,
+                    onSubmitted: (_) => submit(),
+                    decoration: InputDecoration(
+                      hintText: 'e.g. Sarah Chen',
+                      errorText: error,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogCtx).pop(),
+                  child: Text('Cancel', style: TextStyle(color: _muted, fontWeight: FontWeight.w700)),
+                ),
+                TextButton(
+                  onPressed: submit,
+                  child: const Text(
+                    'Continue',
+                    style: TextStyle(color: _purple, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+      if (entered == null || entered.isEmpty) return null;
+      try {
+        await user.updateDisplayName(entered);
+        debugPrint('[GuestEvent] anon name saved uid=${user.uid} name=$entered');
+      } catch (e) {
+        debugPrint('[GuestEvent] updateDisplayName failed: $e — RSVP uses local name only');
+      }
+      return entered;
+    } finally {
+      controller.dispose();
+    }
+  }
 
+  Future<void> _saveRsvp(String newStatus, {bool switchTab = false}) async {
     if (widget.eventId == null) return;
 
     final user = FirebaseAuth.instance.currentUser;
@@ -806,6 +889,27 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
       );
       return;
     }
+
+    // Anonymous deep-link guests land here without a displayName, so
+    // the host's RSVP list would show "Guest" for every one of them.
+    // Prompt for a name BEFORE any optimistic UI update so a cancel
+    // doesn't leave the Yes/Maybe/No chips stuck in the new status.
+    // updateDisplayName() persists the answer on the FirebaseAuth User
+    // so subsequent RSVPs in this session skip the prompt — the
+    // `existingName` branch picks up.
+    final existingName = user.displayName?.trim();
+    final String resolvedName;
+    if (user.isAnonymous && (existingName == null || existingName.isEmpty)) {
+      final entered = await _promptAnonGuestName(user);
+      if (entered == null || entered.isEmpty) return;
+      resolvedName = entered;
+    } else if (existingName != null && existingName.isNotEmpty) {
+      resolvedName = existingName;
+    } else {
+      resolvedName = 'Guest';
+    }
+
+    setState(() { rsvpStatus = newStatus; _pendingStatus = newStatus; });
 
     // ── Optimistic local update ──────────────────────────────────
     // Patch _rsvps in-memory so the headcount cards reflect the new
@@ -827,7 +931,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         ...without,
         {
           'uid': myUid,
-          'name': user.displayName ?? 'Guest',
+          'name': resolvedName,
           'status': newStatus,
           'adults': adults,
           'children': children,
@@ -857,7 +961,7 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
 
         tx.set(rsvpRef, {
           'uid': user.uid,
-          'name': user.displayName ?? 'Guest',
+          'name': resolvedName,
           // Explicit email + source so the host can later dedupe an app
           // RSVP against a web RSVP from the same person, and so debug
           // logs say which path wrote each row.

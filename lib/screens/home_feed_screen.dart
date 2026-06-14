@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import '../main.dart' show QRPartyAppState;
 import '../utils.dart';
 import '../widgets/rsvp_live_counts.dart';
 import '../widgets/hold_to_delete_dialog.dart';
@@ -478,6 +479,15 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
           IconButton(
             icon: const Icon(Icons.qr_code_scanner, color: AppColors.green),
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const QRScannerScreen())),
+          ),
+          // Manual entry-point for guests who have the code text but
+          // can't scan (link tapped from a non-Universal-Link surface,
+          // forwarded by text/email, etc.). Same _resolveAndPushEvent
+          // pipeline as the QR scanner — just typed instead of scanned.
+          IconButton(
+            icon: const Icon(Icons.dialpad, color: AppColors.purple),
+            tooltip: 'Enter event code',
+            onPressed: () => _showEnterCodeDialog(context),
           ),
           IconButton(
             icon: Icon(Icons.storage_outlined, color: _pastCount >= 19 ? Colors.redAccent : _pastCount >= 15 ? AppColors.gold : AppColors.green),
@@ -1079,9 +1089,92 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
           const Text('No events here yet', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.dark)),
           const SizedBox(height: 8),
           const Text('Tap + to create your first event', style: TextStyle(fontSize: 14, color: AppColors.muted)),
+          const SizedBox(height: 24),
+          // Secondary CTA — catches first-time guests whose host sent
+          // them a code instead of a tappable link (forwarded text,
+          // verbal share, printed flyer, etc.). Same dialog the AppBar
+          // dialpad icon opens, just surfaced where it matters most.
+          TextButton(
+            onPressed: () => _showEnterCodeDialog(context),
+            child: const Text(
+              'Have an invite code?',
+              style: TextStyle(
+                color: AppColors.purple,
+                fontWeight: FontWeight.w700,
+                fontSize: 14,
+              ),
+            ),
+          ),
         ],
       ),
     );
+  }
+
+  /// Manual "Enter Event Code" dialog. The TextField autofocuses with
+  /// CHARACTERS capitalization so the soft keyboard defaults to upper-
+  /// case (event shortCodes are uppercase by convention). Submitting
+  /// trims the input and hands it to [QRPartyAppState.openEventByCode]
+  /// — the same resolver every other event-entry path uses (deep
+  /// links, QR scanner, clipboard prompt). Looked up via
+  /// `findAncestorStateOfType` rather than threaded as a callback to
+  /// keep the constructor lean.
+  Future<void> _showEnterCodeDialog(BuildContext context) async {
+    final controller = TextEditingController();
+    String? errorText;
+
+    final code = await showDialog<String>(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('Enter Event Code'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            textCapitalization: TextCapitalization.characters,
+            textInputAction: TextInputAction.go,
+            decoration: InputDecoration(
+              hintText: 'e.g. EUZTA2',
+              errorText: errorText,
+            ),
+            onSubmitted: (v) {
+              final trimmed = v.trim();
+              if (trimmed.isEmpty) {
+                setLocal(() => errorText = 'Please enter a code');
+                return;
+              }
+              Navigator.of(dialogCtx).pop(trimmed);
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                final trimmed = controller.text.trim();
+                if (trimmed.isEmpty) {
+                  setLocal(() => errorText = 'Please enter a code');
+                  return;
+                }
+                Navigator.of(dialogCtx).pop(trimmed);
+              },
+              child: const Text(
+                'Open Event',
+                style: TextStyle(color: AppColors.purple, fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+
+    if (code == null || code.isEmpty) return;
+    if (!context.mounted) return;
+    final state = context.findAncestorStateOfType<QRPartyAppState>();
+    await state?.openEventByCode(code);
   }
 
   Widget _buildEventCard(BuildContext context, Map<String, dynamic> event) {

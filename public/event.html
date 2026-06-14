@@ -548,7 +548,7 @@
       <button type="button" class="rsvp-btn no"    onclick="openRsvpForm('No')">No</button>
     </div>
     <div class="rsvp-actions-sub">
-      Want richer features? <a href="https://play.google.com/store/apps/details?id=com.partywithqr.app">Get the app</a>
+      Want richer features? <a href="/download">Get the app</a>
     </div>
   </div>
 
@@ -675,6 +675,35 @@
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 <script>
   console.log('[QRParty] script running');
+
+  // ── iOS Smart App Banner ─────────────────────────────────────
+  // Parse the event code from the path FIRST so the banner lands in
+  // <head> before iOS finishes rendering — late injection of the
+  // apple-itunes-app meta tag is unreliable. The same eventId is
+  // used later by the resolveEvent flow below, so we parse once at
+  // the top and reuse the variable (the original parse near
+  // signInAnonymously was removed to avoid duplicating the regex).
+  var rawPath = window.location.pathname;
+  var eventId = rawPath.replace(/^\/event\//, '').replace(/\/$/, '');
+  console.log('[QRParty] eventId:', eventId);
+  try {
+    // app-argument hands off the full Universal Link URL to the app
+    // when the user taps "OPEN" in Safari — without it, iOS just opens
+    // the App Store with no event context. When eventId is empty
+    // (e.g. the user landed on bare /event/ somehow) we still show
+    // the banner with just app-id, which is the documented spec.
+    var smartBannerContent = 'app-id=6766116501';
+    if (eventId) {
+      smartBannerContent += ', app-argument=https://partywithqr.com/event/' + encodeURIComponent(eventId);
+    }
+    var smartBannerMeta = document.createElement('meta');
+    smartBannerMeta.name = 'apple-itunes-app';
+    smartBannerMeta.content = smartBannerContent;
+    document.head.appendChild(smartBannerMeta);
+    console.log('[QRParty] smart app banner injected:', smartBannerContent);
+  } catch (e) {
+    console.warn('[QRParty] smart app banner injection failed:', e);
+  }
 
   // Escape arbitrary string for safe innerHTML insertion. Used for
   // user-supplied wishlist item names + quantities so a malicious or
@@ -1073,9 +1102,9 @@
     URL.revokeObjectURL(url);
   }
 
-  var rawPath = window.location.pathname;
-  var eventId = rawPath.replace(/^\/event\//, '').replace(/\/$/, '');
-  console.log('[QRParty] eventId:', eventId);
+  // eventId + rawPath are parsed at the top of this script (used by
+  // the Smart App Banner injector) and remain in scope here via `var`
+  // hoisting. No re-parse needed.
 
   // Resolve either a Firestore doc ID or a 6-char shortCode. A 6-char
   // alphanumeric input is almost certainly a shortCode, so we query that
