@@ -297,6 +297,87 @@ void showComingSoon(BuildContext context, String feature) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$feature coming soon!'), backgroundColor: AppColors.green, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))));
 }
 
+// ─── EVENT TIME RESOLVERS ─────────────────────────────────────
+// Shared logic for combining an event doc's calendar fields into the
+// actual start / end DateTimes used by the upcoming-vs-past
+// classifier and the Add-to-Calendar export. Lives here (not on each
+// feed screen) so every code path makes the same decision when an
+// event lacks an explicit time and so an optional end date/time
+// affects every feed uniformly. Keep these pure — no Firestore I/O.
+
+/// Resolves an event's start `DateTime` from its Firestore doc data.
+/// Combines the `'date'` Timestamp (midnight on the picked calendar
+/// day) with the `'time'` String ("HH:MM" 24-hour) into the actual
+/// start moment, so today's events aren't misclassified as past at
+/// 00:00:01.
+///
+/// Fallbacks:
+///   • Missing/non-Timestamp `'date'` → `DateTime(2099)` — used as a
+///     sortable sentinel for drafts and date-less events.
+///   • `'date'` present but `'time'` missing/malformed → end-of-day
+///     (23:59:59) so a same-day event without a specific start time
+///     stays Upcoming until midnight rolls over.
+DateTime resolveEventStart(Map<String, dynamic> data) {
+  final ts = data['date'];
+  if (ts is! Timestamp) return DateTime(2099);
+  final calendarDate = ts.toDate();
+  final timeStr = data['time'] as String?;
+  if (timeStr != null) {
+    final parts = timeStr.split(':');
+    if (parts.length == 2) {
+      final h = int.tryParse(parts[0]);
+      final m = int.tryParse(parts[1]);
+      if (h != null && m != null) {
+        return DateTime(calendarDate.year, calendarDate.month, calendarDate.day, h, m);
+      }
+    }
+  }
+  return DateTime(calendarDate.year, calendarDate.month, calendarDate.day, 23, 59, 59);
+}
+
+/// Resolves the moment an event is considered to be over, used by
+/// every Upcoming-vs-Past comparator across the app so a party that's
+/// still going doesn't flip to the Past tab the instant its start
+/// time elapses.
+///
+/// Field contract (all optional, mirror the start fields):
+///   • `'endDate'` (Timestamp) — the calendar day the event ends.
+///     Required field for public events; optional everywhere else.
+///   • `'endTime'` (String "HH:MM" 24-hour) — combined with endDate.
+///     Missing endTime + present endDate falls back to 23:59 on
+///     the endDate, so a host who picks only the end day still gets
+///     an end-of-day cutoff rather than midnight-of-the-day-before.
+///
+/// Fallback when no `'endDate'` is set: end-of-day (23:59:59) of the
+/// START date. Reason: most parties run past their start time but
+/// almost never past midnight, so anchoring the cutoff to end-of-day
+/// of the start matches the "still happening this evening" intuition
+/// without needing migration of existing events. Returns
+/// `DateTime(2099)` when neither end nor start exists — preserving
+/// the sortable-sentinel behavior date-less drafts have always had.
+DateTime resolveEventEnd(Map<String, dynamic> data) {
+  final endTs = data['endDate'];
+  if (endTs is Timestamp) {
+    final endDay = endTs.toDate();
+    final endTimeStr = data['endTime'] as String?;
+    if (endTimeStr != null) {
+      final parts = endTimeStr.split(':');
+      if (parts.length == 2) {
+        final h = int.tryParse(parts[0]);
+        final m = int.tryParse(parts[1]);
+        if (h != null && m != null) {
+          return DateTime(endDay.year, endDay.month, endDay.day, h, m);
+        }
+      }
+    }
+    return DateTime(endDay.year, endDay.month, endDay.day, 23, 59);
+  }
+  final ts = data['date'];
+  if (ts is! Timestamp) return DateTime(2099);
+  final start = ts.toDate();
+  return DateTime(start.year, start.month, start.day, 23, 59, 59);
+}
+
 Widget debugLabel(String label) => Padding(
       padding: const EdgeInsets.all(10),
       child: Text(label, style: const TextStyle(fontSize: 10, color: AppColors.muted), textAlign: TextAlign.center),

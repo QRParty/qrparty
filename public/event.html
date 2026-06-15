@@ -558,6 +558,10 @@
       <div>
         <div class="detail-label">Date &amp; Time</div>
         <div class="detail-value" id="event-date"></div>
+        <!-- "Ends ..." subline. Hidden until JS resolves an endDate
+             from the Firestore doc; legacy events without endDate
+             never show it and read exactly as they did before. -->
+        <div class="detail-value" id="event-end" style="display:none; opacity:0.75; font-size:0.9em; margin-top:4px;"></div>
       </div>
     </div>
     <div class="detail-row">
@@ -1044,6 +1048,41 @@
       + ' · ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   }
 
+  // Resolves an event doc's end into a JS Date. Mirrors the Dart
+  // `resolveEventEnd` helper at lib/utils.dart so the web .ics
+  // export and on-page "Ends" label match what the app shows. Returns
+  // null when the host didn't set an `endDate` — callers fall back to
+  // end-of-day on the start (the same default the Dart helper uses).
+  function resolveEventEndDate(d) {
+    var endTs = d && d.endDate;
+    if (!endTs) return null;
+    var endDay = endTs.toDate ? endTs.toDate() : new Date(endTs);
+    var endTime = d.endTime;
+    if (endTime && typeof endTime === 'string') {
+      var parts = endTime.split(':');
+      if (parts.length === 2) {
+        var h = parseInt(parts[0], 10);
+        var m = parseInt(parts[1], 10);
+        if (!isNaN(h) && !isNaN(m)) {
+          return new Date(endDay.getFullYear(), endDay.getMonth(), endDay.getDate(), h, m);
+        }
+      }
+    }
+    // endDate without endTime → 23:59 on the endDate, matching the
+    // Dart helper.
+    return new Date(endDay.getFullYear(), endDay.getMonth(), endDay.getDate(), 23, 59);
+  }
+
+  // Formats a raw JS Date with the same shape as formatDate(ts).
+  // Used for the "Ends ..." line, which receives an already-resolved
+  // Date (computed by resolveEventEndDate above), not a Firestore
+  // Timestamp.
+  function formatJsDate(d) {
+    if (!d) return '';
+    return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+      + ' · ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  }
+
   function toIcsDate(date) {
     function pad(n) { return n < 10 ? '0' + n : '' + n; }
     return date.getUTCFullYear()
@@ -1060,9 +1099,23 @@
   // mobile (deep-link auto-handoff) or the web composer on desktop. Use as
   // a fallback for users whose default calendar isn't tied to .ics
   // (Android Gmail accounts in particular).
-  function googleCalendarUrl(title, startDate, location, description) {
+  // Resolves the calendar end for both .ics + Google Calendar export.
+  // Order of preference: explicit endDate (already resolved into a
+  // JS Date by the caller) > end-of-day on the start > the legacy
+  // +2h heuristic. Previously the calendar entry hardcoded +2h
+  // regardless of host intent — multi-day events and short events
+  // both rendered as 2h blocks. Now hosts who set an explicit end
+  // get exactly that, and hosts who don't get a "today, until
+  // 11:59pm" entry instead of a misleading 2h block.
+  function calendarEnd(startDate, explicitEnd) {
+    if (explicitEnd) return explicitEnd;
+    if (!startDate) return null;
+    return new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate(), 23, 59, 59);
+  }
+
+  function googleCalendarUrl(title, startDate, location, description, endDate) {
     var start = startDate;
-    var end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+    var end = calendarEnd(start, endDate);
     var params =
       'action=TEMPLATE'
       + '&text='     + encodeURIComponent(title || 'Event')
@@ -1072,9 +1125,9 @@
     return 'https://calendar.google.com/calendar/render?' + params;
   }
 
-  function downloadIcs(eventId, title, startDate, location, description) {
+  function downloadIcs(eventId, title, startDate, location, description, endDate) {
     var start = startDate;
-    var end   = new Date(start.getTime() + 2 * 60 * 60 * 1000); // default 2h duration
+    var end   = calendarEnd(start, endDate);
     var ics = [
       'BEGIN:VCALENDAR',
       'VERSION:2.0',
@@ -1195,6 +1248,21 @@
 
         // Date & location
         setText('event-date',     formatDate(d.date));
+        // Optional "Ends ..." subline. Reveals only when the host set
+        // endDate; legacy events without the field stay visually
+        // identical to before. The same resolved JS Date is reused
+        // below to feed the .ics + GCal export so the page label and
+        // the calendar entry can't drift.
+        var resolvedEndDate = resolveEventEndDate(d);
+        var endEl = document.getElementById('event-end');
+        if (endEl) {
+          if (resolvedEndDate) {
+            endEl.textContent = 'Ends ' + formatJsDate(resolvedEndDate);
+            endEl.style.display = 'block';
+          } else {
+            endEl.style.display = 'none';
+          }
+        }
         setText('event-location', d.location || 'Location TBD');
 
         var directionsBtn = document.getElementById('directions-btn');
@@ -1213,15 +1281,15 @@
         var gcalLink = document.getElementById('gcal-link');
         if (startDate) {
           calBtn.addEventListener('click', function() {
-            console.log('[QRParty] downloading ics for ' + (snap.id) + ' starting ' + startDate.toISOString());
+            console.log('[QRParty] downloading ics for ' + (snap.id) + ' starting ' + startDate.toISOString() + ' ending ' + (resolvedEndDate ? resolvedEndDate.toISOString() : '(fallback EOD)'));
             try {
-              downloadIcs(snap.id, d.title || 'Event', startDate, d.location || '', d.description || '');
+              downloadIcs(snap.id, d.title || 'Event', startDate, d.location || '', d.description || '', resolvedEndDate);
             } catch (e) {
               console.error('[QRParty] ics download failed:', e);
             }
           });
           if (gcalLink) {
-            gcalLink.href = googleCalendarUrl(d.title || 'Event', startDate, d.location || '', d.description || '');
+            gcalLink.href = googleCalendarUrl(d.title || 'Event', startDate, d.location || '', d.description || '', resolvedEndDate);
             gcalLink.style.display = 'block';
           }
         } else {

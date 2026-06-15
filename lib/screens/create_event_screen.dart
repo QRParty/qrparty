@@ -113,6 +113,14 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   EventType? selectedEventType;
   DateTime? selectedDate;
   TimeOfDay? selectedTime;
+  // Optional end-of-event date + time. Required when [_isPublic] is
+  // true so a public event doesn't linger on the Explore feed past
+  // its actual finish; otherwise legacy / private events keep working
+  // via the end-of-day fallback in [resolveEventEnd]. Persisted as
+  // `'endDate'` (Timestamp) + `'endTime'` (String "HH:MM") fields on
+  // the event doc, mirroring the start-side `date` + `time` pair.
+  DateTime? selectedEndDate;
+  TimeOfDay? selectedEndTime;
   late TextEditingController titleController;
   final descController = TextEditingController();
   final locationController = TextEditingController();
@@ -330,6 +338,21 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         final parts = timeStr.split(':');
         if (parts.length == 2) selectedTime = TimeOfDay(hour: int.parse(parts[0]), minute: int.parse(parts[1]));
       }
+      // Optional end-date hydration. Saved drafts may or may not have
+      // these fields — older drafts predate the feature and existing
+      // events without endDate fall back to end-of-day at the comparator
+      // layer, so a missing field is fine.
+      final endTs = d['endDate'] as Timestamp?;
+      if (endTs != null) selectedEndDate = endTs.toDate();
+      final endTimeStr = d['endTime'] as String?;
+      if (endTimeStr != null) {
+        final parts = endTimeStr.split(':');
+        if (parts.length == 2) {
+          final h = int.tryParse(parts[0]);
+          final m = int.tryParse(parts[1]);
+          if (h != null && m != null) selectedEndTime = TimeOfDay(hour: h, minute: m);
+        }
+      }
       final typeName = d['eventType'] as String?;
       if (typeName != null) {
         final migrated = migrateEventTypeName(typeName);
@@ -488,6 +511,8 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         'locationDetail': locationDetailController.text.trim(),
         'date': selectedDate != null ? Timestamp.fromDate(selectedDate!) : null,
         'time': selectedTime != null ? '${selectedTime!.hour}:${selectedTime!.minute}' : null,
+        'endDate': selectedEndDate != null ? Timestamp.fromDate(selectedEndDate!) : null,
+        'endTime': selectedEndTime != null ? '${selectedEndTime!.hour}:${selectedEndTime!.minute}' : null,
         'eventType': _resolvedEventTypeName,
         'eventEmoji': selectedEventType?.emoji,
         'listType': listType,
@@ -605,6 +630,67 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   Future<void> _pickTime() async {
     final picked = await showTimePicker(context: context, initialTime: TimeOfDay.now());
     if (picked != null) { setState(() => selectedTime = picked); _scheduleDraftSave(); }
+  }
+
+  /// Picker pair for the optional event end. Mirrors [_pickDate] /
+  /// [_pickTime]: both pickers default to start + 2h on first open so
+  /// a host who just taps through gets a sensible end without having
+  /// to compute the wraparound themselves. The 2h default matches
+  /// the legacy hardcoded duration that event.html's .ics export
+  /// previously assumed.
+  Future<void> _pickEndDate() async {
+    final base = selectedDate ?? DateTime.now();
+    final defaultEnd = base.add(const Duration(hours: 2));
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: selectedEndDate ?? DateTime(defaultEnd.year, defaultEnd.month, defaultEnd.day),
+      firstDate: selectedDate ?? DateTime.now(),
+      lastDate: DateTime(2027),
+      helpText: 'When does the event end?',
+    );
+    if (picked != null) {
+      setState(() => selectedEndDate = picked);
+      _scheduleDraftSave();
+    }
+  }
+
+  Future<void> _pickEndTime() async {
+    // Default to start time + 2h. TimeOfDay arithmetic wraps via
+    // total-minutes to handle hour/minute carry cleanly (e.g.
+    // start 23:30 → end 01:30 next day).
+    TimeOfDay initial;
+    if (selectedEndTime != null) {
+      initial = selectedEndTime!;
+    } else if (selectedTime != null) {
+      final mins = (selectedTime!.hour * 60 + selectedTime!.minute + 120) % (24 * 60);
+      initial = TimeOfDay(hour: mins ~/ 60, minute: mins % 60);
+    } else {
+      initial = TimeOfDay.now();
+    }
+    final picked = await showTimePicker(context: context, initialTime: initial);
+    if (picked != null) {
+      setState(() => selectedEndTime = picked);
+      _scheduleDraftSave();
+    }
+  }
+
+  /// Combines the picked end date + time into a comparable DateTime.
+  /// Returns null when either piece is missing. Used by the save
+  /// validation guard to ensure end is strictly after start.
+  DateTime? get _combinedEndDateTime {
+    if (selectedEndDate == null) return null;
+    final h = selectedEndTime?.hour ?? 23;
+    final m = selectedEndTime?.minute ?? 59;
+    return DateTime(selectedEndDate!.year, selectedEndDate!.month, selectedEndDate!.day, h, m);
+  }
+
+  /// Same shape for the start so the end-after-start check has a
+  /// matching pair to compare. Returns null if no start is set.
+  DateTime? get _combinedStartDateTime {
+    if (selectedDate == null) return null;
+    final h = selectedTime?.hour ?? 0;
+    final m = selectedTime?.minute ?? 0;
+    return DateTime(selectedDate!.year, selectedDate!.month, selectedDate!.day, h, m);
   }
 
   Future<void> _pickRsvpDeadline() async {
@@ -1246,6 +1332,65 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                 ),
               ],
             ),
+            const SizedBox(height: 12),
+            // Optional end date / time. Required when [_isPublic] is
+            // true so public events don't linger on the Explore feed
+            // past their finish; otherwise omitting it falls back to
+            // end-of-day on the start (see resolveEventEnd). Label
+            // color flips to purple when public is on so the host
+            // sees at a glance that the pair has become required.
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8, left: 4),
+              child: Row(children: [
+                Icon(Icons.event_available_outlined, size: 14, color: _isPublic ? _purple : _muted),
+                const SizedBox(width: 6),
+                Text(
+                  _isPublic ? 'End date & time (required for public events)' : 'End date & time (optional)',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: _isPublic ? _purple : _muted),
+                ),
+              ]),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: _glowWrap(GestureDetector(
+                    onTap: _pickEndDate,
+                    child: _dateTimeBox(
+                      selectedEndDate != null
+                          ? '${selectedEndDate!.month}/${selectedEndDate!.day}/${selectedEndDate!.year}'
+                          : 'Pick End Date',
+                      Icons.calendar_today_outlined,
+                    ),
+                  )),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _glowWrap(GestureDetector(
+                    onTap: _pickEndTime,
+                    child: _dateTimeBox(
+                      selectedEndTime != null ? selectedEndTime!.format(context) : 'Pick End Time',
+                      Icons.access_time_outlined,
+                    ),
+                  )),
+                ),
+                if (selectedEndDate != null || selectedEndTime != null) ...[
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        selectedEndDate = null;
+                        selectedEndTime = null;
+                      });
+                      _scheduleDraftSave();
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: Icon(Icons.close, size: 18, color: _muted),
+                    ),
+                  ),
+                ],
+              ],
+            ),
             const SizedBox(height: 16),
             _fieldLabel('Location'),
             _buildLocationField(),
@@ -1607,6 +1752,13 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                 if (titleController.text.trim().isEmpty) missing.add('a title');
                 if (selectedEventType == null) missing.add('an event type');
                 if (selectedDate == null) missing.add('a date');
+                // Public events MUST have an end so they don't linger
+                // on the Explore feed past their real finish. Private
+                // events still rely on the end-of-day fallback in
+                // resolveEventEnd.
+                if (_isPublic && (selectedEndDate == null || selectedEndTime == null)) {
+                  missing.add('an end date and time (public events need one so they don\'t stay listed forever)');
+                }
                 if (missing.isNotEmpty) {
                   final list = missing.length == 1
                       ? missing.first
@@ -1616,6 +1768,27 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                     content: Text('Please add $list before generating a QR code.'),
                     backgroundColor: AppColors.gold,
+                    behavior: SnackBarBehavior.floating,
+                    duration: const Duration(seconds: 4),
+                  ));
+                  return;
+                }
+                // End-after-start guard. Only fires when both pieces of
+                // the end pair are set — partial end (just a date, no
+                // time) skips this check and falls back to end-of-day
+                // at resolveEventEnd time. The combined-start helper
+                // treats a missing start time as 00:00 so an end set
+                // for the same calendar day with no end time chosen
+                // also passes the "strictly after" comparison only when
+                // a meaningful end exists.
+                final startCombined = _combinedStartDateTime;
+                final endCombined = _combinedEndDateTime;
+                if (startCombined != null
+                    && endCombined != null
+                    && !endCombined.isAfter(startCombined)) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: const Text('End time must be after the start time.'),
+                    backgroundColor: Colors.redAccent,
                     behavior: SnackBarBehavior.floating,
                     duration: const Duration(seconds: 4),
                   ));
@@ -1653,6 +1826,8 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                     'locationDetail': locationDetailController.text.trim(),
                     'date': selectedDate != null ? Timestamp.fromDate(selectedDate!) : null,
                     'time': selectedTime != null ? '${selectedTime!.hour}:${selectedTime!.minute}' : null,
+                    'endDate': selectedEndDate != null ? Timestamp.fromDate(selectedEndDate!) : null,
+                    'endTime': selectedEndTime != null ? '${selectedEndTime!.hour}:${selectedEndTime!.minute}' : null,
                     'eventType': _resolvedEventTypeName,
                     'eventEmoji': selectedEventType?.emoji,
                     'hostId': user.uid,

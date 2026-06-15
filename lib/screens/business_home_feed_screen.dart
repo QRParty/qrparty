@@ -470,7 +470,12 @@ class _BusinessHomeFeedScreenState extends State<BusinessHomeFeedScreen>
       final eventStart = _resolveEventStart(calendarDate, data['time'] as String?);
       final sortDate = calendarDate ?? DateTime(2099);
       final isDraft = (data['isDraft'] as bool?) ?? false;
-      final isPast = !isDraft && eventStart.isBefore(now);
+      // Past/Upcoming bucketing routes through the shared
+      // resolveEventEnd so multi-hour parties stay Upcoming until
+      // they actually finish; legacy events without an explicit
+      // `endDate` fall back to end-of-day of the start date (see
+      // lib/utils.dart).
+      final isPast = !isDraft && resolveEventEnd(data).isBefore(now);
       final typeName = migrateEventTypeName(data['eventType'] as String?);
       final matchedType = eventTypes.firstWhere((t) => t.name == typeName, orElse: () => eventTypes.last);
       final wishlist = (data['wishlist'] as List<dynamic>? ?? []);

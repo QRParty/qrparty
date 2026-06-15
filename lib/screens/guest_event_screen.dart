@@ -89,6 +89,13 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
 
   late String eventTitle;
   late String eventDate;
+  /// Pre-formatted `Ends: Month Day, Year · h:mm AM/PM` string,
+  /// populated by [_populateFromEventData] from `endDate` + `endTime`
+  /// when a host set them. Empty string means no explicit end was
+  /// configured — the Info-tab date row hides the "Ends:" line in
+  /// that case so existing events without the new fields read
+  /// identically to before.
+  String _eventEndLabel = '';
   late String eventLocation;
   late String eventEmoji;
   late Color eventColor;
@@ -1076,13 +1083,10 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
     eventLocation = (data['location'] as String?) ?? 'Location TBD';
     _eventDescription = (data['description'] as String?)?.trim() ?? '';
 
-    final ts = data['date'];
-    if (ts is Timestamp) {
-      final dt = ts.toDate();
-      const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-      final timeStr = (data['time'] as String?) ?? '';
+    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    String formatDateAndTime(DateTime dt, String? timeStr) {
       String formattedTime = '';
-      if (timeStr.isNotEmpty) {
+      if (timeStr != null && timeStr.isNotEmpty) {
         final parts = timeStr.split(':');
         final hour = int.tryParse(parts[0]) ?? 0;
         final minute = int.tryParse(parts.length > 1 ? parts[1] : '0') ?? 0;
@@ -1090,14 +1094,34 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         final h12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
         formattedTime = ' · $h12:${minute.toString().padLeft(2, '0')} $period';
       }
-      eventDate = '${months[dt.month - 1]} ${dt.day}, ${dt.year}$formattedTime';
+      return '${months[dt.month - 1]} ${dt.day}, ${dt.year}$formattedTime';
+    }
+
+    final ts = data['date'];
+    if (ts is Timestamp) {
+      eventDate = formatDateAndTime(ts.toDate(), data['time'] as String?);
     } else {
       eventDate = 'Date TBD';
     }
 
-    final eventTs = data['date'];
-    if (eventTs is Timestamp) {
-      eventHasEnded = DateTime.now().isAfter(eventTs.toDate());
+    // Optional end-date label — shown as a "Ends: …" sub-line on the
+    // Info tab. Only populated when the host explicitly set `endDate`
+    // (Public events require this, Private events don't). The empty-
+    // string sentinel keeps the date row identical to before for
+    // legacy events without these fields.
+    final endTs = data['endDate'];
+    if (endTs is Timestamp) {
+      _eventEndLabel = formatDateAndTime(endTs.toDate(), data['endTime'] as String?);
+    } else {
+      _eventEndLabel = '';
+    }
+
+    // Past/Ended bucketing — routes through the shared resolveEventEnd
+    // so parties still in progress don't surface the "This event has
+    // ended" banner mid-celebration. Falls back to end-of-day on the
+    // start date when no explicit `endDate` is set (see utils.dart).
+    if (ts is Timestamp) {
+      eventHasEnded = resolveEventEnd(data).isBefore(DateTime.now());
     } else {
       eventHasEnded = false;
     }
@@ -1705,10 +1729,23 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                   decoration: BoxDecoration(color: _card, borderRadius: BorderRadius.circular(16), border: Border.all(color: _border)),
                   child: Column(
                     children: [
-                      Row(children: [
+                      Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                         Container(width: 36, height: 36, decoration: BoxDecoration(color: eventColor.withOpacity(0.1), borderRadius: BorderRadius.circular(10)), child: Icon(Icons.calendar_today_outlined, size: 16, color: eventColor)),
                         const SizedBox(width: 12),
-                        Text(eventDate, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: _isDark ? Colors.white : AppColors.dark)),
+                        Expanded(child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(eventDate, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: _isDark ? Colors.white : AppColors.dark)),
+                            // "Ends:" subline — rendered only when the host
+                            // set an explicit endDate (Public events require
+                            // it). Quieter weight + muted color so it reads
+                            // as supporting metadata under the headline date.
+                            if (_eventEndLabel.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text('Ends: $_eventEndLabel', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: _muted)),
+                            ],
+                          ],
+                        )),
                       ]),
                       const SizedBox(height: 12),
                       const Divider(height: 1),

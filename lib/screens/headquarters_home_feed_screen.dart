@@ -307,9 +307,12 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
     final now = DateTime.now();
     for (final e in _events) {
       if ((e['isDraft'] as bool?) ?? false) continue;
-      final ts = e['date'] as Timestamp?;
-      if (ts == null) continue;
-      if (ts.toDate().isBefore(now)) continue;
+      // resolveEventEnd reads endDate/endTime when set, otherwise
+      // falls back to end-of-day on the start date — same shared
+      // logic as the personal and business feeds. The _events list
+      // here is the raw Firestore data (see _eventsSub), so passing
+      // `e` directly works.
+      if (resolveEventEnd(e).isBefore(now)) continue;
       final yes   = (e['yes']   as num?)?.toInt() ?? 0;
       final maybe = (e['maybe'] as num?)?.toInt() ?? 0;
       final no    = (e['no']    as num?)?.toInt() ?? 0;
@@ -389,8 +392,11 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
       if ((e['isArchived'] as bool?) ?? false) return false;
       final ts = e['date'] as Timestamp?;
       if (ts == null) return false;
-      final eventStart = _resolveEventStart(ts.toDate(), e['time'] as String?);
-      return !eventStart.isBefore(now);
+      // Mirror the _zeroRsvpUpcoming change above — route through
+      // the shared resolveEventEnd so in-progress events stay in
+      // the Hosted Events upcoming list until they finish, not
+      // until they start.
+      return !resolveEventEnd(e).isBefore(now);
     }).toList()
       ..sort((a, b) {
         final ad = (a['date'] as Timestamp).toDate();
@@ -404,24 +410,6 @@ class _HeadquartersHomeFeedScreenState extends State<HeadquartersHomeFeedScreen>
       ...upcoming.map(_buildHostedEventCard),
       const SizedBox(height: 18),
     ];
-  }
-
-  /// Combines `date` (midnight Timestamp) with the `time` string
-  /// ("HH:MM") into the actual event-start DateTime. Mirrors the
-  /// helper in business_home_feed_screen.dart so a same-day event
-  /// without a specific start time stays in Upcoming until midnight.
-  DateTime _resolveEventStart(DateTime calendarDate, String? timeStr) {
-    if (timeStr != null) {
-      final parts = timeStr.split(':');
-      if (parts.length == 2) {
-        final h = int.tryParse(parts[0]);
-        final m = int.tryParse(parts[1]);
-        if (h != null && m != null) {
-          return DateTime(calendarDate.year, calendarDate.month, calendarDate.day, h, m);
-        }
-      }
-    }
-    return DateTime(calendarDate.year, calendarDate.month, calendarDate.day, 23, 59, 59);
   }
 
   Widget _buildEventsSectionHeader(int count) => Padding(

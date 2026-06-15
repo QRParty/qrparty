@@ -303,7 +303,12 @@ class _HomeFeedScreenState extends State<HomeFeedScreen> {
           // date-less events sort last via the DateTime(2099) sentinel.
           final sortDate = calendarDate ?? DateTime(2099);
           final isDraft = (data['isDraft'] as bool?) ?? false;
-          final isPast = !isDraft && eventStart.isBefore(now);
+          // Past/Upcoming bucketing routes through the shared
+          // resolveEventEnd so multi-hour parties stay Upcoming
+          // until they actually finish. End falls back to end-of-day
+          // of the start date when no explicit `endDate` is set —
+          // see lib/utils.dart for the field contract.
+          final isPast = !isDraft && resolveEventEnd(data).isBefore(now);
           debugPrint('[HomeFeed]   doc=${doc.id} title="${data['title']}" date=$calendarDate time=${data['time']} eventStart=$eventStart isPast=$isPast isDraft=$isDraft accountType=${data['accountType']}');
           final typeName = (data['eventType'] as String?) ?? '';
           final matchedType = eventTypes.firstWhere((t) => t.name == typeName, orElse: () => eventTypes.last);
