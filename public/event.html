@@ -496,7 +496,156 @@
       border-top: 1px solid var(--border);
     }
     .page-footer a { color: var(--purple); text-decoration: none; font-weight: 700; }
+
+    /* ── MOBILE BRIDGE ──────────────────────────────────────────
+       Shown only to iOS / Android visitors in place of the full
+       event-page. The desktop event flow is untouched — these
+       rules only style the bridge container that the resolveEvent
+       success handler reveals when __qrpIsMobile is true. The
+       demo banner is hidden on mobile via the .m-is-mobile class
+       (stamped on documentElement by the head-script UA detect)
+       so the bridge owns the full viewport without competing
+       chrome above it. */
+    .m-is-mobile .demo-banner { display: none; }
+    #mobile-bridge {
+      display: none;
+      max-width: 480px;
+      margin: 0 auto;
+      padding: 20px 18px 56px;
+    }
+    .m-hero {
+      position: relative;
+      border-radius: 22px;
+      padding: 36px 24px 28px;
+      margin-bottom: 16px;
+      text-align: center;
+      background:
+        radial-gradient(circle at 85% 10%, rgba(156,127,212,.50) 0%, transparent 55%),
+        radial-gradient(circle at 10% 110%, rgba(110,76,173,.45) 0%, transparent 60%),
+        linear-gradient(145deg, #3B2F68 0%, #2B2A4E 50%, #252641 100%);
+      border: 1px solid rgba(156,127,212,.22);
+      box-shadow: 0 18px 48px rgba(110,76,173,.28), inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .m-emoji {
+      width: 64px; height: 64px; border-radius: 18px;
+      background: rgba(255,255,255,.12);
+      border: 1px solid rgba(255,255,255,.18);
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 34px; margin-bottom: 16px;
+      box-shadow: 0 6px 18px rgba(0,0,0,.25);
+    }
+    .m-tagline {
+      font-size: 11px; font-weight: 800; letter-spacing: 2.2px;
+      color: var(--purple); margin-bottom: 10px;
+    }
+    .m-title {
+      font-family: 'Fredoka One', cursive;
+      font-size: clamp(26px, 7vw, 38px); line-height: 1.1;
+      color: white; margin-bottom: 6px;
+      text-shadow: 0 2px 12px rgba(0,0,0,.25);
+    }
+    .m-host {
+      font-size: 14px; font-weight: 600;
+      color: rgba(255,255,255,.62); letter-spacing: .2px;
+    }
+    .m-code-card {
+      background: linear-gradient(180deg, var(--card-raise) 0%, var(--card) 100%);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 22px 22px 18px;
+      margin-bottom: 16px;
+      text-align: center;
+      box-shadow: 0 8px 24px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .m-code-label {
+      font-size: 11px; font-weight: 800; text-transform: uppercase;
+      letter-spacing: 1.6px; color: var(--muted); margin-bottom: 10px;
+    }
+    .m-code {
+      font-family: 'Fredoka One', cursive;
+      font-size: clamp(40px, 13vw, 56px);
+      letter-spacing: 6px;
+      color: var(--gold);
+      margin-bottom: 14px;
+      user-select: all;
+      -webkit-user-select: all;
+    }
+    .m-copy-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    #m-copy-status {
+      font-size: 12.5px; color: var(--muted); font-weight: 600;
+      flex: 1; text-align: left;
+    }
+    .m-copy-btn {
+      padding: 9px 14px;
+      background: rgba(156,127,212,.18);
+      border: 1px solid rgba(156,127,212,.45);
+      color: var(--purple);
+      border-radius: 10px;
+      font: 800 13px 'Nunito', sans-serif;
+      cursor: pointer; letter-spacing: .3px;
+      transition: transform .15s, background .15s;
+    }
+    .m-copy-btn:hover  { background: rgba(156,127,212,.30); }
+    .m-copy-btn:active { transform: translateY(1px); }
+    .m-download-btn {
+      display: flex; align-items: center; justify-content: center;
+      gap: 8px;
+      padding: 18px;
+      background: var(--gold);
+      color: #1A1A1A;
+      border-radius: 16px;
+      text-decoration: none;
+      font: 800 16px 'Nunito', sans-serif;
+      letter-spacing: .3px;
+      box-shadow: 0 12px 28px rgba(200,146,42,.36), inset 0 1px 0 rgba(255,255,255,.25);
+      margin-bottom: 18px;
+    }
+    .m-download-btn:hover  { filter: brightness(1.06); }
+    .m-download-btn:active { transform: translateY(1px); }
+    .m-helper {
+      font-size: 13px; line-height: 1.6; text-align: center;
+      color: var(--muted); padding: 0 12px;
+    }
+    .m-helper-code {
+      font-family: 'Fredoka One', cursive;
+      color: var(--gold);
+      letter-spacing: 2px;
+      font-size: 14px;
+      margin-left: 2px;
+    }
   </style>
+  <!-- ── MOBILE / DESKTOP UA DETECT ────────────────────────────────
+       Runs in <head> BEFORE the body parses so the resolveEvent
+       success handler can choose between the full desktop event
+       page and the mobile "open in app" bridge with no
+       intermediate render flash. Mirrors the same heuristic
+       /download (download.html) uses, including the iPad-on-iOS-
+       13+ rescue (Macintosh UA + ontouchend). Stamps a class on
+       documentElement so the demo banner can also self-hide on
+       mobile via CSS rather than a JS race after parse. -->
+  <script>
+    (function () {
+      try {
+        var ua = navigator.userAgent || '';
+        var isIOS = /iPad|iPhone|iPod/.test(ua) ||
+                    (/Macintosh/.test(ua) && typeof document !== 'undefined' && 'ontouchend' in document);
+        var isAndroid = /Android/i.test(ua);
+        window.__qrpIsMobile  = isIOS || isAndroid;
+        window.__qrpIsIOS     = isIOS;
+        window.__qrpIsAndroid = isAndroid;
+        if (window.__qrpIsMobile) {
+          document.documentElement.classList.add('m-is-mobile');
+        }
+      } catch (e) {
+        window.__qrpIsMobile = false;
+      }
+    })();
+  </script>
   <!-- Google tag (gtag.js) -->
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-2MJ1C69EPC"></script>
   <script>
@@ -604,6 +753,39 @@
     <div id="list-items"></div>
   </div>
 
+</div>
+
+<!-- ── MOBILE BRIDGE ────────────────────────────────────────────
+     Shown to iOS / Android visitors instead of #event-page.
+     Populated by the resolveEvent success handler from the same
+     Firestore doc the desktop page reads, so title / host / emoji
+     come from the real event. The Smart App Banner above this
+     (injected in the bottom-of-body script) still fires — it's
+     the one path that opens the app directly when it's already
+     installed; this bridge is the fallback when it isn't.       -->
+<div id="mobile-bridge">
+  <div class="m-hero">
+    <div class="m-emoji" id="m-event-emoji">🎉</div>
+    <div class="m-tagline">YOU'RE INVITED</div>
+    <div class="m-title" id="m-event-title">Loading…</div>
+    <div class="m-host" id="m-event-host"></div>
+  </div>
+
+  <div class="m-code-card">
+    <div class="m-code-label">Your event code</div>
+    <div class="m-code" id="m-event-code">—</div>
+    <div class="m-copy-row">
+      <span id="m-copy-status">Tap to copy</span>
+      <button type="button" id="m-copy-btn" class="m-copy-btn">📋 Copy</button>
+    </div>
+  </div>
+
+  <a href="/download" class="m-download-btn">📲 Get QR Party</a>
+
+  <div class="m-helper">
+    Get the app, then your event opens automatically — or enter code
+    <span class="m-helper-code" id="m-helper-code"></span>
+  </div>
 </div>
 
 <!-- RSVP form modal -->
@@ -1233,6 +1415,73 @@
         var d = snap.data();
         console.log('[QRParty] title:', d.title);
 
+        // ── Mobile bridge branch ─────────────────────────────────
+        // iOS / Android visitors get a stripped "open in app" page
+        // instead of the full event/RSVP/wishlist UI. Desktop
+        // visitors skip this entire block and fall through to the
+        // existing render flow below. Decision was made in <head>
+        // (search for __qrpIsMobile) so we already know which way
+        // to go — no UA logic here.
+        if (window.__qrpIsMobile) {
+          var code = ((d.shortCode || '') + '').toUpperCase();
+          if (!code) code = (eventId || '').toUpperCase();
+          var emojiEl = document.getElementById('m-event-emoji');
+          var titleEl = document.getElementById('m-event-title');
+          var hostEl  = document.getElementById('m-event-host');
+          var codeEl  = document.getElementById('m-event-code');
+          var helperEl = document.getElementById('m-helper-code');
+          if (emojiEl) emojiEl.textContent = d.eventEmoji || '🎉';
+          if (titleEl) titleEl.textContent = d.title || 'Untitled Event';
+          if (hostEl)  hostEl.textContent  = 'Hosted by ' + (d.hostName || 'QR Party');
+          if (codeEl)  codeEl.textContent  = code || '—';
+          if (helperEl) helperEl.textContent = code || '';
+
+          // Auto-copy the code on load. Together with the app's
+          // _maybePromptFromClipboard (lifecycle resume hook in
+          // lib/main.dart) this lets a fresh install detect the
+          // code the moment the new app opens — the prompt asks
+          // "Open this event?" with the code already filled in.
+          // Many mobile browsers (Safari especially) require a
+          // user gesture for clipboard writes, so on failure we
+          // surface a visible Copy button as the fallback path.
+          function setCopyStatus(msg) {
+            var s = document.getElementById('m-copy-status');
+            if (s) s.textContent = msg;
+          }
+          function doCopy() {
+            if (!code) {
+              setCopyStatus('No code yet');
+              return;
+            }
+            try {
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(code).then(function () {
+                  setCopyStatus('Code copied ✓');
+                  console.log('[QRParty] bridge auto-copied code=' + code);
+                }).catch(function (e) {
+                  console.warn('[QRParty] clipboard write rejected:', e);
+                  setCopyStatus('Tap Copy to copy');
+                });
+              } else {
+                setCopyStatus('Tap Copy to copy');
+              }
+            } catch (e) {
+              console.warn('[QRParty] clipboard threw:', e);
+              setCopyStatus('Tap Copy to copy');
+            }
+          }
+          doCopy();
+          var copyBtn = document.getElementById('m-copy-btn');
+          if (copyBtn) copyBtn.addEventListener('click', doCopy);
+
+          document.title = (d.title || 'Event') + ' — QR Party';
+          hide('loading-state');
+          show('mobile-bridge');
+          console.log('[QRParty] mobile bridge rendered code=' + code);
+          return;
+        }
+
+        // ── Desktop rendering (unchanged from before) ────────────
         // Capture the doc reference + start the live RSVP-count listener
         // so the headcount display updates instantly on every submit
         // (both web and app sources).

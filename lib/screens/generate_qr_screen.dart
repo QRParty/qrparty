@@ -181,21 +181,33 @@ class _GenerateQRCodeScreenState extends State<GenerateQRCodeScreen> {
       final dir = await getTemporaryDirectory();
       final file = File('${dir.path}/qrparty_${_safeFilename()}.png');
       await file.writeAsBytes(bytes);
-      // Include the typeable URL in the share text so guests tapping
-      // the link inside Messages / WhatsApp / etc. land directly on
-      // the event page. The QR image still tags along for guests
-      // sharing the screenshot in print/photo contexts. If the
-      // shortCode hasn't resolved yet (rare — the share button is
-      // gated on QR render which depends on the same load), we fall
-      // back to the bare domain so the share sheet doesn't surface a
-      // half-formed URL.
-      final rsvpUrl = (_shortCode == null || _shortCode!.isEmpty)
-          ? 'partywithqr.com'
-          : 'partywithqr.com/event/${_shortCode!}';
-      final shareText =
-          "You're invited to ${widget.eventTitle} hosted by $_hostName! "
-          "RSVP here: $rsvpUrl\n"
-          "Download the app here: partywithqr.com/download";
+      // Lead with the app + code. The mobile web event page now
+      // routes iOS / Android visitors through a "Get QR Party" bridge
+      // (public/event.html's __qrpIsMobile branch) that auto-copies
+      // the code to their clipboard — the app's clipboard-detect on
+      // resume then surfaces an "Open this event?" prompt the moment
+      // they finish installing. So we surface the CODE prominently
+      // in the share text: even a guest who pastes the message into
+      // a non-clickable channel can type the code into the app's
+      // Enter Code dialog and reach the event.
+      //
+      // The URL still points to /event/<code> for guests who tap;
+      // their mobile browser hits the same bridge, desktop browsers
+      // get the full web RSVP page. If shortCode hasn't resolved
+      // yet (rare — share is gated on QR render which depends on
+      // the same load), fall through to a code-less invite that
+      // still gets the app into the guest's hands.
+      final hasCode = _shortCode != null && _shortCode!.isNotEmpty;
+      final code = hasCode ? _shortCode! : '';
+      final appUrl = hasCode
+          ? 'partywithqr.com/event/$code'
+          : 'partywithqr.com/download';
+      final shareText = hasCode
+          ? "You're invited to ${widget.eventTitle} hosted by $_hostName! 🎉\n"
+            "Open in QR Party with code: $code\n"
+            "Get the app: $appUrl"
+          : "You're invited to ${widget.eventTitle} hosted by $_hostName! 🎉\n"
+            "Get the app: $appUrl";
       // iOS requires sharePositionOrigin pointing at the share button's
       // global rect; without it the share sheet has nowhere to anchor
       // its popover and share_plus throws. Harmless on Android — the
