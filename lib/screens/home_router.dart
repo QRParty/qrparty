@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../utils.dart';
+import 'anonymous_guest_home.dart';
 import 'home_feed_screen.dart';
 import 'business_home_feed_screen.dart';
 import 'headquarters_home_feed_screen.dart';
@@ -29,6 +30,26 @@ class HomeRouter extends StatelessWidget {
         backgroundColor: Color(0xFFF8F7FC),
         body: Center(child: CircularProgressIndicator(color: AppColors.green)),
       );
+    }
+    // ── Anonymous guest guard ────────────────────────────────────
+    // Anonymous deep-link guests are scoped to their RSVP'd event(s)
+    // ONLY — no FAB, no Create Event flow, no Explore tab, no past
+    // events feed. AnonymousGuestHome resolves to one of:
+    //   • exactly 1 RSVP'd event → renders GuestEventScreen for it
+    //   • >1 RSVP'd events       → simple picker list
+    //   • 0 RSVP'd events        → Enter Code + Create Account fallback
+    //
+    // Signed-in (non-anonymous) users fall straight through to the
+    // existing accountType routing below — nothing about their flow
+    // changes. When a guest later upgrades via linkWithCredential in
+    // welcome_screen.dart, `isAnonymous` flips to false on the same
+    // User instance, but authStateChanges does NOT re-fire — so the
+    // MaterialApp.home stream stays put. HomeRouter is wrapped in
+    // that StreamBuilder upstream; the user has to navigate fresh
+    // (Welcome → Home via pushAndRemoveUntil) to escape this branch
+    // — which is exactly what _signUp / _login already do.
+    if (user.isAnonymous) {
+      return const AnonymousGuestHome();
     }
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance.collection('users').doc(user.uid).snapshots(),

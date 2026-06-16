@@ -88,7 +88,23 @@ service cloud.firestore {
     match /events/{eventId} {
       allow read: if eventId == 'demo-event' || eventId == 'pta-demo-event' || eventId == 'pgms-pta-demo' || isSignedIn();
 
+      // Anonymous deep-link guests sign in via signInAnonymously() so
+      // they can read events + RSVP without creating an account. They
+      // satisfy isSignedIn() and have a uid, which means without this
+      // extra guard they could create real events under a throwaway
+      // anon UID (defeating the host-account model). The client-side
+      // routing in HomeRouter already keeps anon users out of the
+      // create-event flow; this rule is defense-in-depth.
+      //
+      // The sign_in_provider claim is set by Firebase Auth to
+      // 'anonymous' for signInAnonymously() sessions and to the
+      // provider id ('password', 'google.com', etc.) for everyone else.
+      // After linkWithCredential upgrades an anon user to a real
+      // account (see welcome_screen.dart), the token re-issues with
+      // the new provider, so a guest who upgrades inside the same
+      // session can immediately create events without re-auth.
       allow create: if isSignedIn()
+        && request.auth.token.firebase.sign_in_provider != 'anonymous'
         && request.resource.data.hostId == request.auth.uid
         && request.resource.data.title is string
         && request.resource.data.title.size() > 0;

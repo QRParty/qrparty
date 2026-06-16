@@ -15,6 +15,7 @@ import 'picture_wall_screen.dart';
 import 'thank_you_screen.dart';
 import 'host_notifications_screen.dart';
 import 'home_feed_screen.dart';
+import 'welcome_screen.dart';
 
 // Flip to false to re-enable real Stripe checkout.
 const bool kTestingMode = false;
@@ -1629,6 +1630,19 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
         width: double.infinity,
         child: ElevatedButton(
           onPressed: () {
+            // Anonymous deep-link guests are scoped to this event —
+            // pushing them onto HomeFeedScreen would drop them into
+            // a feed they can't host events on and shouldn't be
+            // browsing. For anon: hop back to the Info tab so the
+            // banner self-hides (see _showDoneBanner), keeping the
+            // guest on the event with no escape into the full app.
+            // Signed-in users keep the original pushAndRemoveUntil
+            // → HomeFeedScreen behavior unchanged.
+            final isAnon = FirebaseAuth.instance.currentUser?.isAnonymous ?? false;
+            if (isAnon) {
+              _tabController.animateTo(0);
+              return;
+            }
             Navigator.pushAndRemoveUntil(
               context,
               MaterialPageRoute(builder: (_) => const HomeFeedScreen()),
@@ -1696,19 +1710,33 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
 
   Future<void> _completeOnboarding() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user != null) {
+    // Anonymous guests should never land here (the onboarding demo
+    // is for first-time signed-in users), but guard the navigation
+    // anyway in case widget.isOnboarding is ever forced on for an
+    // anon. We also skip the users/{uid} write because that doc
+    // doesn't exist for anon (and writing 'hasCompletedOnboarding'
+    // to it would silently create a throwaway profile).
+    final isAnon = user?.isAnonymous ?? false;
+    if (user != null && !isAnon) {
       await FirebaseFirestore.instance
           .collection('users')
           .doc(user.uid)
           .update({'hasCompletedOnboarding': true});
     }
-    if (mounted) {
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeFeedScreen()),
-        (_) => false,
-      );
+    if (!mounted) return;
+    if (isAnon) {
+      // Dismiss the onboarding banner without pushing HomeFeedScreen.
+      // Same idea as the All-Set button's anon branch — keep the
+      // guest on their event tabs rather than dropping them into
+      // the full feed.
+      setState(() => _showWelcome = false);
+      return;
     }
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const HomeFeedScreen()),
+      (_) => false,
+    );
   }
 
   Widget _buildInfoTab() {
@@ -2118,6 +2146,38 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                       ],
                     ),
                   ),
+                // ── "Who's coming" pill row ──────────────────────
+                // Live headcount per status. Mirrors the public web
+                // page (event.html's `.rsvp-card`) so the in-app
+                // detail screen surfaces the same Yes / Maybe / No
+                // information guests see on the web. _peopleFor sums
+                // adults + children + plus-ones with a 1-fallback for
+                // legacy docs missing those fields — counts are total
+                // PEOPLE not RSVP docs. Shown to every viewer (guest
+                // and signed-in alike) because it's just public event
+                // info; no gating.
+                const SizedBox(height: 18),
+                Container(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                  decoration: BoxDecoration(
+                    color: _card,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: _border),
+                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text("Who's coming",
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700,
+                            color: _isDark ? Colors.white : AppColors.dark)),
+                    const SizedBox(height: 12),
+                    Row(children: [
+                      Expanded(child: _comingPill('${_peopleFor('Yes')}', 'Going', AppColors.green)),
+                      const SizedBox(width: 8),
+                      Expanded(child: _comingPill('${_peopleFor('Maybe')}', 'Maybe', AppColors.gold)),
+                      const SizedBox(width: 8),
+                      Expanded(child: _comingPill('${_peopleFor('No')}', "Can't go", Colors.redAccent)),
+                    ]),
+                  ]),
+                ),
                 if (rsvpStatus != 'No' && rsvpStatus != 'Not Responded') ...[
                   const SizedBox(height: 16),
                   OutlinedButton.icon(
@@ -2201,12 +2261,89 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                   const SizedBox(height: 20),
                   _buildHostGuestList(),
                 ],
+                // ── Anonymous "host your own" nudge ────────────────
+                // Soft, brand-styled card pointing anon deep-link
+                // guests toward sign-up. Bottom of the Info tab so it
+                // never competes with the event details or the RSVP
+                // affordances — guests have to actually scroll to
+                // see it. Gated on `user.isAnonymous == true`; signed-
+                // in users never see this card. Sign-up routes to
+                // WelcomeScreen, which leads to the linkWithCredential
+                // path in _signUp/_login so the guest's anon UID +
+                // RSVP history carry forward into the upgraded account.
+                if (FirebaseAuth.instance.currentUser?.isAnonymous ?? false) ...[
+                  const SizedBox(height: 20),
+                  _buildHostYourOwnNudge(),
+                ],
                 const SizedBox(height: 20),
               ],
             ),
           ),
         ],
       ),
+    );
+  }
+
+  /// Soft anon-only nudge surfaced at the bottom of the Info tab.
+  /// Quiet purple card with the brand voice — never auto-triggers,
+  /// never blocks event info, only renders when [build] determines
+  /// the current user is anonymous (see the call site).
+  Widget _buildHostYourOwnNudge() {
+    final fg = _isDark ? Colors.white : AppColors.dark;
+    return Container(
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppColors.purple.withValues(alpha: 0.30), width: 1.4),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      child: Row(children: [
+        Container(
+          width: 40, height: 40,
+          decoration: BoxDecoration(
+            color: AppColors.purple.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: const Center(child: Icon(Icons.celebration_outlined, size: 20, color: AppColors.purple)),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Want to host your own?',
+                style: TextStyle(
+                  fontFamily: 'FredokaOne', fontSize: 15, color: fg, height: 1.1,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'Create a free account — your RSVP stays put.',
+                style: TextStyle(
+                  fontFamily: 'Nunito', fontSize: 12, color: _muted, height: 1.4,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 10),
+        TextButton(
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+          ),
+          style: TextButton.styleFrom(
+            backgroundColor: AppColors.purple,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          child: const Text('Sign up',
+              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, letterSpacing: 0.2)),
+        ),
+      ]),
     );
   }
 
@@ -4669,6 +4806,40 @@ class _GuestEventScreenState extends State<GuestEventScreen> with TickerProvider
                     ),
         ),
       ],
+    );
+  }
+
+  /// Larger, tinted pill used by the "Who's coming" row beneath the
+  /// RSVP question card. Mirrors the public web page's
+  /// `.rsvp-pill` look — big number on top, label below, full-color
+  /// type on a soft tint of the same color. No interactivity here
+  /// (unlike [_statBox]'s host-tap branch) since this surface is
+  /// purely informational for guests.
+  Widget _comingPill(String value, String label, Color accent) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 14),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: accent.withValues(alpha: 0.30), width: 1.4),
+      ),
+      child: Column(children: [
+        Text(
+          value,
+          style: TextStyle(
+            fontFamily: 'FredokaOne', fontSize: 28, color: accent, height: 1.0,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 11.5, fontWeight: FontWeight.w800, color: accent, letterSpacing: 0.3,
+          ),
+        ),
+      ]),
     );
   }
 
